@@ -78,7 +78,10 @@ func newFilePairEditor(window fyne.Window) *filePairEditor {
 	editor.addButton = widget.NewButton("Add file pair", editor.addPair)
 	editor.removeButton = widget.NewButton("Remove selected", editor.removeSelected)
 	editor.clearButton = widget.NewButton("Clear", editor.clear)
-	tableContainer := container.NewGridWrap(editor.table, fyne.NewSize(filePairColumnWidth*2+20, filePairTableHeight))
+	tableContainer := container.NewGridWrap(
+		fyne.NewSize(filePairColumnWidth*2+20, filePairTableHeight),
+		editor.table,
+	)
 	editor.box = container.NewBorder(
 		nil,
 		container.NewHBox(editor.addButton, editor.removeButton, editor.clearButton),
