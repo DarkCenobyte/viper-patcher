@@ -36,7 +36,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential curl pkg-config libgl1-mesa-dev xorg-dev
+          sudo apt-get install --yes build-essential curl pkg-config libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
       - run: go mod download
       - name: Build libzstd
         run: |
@@ -88,7 +88,7 @@ jobs:
           sudo apt-get install --yes curl gcc-multilib libc6-dev-i386 \
             libgl1-mesa-dev:i386 libx11-dev:i386 libxcursor-dev:i386 \
             libxrandr-dev:i386 libxinerama-dev:i386 libxi-dev:i386 \
-            libxxf86vm-dev:i386 libxkbcommon-dev:i386
+            libxxf86vm-dev:i386 libwayland-dev:i386 libxkbcommon-dev:i386
           printf '#!/bin/sh\nexec gcc -m32 "$@"\n' > "$RUNNER_TEMP/gcc-386"
           chmod +x "$RUNNER_TEMP/gcc-386"
       - run: go mod download
