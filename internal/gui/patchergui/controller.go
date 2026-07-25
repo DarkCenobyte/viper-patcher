@@ -3,16 +3,25 @@ package patchergui
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/DarkCenobyte/viper-patcher/assets"
+	"github.com/DarkCenobyte/viper-patcher/internal/gui/branding"
+	"github.com/DarkCenobyte/viper-patcher/internal/gui/nativedialog"
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
+)
+
+const (
+	patcherWindowWidth  = 860
+	patcherWindowHeight = 760
+	patcherLogoWidth    = 320
+	patcherLogoHeight   = 148
 )
 
 type patcherController struct {
@@ -27,13 +36,18 @@ type patcherController struct {
 	reverseButton   *widget.Button
 	selectPatch     *widget.Button
 	selectDirectory *widget.Button
+	logo            fyne.Resource
 }
 
 func newPatcherController(application fyne.App) *patcherController {
-	controller := &patcherController{state: &patcherState{}}
+	executablePath, _ := os.Executable()
+	controller := &patcherController{
+		state: &patcherState{},
+		logo:  loadPatcherLogo(executablePath),
+	}
 	controller.window = application.NewWindow("Viper Patcher")
 	controller.window.SetIcon(assets.AppIcon)
-	controller.window.Resize(fyne.NewSize(820, 640))
+	controller.window.Resize(fyne.NewSize(patcherWindowWidth, patcherWindowHeight))
 
 	controller.patchLabel = widget.NewLabel("No patch selected")
 	controller.patchLabel.Wrapping = fyne.TextWrapWord
@@ -55,6 +69,7 @@ func newPatcherController(application fyne.App) *patcherController {
 	controller.selectDirectory = widget.NewButton("Select target folder", controller.chooseTargetDirectory)
 	controller.selectDirectory.Importance = widget.MediumImportance
 	controller.window.SetContent(controller.buildContent())
+	controller.selectAdjacentPatch(executablePath)
 	return controller
 }
 
@@ -77,11 +92,13 @@ func (controller *patcherController) buildContent() fyne.CanvasObject {
 		"Actions are enabled only when every file matches the required hash and permission mode.",
 		container.NewVBox(controller.status, controller.progressBar, container.NewGridWithColumns(2, controller.patchButton, controller.reverseButton)),
 	)
+	header := container.NewVBox(
+		branding.NewLogo(controller.logo, fyne.NewSize(patcherLogoWidth, patcherLogoHeight)),
+		widget.NewLabelWithStyle("Apply a VIPR differential patch", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		widget.NewLabelWithStyle("The patch and installed files are snapshotted before native processing.", fyne.TextAlignCenter, fyne.TextStyle{}),
+	)
 	return container.NewBorder(
-		container.NewVBox(
-			widget.NewLabelWithStyle("Apply a VIPR differential patch", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-			widget.NewLabel("The patch and installed files are snapshotted before native processing."),
-		),
+		header,
 		nil,
 		nil,
 		nil,
@@ -90,54 +107,76 @@ func (controller *patcherController) buildContent() fyne.CanvasObject {
 }
 
 func (controller *patcherController) choosePatch() {
-	picker := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
+	selection := controller.state.Snapshot()
+	nativedialog.OpenFile(controller.window, nativedialog.FileOptions{
+		Title:       "Select VIPR patch",
+		InitialPath: selection.patchPath,
+		Extensions:  []string{".vipr"},
+	}, func(path string, err error) {
 		if err != nil {
 			dialog.ShowError(err, controller.window)
 			return
 		}
-		if reader == nil {
+		if path == "" {
 			return
 		}
-		path := reader.URI().Path()
-		if err := reader.Close(); err != nil {
-			dialog.ShowError(fmt.Errorf("close selected patch file: %w", err), controller.window)
-			return
-		}
-		parsed, digest, err := patch.OpenWithDigest(path)
-		if err != nil {
+		if err := controller.loadPatch(path); err != nil {
 			dialog.ShowError(err, controller.window)
-			return
 		}
-		if !controller.state.SetPatch(path, digest, parsed) {
-			return
-		}
-		controller.patchLabel.SetText(path)
-		if parsed.Header.Comment == "" {
-			controller.comment.SetText("This patch does not contain a comment.")
-		} else {
-			controller.comment.SetText(parsed.Header.Comment)
-		}
-		controller.validate()
-	}, controller.window)
-	picker.SetFilter(storage.NewExtensionFileFilter([]string{".vipr"}))
-	picker.Show()
+	})
 }
 
 func (controller *patcherController) chooseTargetDirectory() {
-	dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
+	selection := controller.state.Snapshot()
+	nativedialog.OpenDirectory(controller.window, nativedialog.DirectoryOptions{
+		Title:       "Select target folder",
+		InitialPath: selection.targetDirectory,
+	}, func(path string, err error) {
 		if err != nil {
 			dialog.ShowError(err, controller.window)
 			return
 		}
-		if uri == nil {
+		if path == "" {
 			return
 		}
-		if !controller.state.SetTargetDirectory(uri.Path()) {
+		if !controller.state.SetTargetDirectory(path) {
 			return
 		}
-		controller.directoryLabel.SetText(uri.Path())
+		controller.directoryLabel.SetText(path)
 		controller.validate()
-	}, controller.window).Show()
+	})
+}
+
+func (controller *patcherController) loadPatch(path string) error {
+	parsed, digest, err := patch.OpenWithDigest(path)
+	if err != nil {
+		return err
+	}
+	if !controller.state.SetPatch(path, digest, parsed) {
+		return fmt.Errorf("patch selection is locked while an operation is active")
+	}
+	controller.patchLabel.SetText(path)
+	if parsed.Header.Comment == "" {
+		controller.comment.SetText("This patch does not contain a comment.")
+	} else {
+		controller.comment.SetText(parsed.Header.Comment)
+	}
+	controller.validate()
+	return nil
+}
+
+func (controller *patcherController) selectAdjacentPatch(executablePath string) {
+	path, found, err := adjacentPatchPath(executablePath)
+	if err != nil {
+		controller.status.SetText("Could not inspect the application directory for an adjacent patch.")
+		return
+	}
+	if !found {
+		return
+	}
+	if err := controller.loadPatch(path); err != nil {
+		controller.status.SetText("The adjacent VIPR patch could not be opened.")
+	}
 }
 
 func (controller *patcherController) validate() {

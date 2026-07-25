@@ -80,8 +80,8 @@ jobs:
           ldflags="-s -w -X ${module}/internal/buildinfo.Version=${version} -X ${module}/internal/buildinfo.Commit=${GITHUB_SHA} -X ${module}/internal/buildinfo.BuildDate=${build_date}"
           package="viper-patcher_${version}_linux_${GOARCH}"
           mkdir -p "dist/${package}"
-          go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o "dist/${package}/creator" ./cmd/creator
-          go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o "dist/${package}/patcher" ./cmd/patcher
+          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "dist/${package}/creator" ./cmd/creator
+          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "dist/${package}/patcher" ./cmd/patcher
           cp README.md LICENSE "dist/${package}/"
           mkdir -p "dist/${package}/third-party-licenses"
           cp third_party/zstd/LICENSE third_party/zstd/COPYING "dist/${package}/third-party-licenses/"
@@ -139,8 +139,8 @@ jobs:
           ldflags="-s -w -X ${module}/internal/buildinfo.Version=${version} -X ${module}/internal/buildinfo.Commit=${GITHUB_SHA} -X ${module}/internal/buildinfo.BuildDate=${build_date}"
           package="viper-patcher_${version}_linux_386"
           mkdir -p "dist/${package}"
-          go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o "dist/${package}/creator" ./cmd/creator
-          go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o "dist/${package}/patcher" ./cmd/patcher
+          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "dist/${package}/creator" ./cmd/creator
+          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "dist/${package}/patcher" ./cmd/patcher
           cp README.md LICENSE "dist/${package}/"
           mkdir -p "dist/${package}/third-party-licenses"
           cp third_party/zstd/LICENSE third_party/zstd/COPYING "dist/${package}/third-party-licenses/"
@@ -170,7 +170,7 @@ jobs:
         run: |
           ./scripts/fetch-zstd.sh
           JOBS="$(sysctl -n hw.ncpu)" ./scripts/build-zstd.sh
-            - name: Build and package
+      - name: Build and package
         env:
           CGO_ENABLED: "1"
           GOOS: darwin
@@ -185,20 +185,9 @@ jobs:
           package_dir="$PWD/dist/${package}"
           build_dir="$RUNNER_TEMP/viper-patcher-macos"
           rm -rf "$build_dir"
-          mkdir -p "$build_dir"
-          mkdir -p "$package_dir"
-          go build \
-            -trimpath \
-            -tags vipr_static_zstd \
-            -ldflags "$ldflags" \
-            -o "$build_dir/creator" \
-            ./cmd/creator
-          go build \
-            -trimpath \
-            -tags vipr_static_zstd \
-            -ldflags "$ldflags" \
-            -o "$build_dir/patcher" \
-            ./cmd/patcher
+          mkdir -p "$build_dir" "$package_dir"
+          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "$build_dir/creator" ./cmd/creator
+          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "$build_dir/patcher" ./cmd/patcher
           root="$PWD"
           fyne_tool="$(go env GOPATH)/bin/fyne"
           icon="$root/assets/icon.png"
@@ -227,12 +216,8 @@ jobs:
           rm -rf "$build_dir"
           cp README.md LICENSE "$package_dir/"
           mkdir -p "$package_dir/third-party-licenses"
-          cp \
-            third_party/zstd/LICENSE \
-            third_party/zstd/COPYING \
-            "$package_dir/third-party-licenses/"
-          ./scripts/collect-go-licenses.sh \
-            "$package_dir/third-party-licenses/go-modules"
+          cp third_party/zstd/LICENSE third_party/zstd/COPYING "$package_dir/third-party-licenses/"
+          ./scripts/collect-go-licenses.sh "$package_dir/third-party-licenses/go-modules"
           tar -C dist -czf "dist/${package}.tar.gz" "$package"
       - uses: actions/upload-artifact@v7
         with:
@@ -413,9 +398,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
-          go build -trimpath -tags vipr_static_zstd -ldflags $ldflags -o "dist/$package/creator.exe" ./cmd/creator
+          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags $ldflags -o "dist/$package/creator.exe" ./cmd/creator
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go build -trimpath -tags vipr_static_zstd -ldflags $ldflags -o "dist/$package/patcher.exe" ./cmd/patcher
+          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags $ldflags -o "dist/$package/patcher.exe" ./cmd/patcher
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item README.md, LICENSE "dist/$package/"
           Copy-Item third_party/zstd/LICENSE, third_party/zstd/COPYING "dist/$package/third-party-licenses/"

@@ -10,7 +10,9 @@
 
 The release build statically links the exact libzstd 1.5.7 source downloaded by
 `scripts/fetch-zstd.*`. The resulting executables do not require libzstd to be
-installed on the user's system.
+installed on the user's system. GUI builds include the `migrated_fynedo` tag;
+this marks the completed Fyne single-goroutine migration and disables the legacy
+threading compatibility warning.
 
 ## Linux
 
@@ -46,8 +48,8 @@ Then use PowerShell:
 $env:CGO_ENABLED = "1"
 $env:GOARCH = "amd64"
 $env:CC = "C:\msys64\mingw64\bin\gcc.exe"
-go build -tags vipr_static_zstd -o dist/creator.exe ./cmd/creator
-go build -tags vipr_static_zstd -o dist/patcher.exe ./cmd/patcher
+go build -tags vipr_static_zstd,migrated_fynedo -o dist/creator.exe ./cmd/creator
+go build -tags vipr_static_zstd,migrated_fynedo -o dist/patcher.exe ./cmd/patcher
 ```
 
 Use `-Architecture x86`, `GOARCH=386`, and the `mingw32` compiler directory for
@@ -61,6 +63,13 @@ MSYS2 is installed elsewhere, pass its root explicitly:
 ```
 
 The same value can be provided through the `MSYS2_ROOT` environment variable.
+
+## Native file dialogs
+
+Windows uses the system PowerShell and .NET dialog APIs, while macOS uses
+`osascript`. Linux uses `zenity` when it is installed and automatically falls
+back to Fyne's built-in file dialog otherwise. No additional Go module or cgo
+dependency is required for these integrations.
 
 ## System libzstd development mode
 

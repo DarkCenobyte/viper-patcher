@@ -1,0 +1,8 @@
+[Details]
+Name = "Viper-Patcher Creator"
+ID = "io.github.darkcenobyte.viperpatcher.creator"
+Version = "0.2.0"
+Build = 1
+
+[Migrations]
+fyneDo = true

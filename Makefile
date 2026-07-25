@@ -21,14 +21,14 @@ build-zstd: fetch-zstd
 
 build: build-zstd
 	mkdir -p dist
-	CGO_ENABLED=1 $(GO) build -trimpath -tags vipr_static_zstd -ldflags '$(LDFLAGS)' -o dist/creator ./cmd/creator
-	CGO_ENABLED=1 $(GO) build -trimpath -tags vipr_static_zstd -ldflags '$(LDFLAGS)' -o dist/patcher ./cmd/patcher
+	CGO_ENABLED=1 $(GO) build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags '$(LDFLAGS)' -o dist/creator ./cmd/creator
+	CGO_ENABLED=1 $(GO) build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags '$(LDFLAGS)' -o dist/patcher ./cmd/patcher
 
 test: build-zstd
-	CGO_ENABLED=1 $(GO) test -race -tags vipr_static_zstd ./...
+	CGO_ENABLED=1 $(GO) test -race -tags vipr_static_zstd,migrated_fynedo ./...
 
 vet: build-zstd
-	CGO_ENABLED=1 $(GO) vet -tags vipr_static_zstd ./...
+	CGO_ENABLED=1 $(GO) vet -tags vipr_static_zstd,migrated_fynedo ./...
 
 check: test vet
 	@test -z "$$(gofmt -l .)" || (echo 'Go files are not formatted; run gofmt -w .' >&2; gofmt -l . >&2; exit 1)

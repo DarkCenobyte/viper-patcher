@@ -60,16 +60,25 @@ The creator interface provides:
 
 - An **Add file pair** action that first selects one source file and then its
   associated target file.
-- A visible list in which every row permanently represents one source/target
-  pair.
-- Compression levels 1 through 22.
-- A patch comment.
-- `Generate a reverse patch`.
+- A two-column table in which every row permanently represents one
+  source/target pair. Each column displays paths relative to its nearest common
+  parent directory.
+- A dedicated comment section.
+- A collapsed **Settings** section containing compression levels 1 through 22
+  and optional reverse-patch generation.
 - An output directory and `.vipr` filename.
 - Progress by file and by processed bytes.
 
 The selected output file is opened only by the patch creation core. Cancelling
 or failing validation therefore does not truncate an existing patch.
+
+Both GUIs display the embedded `assets/logo.png`. The patcher additionally uses
+an external `assets/logo.png` when that exact regular PNG file is placed in an
+`assets` directory beside the patcher executable; invalid files fall back to
+the embedded logo.
+File and directory buttons use native Windows and macOS dialogs. Linux uses the
+system `zenity` command when available and otherwise falls back to Fyne's file
+dialog.
 
 ## Creator CLI
 
@@ -103,9 +112,10 @@ ultra levels. The GUI deliberately presents the conventional 1–22 range.
 
 ## Patcher GUI
 
-The patcher starts with instructions to select a `.vipr` patch. After selection,
-the patch comment is displayed read-only. Selecting a target directory triggers
-a complete preflight:
+The patcher starts with instructions to select a `.vipr` patch. If exactly one
+regular `.vipr` file is present beside the patcher executable, it is selected
+automatically. After selection, the patch comment is displayed read-only.
+Selecting a target directory triggers a complete preflight:
 
 - Every required path must resolve to a regular file without traversing a
   symbolic link.
@@ -190,8 +200,8 @@ go mod download
 $env:CGO_ENABLED = "1"
 $env:GOARCH = "amd64"
 $env:CC = "C:\msys64\mingw64\bin\gcc.exe"
-go build -tags vipr_static_zstd -o dist/creator.exe ./cmd/creator
-go build -tags vipr_static_zstd -o dist/patcher.exe ./cmd/patcher
+go build -tags vipr_static_zstd,migrated_fynedo -o dist/creator.exe ./cmd/creator
+go build -tags vipr_static_zstd,migrated_fynedo -o dist/patcher.exe ./cmd/patcher
 ```
 
 The PowerShell build script detects a standard `C:\msys64` installation. For
