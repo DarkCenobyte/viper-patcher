@@ -170,7 +170,7 @@ jobs:
         run: |
           ./scripts/fetch-zstd.sh
           JOBS="$(sysctl -n hw.ncpu)" ./scripts/build-zstd.sh
-      - name: Build and package
+            - name: Build and package
         env:
           CGO_ENABLED: "1"
           GOOS: darwin
@@ -182,38 +182,57 @@ jobs:
           build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ldflags="-s -w -X ${module}/internal/buildinfo.Version=${version} -X ${module}/internal/buildinfo.Commit=${GITHUB_SHA} -X ${module}/internal/buildinfo.BuildDate=${build_date}"
           package="viper-patcher_${version}_darwin_arm64"
-          mkdir -p "dist/${package}"
-          go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o "dist/${package}/creator" ./cmd/creator
-          go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o "dist/${package}/patcher" ./cmd/patcher
+          package_dir="$PWD/dist/${package}"
+          build_dir="$RUNNER_TEMP/viper-patcher-macos"
+          rm -rf "$build_dir"
+          mkdir -p "$build_dir"
+          mkdir -p "$package_dir"
+          go build \
+            -trimpath \
+            -tags vipr_static_zstd \
+            -ldflags "$ldflags" \
+            -o "$build_dir/creator" \
+            ./cmd/creator
+          go build \
+            -trimpath \
+            -tags vipr_static_zstd \
+            -ldflags "$ldflags" \
+            -o "$build_dir/patcher" \
+            ./cmd/patcher
           root="$PWD"
           fyne_tool="$(go env GOPATH)/bin/fyne"
           icon="$root/assets/icon.png"
           "$fyne_tool" package \
             --os darwin \
             --source-dir "$root/cmd/creator" \
-            --executable "$root/dist/${package}/creator" \
+            --executable "$build_dir/creator" \
             --name "Viper-Patcher Creator" \
             --app-id "io.github.darkcenobyte.viperpatcher.creator" \
             --app-version "$version" \
             --app-build "$GITHUB_RUN_NUMBER" \
             --icon "$icon" \
             --release
-          mv "Viper-Patcher Creator.app" "dist/${package}/"
+          mv "Viper-Patcher Creator.app" "$package_dir/"
           "$fyne_tool" package \
             --os darwin \
             --source-dir "$root/cmd/patcher" \
-            --executable "$root/dist/${package}/patcher" \
+            --executable "$build_dir/patcher" \
             --name "Viper-Patcher" \
             --app-id "io.github.darkcenobyte.viperpatcher.patcher" \
             --app-version "$version" \
             --app-build "$GITHUB_RUN_NUMBER" \
             --icon "$icon" \
             --release
-          mv "Viper-Patcher.app" "dist/${package}/"
-          cp README.md LICENSE "dist/${package}/"
-          mkdir -p "dist/${package}/third-party-licenses"
-          cp third_party/zstd/LICENSE third_party/zstd/COPYING "dist/${package}/third-party-licenses/"
-          ./scripts/collect-go-licenses.sh "dist/${package}/third-party-licenses/go-modules"
+          mv "Viper-Patcher.app" "$package_dir/"
+          rm -rf "$build_dir"
+          cp README.md LICENSE "$package_dir/"
+          mkdir -p "$package_dir/third-party-licenses"
+          cp \
+            third_party/zstd/LICENSE \
+            third_party/zstd/COPYING \
+            "$package_dir/third-party-licenses/"
+          ./scripts/collect-go-licenses.sh \
+            "$package_dir/third-party-licenses/go-modules"
           tar -C dist -czf "dist/${package}.tar.gz" "$package"
       - uses: actions/upload-artifact@v7
         with:
