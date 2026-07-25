@@ -25,7 +25,7 @@ jobs:
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential curl pkg-config libgl1-mesa-dev xorg-dev
+          sudo apt-get install --yes build-essential curl pkg-config libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
 
       - name: Download dependencies
         run: go mod download
