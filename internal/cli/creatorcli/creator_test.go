@@ -62,7 +62,7 @@ func TestRunCreatesPatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !parsed.Header.Reverse || parsed.Header.Comment != "REPLACEME" {
+	if !parsed.Header.Reverse || parsed.Header.Comment != "Created with Viper-Patcher" {
 		t.Fatalf("unexpected header: %#v", parsed.Header)
 	}
 }

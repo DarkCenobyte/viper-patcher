@@ -11,6 +11,7 @@ import (
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/DarkCenobyte/viper-patcher/assets"
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
@@ -18,8 +19,10 @@ import (
 
 // Run starts the patcher graphical interface.
 func Run() {
-	application := app.NewWithID("io.github.viperpatcher.patcher")
+	application := app.NewWithID("io.github.darkcenobyte.viperpatcher.patcher")
+	application.SetIcon(assets.AppIcon)
 	window := application.NewWindow("Viper Patcher")
+	window.SetIcon(assets.AppIcon)
 	window.Resize(fyne.NewSize(760, 560))
 
 	patchPath := ""
