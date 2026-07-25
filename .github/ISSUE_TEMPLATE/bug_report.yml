@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a reproducible defect in Viper Patcher
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Thank you for helping improve Viper Patcher.
+  - type: input
+    id: version
+    attributes:
+      label: Viper Patcher version
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows x86-64
+        - Windows x86
+        - Linux x86-64
+        - Linux x86
+        - Linux arm64
+        - macOS arm64
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the exact command or GUI steps, expected result, and actual result.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      render: text
+  - type: checkboxes
+    id: sensitive
+    attributes:
+      label: Data safety
+      options:
+        - label: I removed private binary content, credentials, and personal data from this report.
+          required: true

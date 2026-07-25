@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential curl pkg-config libgl1-mesa-dev xorg-dev
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build libzstd 1.5.7
+        run: |
+          ./scripts/fetch-zstd.sh
+          JOBS="$(nproc)" ./scripts/build-zstd.sh
+
+      - name: Check formatting
+        run: |
+          test -z "$(gofmt -l .)" || {
+            echo "These files are not formatted:"
+            gofmt -l .
+            exit 1
+          }
+
+      - name: Run tests with race detector
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -count=1 -tags vipr_static_zstd ./...
+
+      - name: Run go vet
+        env:
+          CGO_ENABLED: "1"
+        run: go vet -tags vipr_static_zstd ./...
+
+      - name: Enforce core coverage threshold
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          packages="./internal/appmode ./internal/buildinfo ./internal/cli/... ./internal/hashutil ./internal/patch ./internal/patchformat ./internal/pathutil ./internal/progress ./internal/zstd"
+          go test -count=1 -tags vipr_static_zstd -coverprofile=coverage.out $packages
+          go tool cover -func=coverage.out | tee coverage.txt
+          coverage="$(awk '$1 == "total:" { gsub(/%/, "", $3); print $3 }' coverage.txt)"
+          awk -v coverage="$coverage" 'BEGIN { if (coverage + 0 < 80) { printf "Core coverage %.1f%% is below 80%%.\n", coverage; exit 1 } }'
+
+      - name: Compile executables
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          module="$(go list -m)"
+          ldflags="-s -w -X ${module}/internal/buildinfo.Version=ci -X ${module}/internal/buildinfo.Commit=${GITHUB_SHA} -X ${module}/internal/buildinfo.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o /tmp/creator ./cmd/creator
+          go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o /tmp/patcher ./cmd/patcher
