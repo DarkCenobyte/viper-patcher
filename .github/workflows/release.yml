@@ -65,7 +65,7 @@ jobs:
           cp third_party/zstd/LICENSE third_party/zstd/COPYING "dist/${package}/third-party-licenses/"
           ./scripts/collect-go-licenses.sh "dist/${package}/third-party-licenses/go-modules"
           tar -C dist -czf "dist/${package}.tar.gz" "$package"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: viper-patcher-linux-${{ matrix.arch }}
           path: dist/*.tar.gz
@@ -122,7 +122,7 @@ jobs:
           cp third_party/zstd/LICENSE third_party/zstd/COPYING "dist/${package}/third-party-licenses/"
           ./scripts/collect-go-licenses.sh "dist/${package}/third-party-licenses/go-modules"
           tar -C dist -czf "dist/${package}.tar.gz" "$package"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: viper-patcher-linux-386
           path: dist/*.tar.gz
@@ -166,7 +166,7 @@ jobs:
           cp third_party/zstd/LICENSE third_party/zstd/COPYING "dist/${package}/third-party-licenses/"
           ./scripts/collect-go-licenses.sh "dist/${package}/third-party-licenses/go-modules"
           tar -C dist -czf "dist/${package}.tar.gz" "$package"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: viper-patcher-darwin-arm64
           path: dist/*.tar.gz
@@ -232,7 +232,7 @@ jobs:
           Copy-Item third_party/zstd/LICENSE, third_party/zstd/COPYING "dist/$package/third-party-licenses/"
           ./scripts/collect-go-licenses.ps1 -Destination "dist/$package/third-party-licenses/go-modules"
           Compress-Archive -Path "dist/$package" -DestinationPath "dist/$package.zip"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: viper-patcher-windows-${{ matrix.goarch }}
           path: dist/*.zip
@@ -243,7 +243,7 @@ jobs:
     needs: [linux, linux-x86, macos, windows]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
