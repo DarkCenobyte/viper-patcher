@@ -85,6 +85,13 @@ func SecureJoinExisting(root, patchPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve target root: %w", err)
 	}
+	rootLinkInfo, err := os.Lstat(absoluteRoot)
+	if err != nil {
+		return "", fmt.Errorf("inspect target root: %w", err)
+	}
+	if rootLinkInfo.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("target root %q is a symbolic link", root)
+	}
 	resolvedRoot, err := filepath.EvalSymlinks(absoluteRoot)
 	if err != nil {
 		return "", fmt.Errorf("resolve target root links: %w", err)

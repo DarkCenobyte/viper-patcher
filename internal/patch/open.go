@@ -2,27 +2,52 @@ package patch
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sort"
 
+	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 )
 
 // Open reads a patch and validates every differential range against the container size.
 func Open(path string) (patchformat.Patch, error) {
-	parsed, err := patchformat.Read(path)
-	if err != nil {
-		return patchformat.Patch{}, err
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return patchformat.Patch{}, err
-	}
-	if info.Size() < 0 {
-		return patchformat.Patch{}, fmt.Errorf("patch file has an invalid size")
-	}
-	containerSize := uint64(info.Size())
+	parsed, _, err := OpenWithDigest(path)
+	return parsed, err
+}
 
+// OpenWithDigest reads one stable patch file and returns its verified SHA-256 digest.
+func OpenWithDigest(path string) (patchformat.Patch, string, error) {
+	file, identity, err := openStableRegularFile(path)
+	if err != nil {
+		return patchformat.Patch{}, "", err
+	}
+	defer file.Close()
+
+	digest, size, err := hashutil.Reader(file)
+	if err != nil {
+		return patchformat.Patch{}, "", fmt.Errorf("hash patch file: %w", err)
+	}
+	if identity.Size() < 0 || size != uint64(identity.Size()) {
+		return patchformat.Patch{}, "", fmt.Errorf("patch file changed while it was being read")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return patchformat.Patch{}, "", fmt.Errorf("rewind patch file: %w", err)
+	}
+	parsed, err := patchformat.Decode(file)
+	if err != nil {
+		return patchformat.Patch{}, "", err
+	}
+	if err := validateDifferentialRanges(parsed, size); err != nil {
+		return patchformat.Patch{}, "", err
+	}
+	if err := verifyOpenPatch(file, path, identity, digest, size); err != nil {
+		return patchformat.Patch{}, "", err
+	}
+	return parsed, digest, nil
+}
+
+func validateDifferentialRanges(parsed patchformat.Patch, containerSize uint64) error {
 	type interval struct{ start, end uint64 }
 	intervals := make([]interval, 0, len(parsed.Header.Files)*2)
 	add := func(offset, length uint64) error {
@@ -39,28 +64,57 @@ func Open(path string) (patchformat.Patch, error) {
 	}
 	for _, entry := range parsed.Header.Files {
 		if err := add(entry.ForwardOffset, entry.ForwardLength); err != nil {
-			return patchformat.Patch{}, fmt.Errorf("invalid forward differential for %q: %w", entry.Path, err)
+			return fmt.Errorf("invalid forward differential for %q: %w", entry.Path, err)
 		}
 		if parsed.Header.Reverse {
 			if err := add(entry.ReverseOffset, entry.ReverseLength); err != nil {
-				return patchformat.Patch{}, fmt.Errorf("invalid reverse differential for %q: %w", entry.Path, err)
+				return fmt.Errorf("invalid reverse differential for %q: %w", entry.Path, err)
 			}
 		}
 	}
 	sort.Slice(intervals, func(i, j int) bool { return intervals[i].start < intervals[j].start })
 	if len(intervals) == 0 || intervals[0].start != parsed.DataOffset {
-		return patchformat.Patch{}, fmt.Errorf("patch contains a gap before its first differential")
+		return fmt.Errorf("patch contains a gap before its first differential")
 	}
 	for index := 1; index < len(intervals); index++ {
 		if intervals[index].start < intervals[index-1].end {
-			return patchformat.Patch{}, fmt.Errorf("patch contains overlapping differential ranges")
+			return fmt.Errorf("patch contains overlapping differential ranges")
 		}
 		if intervals[index].start != intervals[index-1].end {
-			return patchformat.Patch{}, fmt.Errorf("patch contains unreferenced data between differentials")
+			return fmt.Errorf("patch contains unreferenced data between differentials")
 		}
 	}
 	if intervals[len(intervals)-1].end != containerSize {
-		return patchformat.Patch{}, fmt.Errorf("patch contains trailing unreferenced data")
+		return fmt.Errorf("patch contains trailing unreferenced data")
 	}
-	return parsed, nil
+	return nil
+}
+
+func verifyOpenPatch(file *os.File, path string, identity os.FileInfo, expectedDigest string, expectedSize uint64) error {
+	currentInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect patch after parsing: %w", err)
+	}
+	if !os.SameFile(identity, currentInfo) || currentInfo.Size() < 0 || uint64(currentInfo.Size()) != expectedSize ||
+		currentInfo.Mode().Perm() != identity.Mode().Perm() || !currentInfo.ModTime().Equal(identity.ModTime()) {
+		return fmt.Errorf("patch file changed while it was being parsed")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind patch after parsing: %w", err)
+	}
+	actualDigest, actualSize, err := hashutil.Reader(file)
+	if err != nil {
+		return fmt.Errorf("verify patch after parsing: %w", err)
+	}
+	if actualDigest != expectedDigest || actualSize != expectedSize {
+		return fmt.Errorf("patch file changed while it was being parsed")
+	}
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect patch path after parsing: %w", err)
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(identity, pathInfo) {
+		return fmt.Errorf("patch file was replaced while it was being parsed")
+	}
+	return nil
 }

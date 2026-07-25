@@ -89,3 +89,36 @@ func TestDecompressRejectsTruncatedSegment(t *testing.T) {
 		t.Fatal("expected truncated segment to be rejected")
 	}
 }
+
+func TestDecompressStopsAtDeclaredOutputSize(t *testing.T) {
+	root := t.TempDir()
+	reference := filepath.Join(root, "reference.bin")
+	target := filepath.Join(root, "target.bin")
+	patch := filepath.Join(root, "patch.zst")
+	output := filepath.Join(root, "output.bin")
+	if err := os.WriteFile(reference, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	targetData := []byte(strings.Repeat("decompression-limit-", 600000))
+	if err := os.WriteFile(target, targetData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := CompressFile(reference, target, patch, 3, nil); err != nil {
+		t.Fatal(err)
+	}
+	patchInfo, err := os.Stat(patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaredSize := uint64(2 << 20)
+	if err := DecompressSegment(reference, patch, 0, uint64(patchInfo.Size()), output, declaredSize, nil); err == nil {
+		t.Fatal("expected output-size limit to be enforced")
+	}
+	outputInfo, err := os.Stat(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outputInfo.Size() > int64(declaredSize) {
+		t.Fatalf("output size = %d, declared maximum = %d", outputInfo.Size(), declaredSize)
+	}
+}

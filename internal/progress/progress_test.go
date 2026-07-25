@@ -5,7 +5,7 @@ import "testing"
 func TestReport(t *testing.T) {
 	Report(nil, Event{})
 	called := false
-	want := Event{FileIndex: 1, FileCount: 2, Path: "file.bin", Stage: "testing"}
+	want := Event{FileIndex: 1, FileCount: 2, Path: "file.bin", Stage: Stage("testing")}
 	Report(func(got Event) {
 		called = true
 		if got != want {

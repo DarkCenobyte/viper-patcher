@@ -12,14 +12,24 @@ import (
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
 
-type stringList []string
+const filePairSeparator = "::"
 
-func (values *stringList) String() string { return strings.Join(*values, ", ") }
-func (values *stringList) Set(value string) error {
-	if strings.TrimSpace(value) == "" {
-		return fmt.Errorf("file path must not be empty")
+type filePairList []patch.FilePair
+
+func (pairs *filePairList) String() string {
+	values := make([]string, len(*pairs))
+	for index, pair := range *pairs {
+		values[index] = pair.SourcePath + filePairSeparator + pair.TargetPath
 	}
-	*values = append(*values, value)
+	return strings.Join(values, ", ")
+}
+
+func (pairs *filePairList) Set(value string) error {
+	parts := strings.SplitN(value, filePairSeparator, 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return fmt.Errorf("file pair must use the form <source>%s<target>", filePairSeparator)
+	}
+	*pairs = append(*pairs, patch.FilePair{SourcePath: parts[0], TargetPath: parts[1]})
 	return nil
 }
 
@@ -27,16 +37,14 @@ func (values *stringList) Set(value string) error {
 func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("creator", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	var sources stringList
-	var targets stringList
+	var pairs filePairList
 	var level int
 	var comment string
 	var reverse bool
 	var headless bool
 	var help bool
 	var version bool
-	flags.Var(&sources, "source-files", "source file; repeat for each file")
-	flags.Var(&targets, "target-files", "target file; repeat for each file")
+	flags.Var(&pairs, "file-pair", "source and target pair; repeat for each file")
 	flags.IntVar(&level, "compression-level", 3, "zstd compression level")
 	flags.StringVar(&comment, "comment", "Created with Viper-Patcher", "comment stored in the patch")
 	flags.BoolVar(&reverse, "create-reverse", false, "include reverse differentials")
@@ -62,8 +70,8 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stdout, "viper-patcher creator %s (%s, %s)\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 		return 0
 	}
-	if len(sources) == 0 || len(targets) == 0 {
-		fmt.Fprintln(stderr, "Error: --source-files and --target-files are required and must have values.")
+	if len(pairs) == 0 {
+		fmt.Fprintln(stderr, "Error: at least one --file-pair value is required.")
 		fmt.Fprintln(stderr)
 		printUsage(stderr)
 		return 2
@@ -85,17 +93,11 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		printUsage(stderr)
 		return 2
 	}
-	output := flags.Arg(0)
-	if len(sources) != len(targets) {
-		fmt.Fprintf(stderr, "Error: source-files contains %d file(s), but target-files contains %d file(s).\n\n", len(sources), len(targets))
-		printUsage(stderr)
-		return 2
-	}
 
+	output := flags.Arg(0)
 	reporter := newTerminalProgress(stderr)
 	err := patch.Create(ctx, patch.CreateOptions{
-		SourceFiles:      sources,
-		TargetFiles:      targets,
+		Files:            pairs,
 		OutputPath:       output,
 		CompressionLevel: level,
 		Comment:          comment,
@@ -112,11 +114,10 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 
 func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "Example:")
-	fmt.Fprintln(writer, "  creator --headless --source-files old/bin/game.exe --target-files new/bin/game.exe --source-files old/data/assets.bin --target-files new/data/assets.bin --compression-level 12 --comment \"Version 1.1 update\" --create-reverse update.vipr")
+	fmt.Fprintln(writer, "  creator --headless --file-pair old/bin/game.exe::new/bin/game.exe --file-pair old/data/assets.bin::new/data/assets.bin --compression-level 12 --comment \"Version 1.1 update\" --create-reverse update.vipr")
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "Supported parameters and arguments:")
-	fmt.Fprintln(writer, "  --source-files <file>          Required. Repeat once per source file.")
-	fmt.Fprintln(writer, "  --target-files <file>          Required. Repeat once per target file, in matching order.")
+	fmt.Fprintln(writer, "  --file-pair <source>::<target> Required. Repeat once per source/target pair.")
 	fmt.Fprintln(writer, "  [--compression-level <level>]  Default: 3.")
 	fmt.Fprintln(writer, "  [--comment <text>]             Default: Created with Viper-Patcher.")
 	fmt.Fprintln(writer, "  [--create-reverse]             Default: false.")
@@ -129,7 +130,7 @@ func printUsage(writer io.Writer) {
 type terminalProgress struct {
 	writer     io.Writer
 	lastFile   int
-	lastStage  string
+	lastStage  progress.Stage
 	lineActive bool
 }
 
@@ -138,13 +139,17 @@ func newTerminalProgress(writer io.Writer) *terminalProgress {
 }
 
 func (reporter *terminalProgress) Report(event progress.Event) {
-	if event.Stage == "completed" {
+	if event.Stage == progress.StageCompleted {
 		reporter.Finish()
 		return
 	}
 	if event.FileIndex != reporter.lastFile || event.Stage != reporter.lastStage {
 		reporter.Finish()
-		fmt.Fprintf(reporter.writer, "[%d/%d] %s: %s\n", event.FileIndex, event.FileCount, event.Stage, event.Path)
+		if event.Path == "" {
+			fmt.Fprintf(reporter.writer, "%s\n", event.Stage)
+		} else {
+			fmt.Fprintf(reporter.writer, "[%d/%d] %s: %s\n", event.FileIndex, event.FileCount, event.Stage, event.Path)
+		}
 		reporter.lastFile = event.FileIndex
 		reporter.lastStage = event.Stage
 	}

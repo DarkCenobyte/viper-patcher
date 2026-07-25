@@ -1,7 +1,9 @@
 package patch
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
@@ -9,58 +11,101 @@ import (
 	"github.com/DarkCenobyte/viper-patcher/internal/pathutil"
 )
 
-// Inspect validates files in root against source and, when available, target hashes.
+// Inspect validates files in root against both source and target states.
 func Inspect(root string, parsed patchformat.Patch) (ValidationResult, error) {
-	forwardMatches := 0
-	reverseMatches := 0
-	missing := make([]string, 0)
-	mismatched := make([]HashMismatch, 0)
+	result := ValidationResult{
+		CanApplyForward: true,
+		CanApplyReverse: parsed.Header.Reverse,
+		Missing:         make([]string, 0),
+		Issues:          make([]FileIssue, 0),
+	}
+	mixedState := false
+	matchedSource := false
+	matchedTarget := false
 
 	for _, entry := range parsed.Header.Files {
 		path, err := pathutil.SecureJoinExisting(root, entry.Path)
 		if err != nil {
 			return ValidationResult{}, err
 		}
-		info, err := os.Stat(path)
+		file, info, err := openStableRegularFile(path)
 		if err != nil {
-			if os.IsNotExist(err) {
-				missing = append(missing, entry.Path)
+			if errors.Is(err, fs.ErrNotExist) {
+				result.Missing = append(result.Missing, entry.Path)
+				result.CanApplyForward = false
+				result.CanApplyReverse = false
+				continue
+			}
+			if lstatInfo, lstatErr := os.Lstat(path); lstatErr == nil && !lstatInfo.Mode().IsRegular() {
+				result.Issues = append(result.Issues, FileIssue{Path: entry.Path, Reason: IssueNotRegular})
+				result.CanApplyForward = false
+				result.CanApplyReverse = false
 				continue
 			}
 			return ValidationResult{}, fmt.Errorf("inspect %q: %w", entry.Path, err)
 		}
-		if !info.Mode().IsRegular() {
-			missing = append(missing, entry.Path)
+		digest, size, hashErr := hashutil.Reader(file)
+		closeErr := file.Close()
+		if hashErr != nil {
+			return ValidationResult{}, fmt.Errorf("hash %q: %w", entry.Path, hashErr)
+		}
+		if closeErr != nil {
+			return ValidationResult{}, fmt.Errorf("close %q after inspection: %w", entry.Path, closeErr)
+		}
+		mode := uint32(info.Mode().Perm())
+		sourceHashMatches := digest == entry.SourceHash && size == entry.SourceSize
+		targetHashMatches := digest == entry.TargetHash && size == entry.TargetSize
+		sourceMatches := sourceHashMatches && mode == entry.SourceMode
+		targetMatches := targetHashMatches && mode == entry.TargetMode
+
+		if !sourceMatches {
+			result.CanApplyForward = false
+		}
+		if !targetMatches {
+			result.CanApplyReverse = false
+		}
+		matchedSource = matchedSource || sourceMatches
+		matchedTarget = matchedTarget || targetMatches
+
+		if sourceMatches || targetMatches {
 			continue
 		}
-		digest, _, err := hashutil.File(path)
-		if err != nil {
-			return ValidationResult{}, err
+		reason := IssueHashMismatch
+		if sourceHashMatches || targetHashMatches {
+			reason = IssueModeMismatch
 		}
-		switch digest {
-		case entry.SourceHash:
-			forwardMatches++
-		case entry.TargetHash:
-			reverseMatches++
-		default:
-			mismatched = append(mismatched, HashMismatch{Path: entry.Path, Actual: digest})
-		}
+		result.Issues = append(result.Issues, FileIssue{
+			Path:       entry.Path,
+			Reason:     reason,
+			ActualHash: digest,
+			ActualMode: mode,
+		})
 	}
 
-	if len(missing) > 0 {
-		return ValidationResult{State: StateMissingFiles, Missing: missing, Mismatched: mismatched}, nil
+	if !parsed.Header.Reverse {
+		result.CanApplyReverse = false
 	}
-	if len(mismatched) == 0 && forwardMatches == len(parsed.Header.Files) {
-		return ValidationResult{State: StateForwardReady}, nil
+	if len(result.Missing) > 0 {
+		result.State = StateMissingFiles
+		return result, nil
 	}
-	if parsed.Header.Reverse && len(mismatched) == 0 && reverseMatches == len(parsed.Header.Files) {
-		return ValidationResult{State: StateReverseReady}, nil
+	if result.CanApplyForward && result.CanApplyReverse {
+		result.State = StateBidirectionalReady
+		return result, nil
 	}
-	if len(mismatched) == 0 {
-		// A mixed source/target state is still invalid relative to either complete state.
-		for _, entry := range parsed.Header.Files {
-			mismatched = append(mismatched, HashMismatch{Path: entry.Path, Actual: "mixed source/target state"})
-		}
+	if result.CanApplyForward {
+		result.State = StateForwardReady
+		return result, nil
 	}
-	return ValidationResult{State: StateHashMismatch, Mismatched: mismatched}, nil
+	if result.CanApplyReverse {
+		result.State = StateReverseReady
+		return result, nil
+	}
+	mixedState = len(result.Issues) == 0 && matchedSource && matchedTarget
+	if mixedState {
+		result.State = StateMixedFiles
+		return result, nil
+	}
+	result.State = StateInvalidFiles
+	return result, nil
 }

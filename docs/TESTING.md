@@ -1,7 +1,8 @@
 # Testing strategy
 
 The repository combines unit tests, native integration tests, CLI end-to-end
-tests, and CI compilation of both GUI executables.
+tests, synchronized GUI-model tests, fuzz tests, native sanitizers, and CI
+compilation of both GUI executables.
 
 ## Local commands
 
@@ -13,21 +14,36 @@ make vet
 The test suite covers:
 
 - GUI/CLI mode selection helpers.
-- Creator and patcher command parsing, including their required final positional arguments, help, version, failure, and success paths.
+- Atomic creator file-pair parsing, required final positional arguments, help,
+  version, failure, and success paths.
 - SHA-256 hashing.
-- Common-root and safe path handling, including symbolic-link rejection.
-- Strict VIPR header parsing and malformed metadata.
+- Common-root and safe path handling, including target-root and component
+  symbolic-link rejection.
+- Strict VIPR header parsing, malformed metadata, unknown fields, and rejection
+  of special file-mode bits.
 - Differential-range validation and unreferenced-data rejection.
 - libzstd patch creation and application through cgo.
+- Immediate termination before decompressed output can exceed its declared size.
+- Immutable source, target, installed-file, and patch snapshots.
 - Multi-file forward and reverse workflows.
-- Missing, mismatched, mixed, and already-patched preflight states.
-- Transactional output preparation, replacement, and cancellation paths.
-- File-level and byte-level progress callbacks.
+- Independent forward/reverse readiness, including identical source and target
+  states, permission-only mismatches, missing files, non-regular files, mixed
+  states, and unknown content.
+- Transaction preparation, replacement, cancellation, rollback, cleanup, and
+  injected rename, remove, and permission failures.
+- GUI state locking and captured selections during active operations.
+- File-level and byte-level typed progress callbacks.
+- Fuzzing of VIPR decoding, patch opening, and secure path joining.
+
+CI runs the complete test suite with the Go race detector. It also rebuilds the
+native packages with AddressSanitizer and UndefinedBehaviorSanitizer, runs
+`go vet`, and executes `govulncheck` to identify known vulnerabilities that are
+reachable from the current Go call graph.
 
 CI enforces at least 80% statement coverage across the non-GUI core packages.
-The current measured core coverage is above that threshold. GUI packages are
-compiled by CI on Linux, and all release targets compile the complete GUI and
-CLI executables on their native runner or supported multilib toolchain.
+GUI packages are compiled by CI on Linux, and all release targets compile the
+complete GUI and CLI executables on their native runner or supported multilib
+toolchain.
 
 A literal 100% line-coverage target is intentionally not used because it would
 encourage platform-specific error branches and GUI toolkit internals to be

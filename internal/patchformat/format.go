@@ -175,6 +175,12 @@ func ValidateHeader(header Header) error {
 		if !validSHA256(entry.SourceHash) || !validSHA256(entry.TargetHash) {
 			return fmt.Errorf("file entry %q has an invalid SHA-256 digest", entry.Path)
 		}
+		if err := validatePortableMode(entry.SourceMode); err != nil {
+			return fmt.Errorf("file entry %q has an invalid source mode: %w", entry.Path, err)
+		}
+		if err := validatePortableMode(entry.TargetMode); err != nil {
+			return fmt.Errorf("file entry %q has an invalid target mode: %w", entry.Path, err)
+		}
 		if entry.ForwardLength == 0 {
 			return fmt.Errorf("file entry %q has no forward differential", entry.Path)
 		}
@@ -230,4 +236,11 @@ func isWindowsDeviceName(component string) bool {
 		return base[3] >= '1' && base[3] <= '9'
 	}
 	return false
+}
+
+func validatePortableMode(mode uint32) error {
+	if mode&^uint32(0o777) != 0 {
+		return fmt.Errorf("unsupported file mode %#o", mode)
+	}
+	return nil
 }

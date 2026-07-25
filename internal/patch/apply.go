@@ -2,6 +2,7 @@ package patch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,17 +14,62 @@ import (
 	"github.com/DarkCenobyte/viper-patcher/internal/zstd"
 )
 
-type preparedFile struct {
-	path      string
-	temporary string
-	backup    string
-	mode      os.FileMode
-	committed bool
+const portablePermissionMask uint32 = 0o777
+
+type applyOperations struct {
+	chmod func(string, os.FileMode) error
+}
+
+var defaultApplyOperations = applyOperations{chmod: os.Chmod}
+
+// ApplyOptions configures one patch application operation.
+type ApplyOptions struct {
+	PatchPath         string
+	Root              string
+	Direction         Direction
+	ExpectedPatchHash string
 }
 
 // Apply validates and applies a patch direction transactionally.
 func Apply(ctx context.Context, patchPath, root string, direction Direction, callback progress.Callback) error {
-	parsed, err := Open(patchPath)
+	return ApplyWithOptions(ctx, ApplyOptions{PatchPath: patchPath, Root: root, Direction: direction}, callback)
+}
+
+// ApplyWithOptions validates and applies a configured patch operation.
+func ApplyWithOptions(ctx context.Context, options ApplyOptions, callback progress.Callback) error {
+	return applyWithOperations(ctx, options, callback, defaultApplyOperations)
+}
+
+func applyWithOperations(ctx context.Context, options ApplyOptions, callback progress.Callback, operations applyOperations) (resultError error) {
+	patchPath := options.PatchPath
+	root := options.Root
+	direction := options.Direction
+	if direction != Forward && direction != Reverse {
+		return fmt.Errorf("unsupported patch direction %q", direction)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	workDirectory, err := os.MkdirTemp("", "viper-patcher-apply-*")
+	if err != nil {
+		return fmt.Errorf("create application work directory: %w", err)
+	}
+	defer func() {
+		if cleanupError := os.RemoveAll(workDirectory); cleanupError != nil {
+			resultError = errors.Join(resultError, fmt.Errorf("remove application work directory: %w", cleanupError))
+		}
+	}()
+
+	patchSnapshot, err := copyPatchSnapshot(patchPath, workDirectory)
+	if err != nil {
+		return err
+	}
+	if options.ExpectedPatchHash != "" && patchSnapshot.Hash != options.ExpectedPatchHash {
+		return fmt.Errorf("selected patch changed after it was inspected")
+	}
+	progress.Report(callback, progress.Event{Stage: progress.StagePreparing})
+	parsed, err := Open(patchSnapshot.SnapshotPath)
 	if err != nil {
 		return err
 	}
@@ -35,18 +81,15 @@ func Apply(ctx context.Context, patchPath, root string, direction Direction, cal
 		return err
 	}
 	if !validation.Ready(direction) {
-		return validation.Error()
+		return validation.ErrorFor(direction)
 	}
 
-	prepared := make([]preparedFile, 0, len(parsed.Header.Files))
-	cleanupPrepared := func() {
-		for _, file := range prepared {
-			if !file.committed {
-				os.Remove(file.temporary)
-			}
+	transaction := NewTransaction()
+	defer func() {
+		if cleanupError := transaction.Cleanup(); cleanupError != nil {
+			resultError = errors.Join(resultError, cleanupError)
 		}
-	}
-	defer cleanupPrepared()
+	}()
 
 	for index, entry := range parsed.Header.Files {
 		if err := ctx.Err(); err != nil {
@@ -56,94 +99,121 @@ func Apply(ctx context.Context, patchPath, root string, direction Direction, cal
 		if err != nil {
 			return err
 		}
-		directory := filepath.Dir(path)
-		temporary, err := os.CreateTemp(directory, ".viper-patcher-output-*")
+		sourceSnapshot, err := snapshotRegularFile(path, filepath.Join(workDirectory, fmt.Sprintf("%06d.reference", index)))
+		if err != nil {
+			return fmt.Errorf("snapshot installed file %q: %w", entry.Path, err)
+		}
+		offset, length, expectedInput, expectedOutput := differential(entry, direction)
+		if sourceSnapshot.Hash != expectedInput.hash || sourceSnapshot.Size != expectedInput.size || sourceSnapshot.Mode != expectedInput.mode {
+			return fmt.Errorf("installed file %q changed after preflight validation", entry.Path)
+		}
+
+		temporary, err := os.CreateTemp(filepath.Dir(path), ".viper-patcher-output-*")
 		if err != nil {
 			return fmt.Errorf("create temporary output for %q: %w", entry.Path, err)
 		}
 		temporaryPath := temporary.Name()
 		if err := temporary.Close(); err != nil {
-			os.Remove(temporaryPath)
-			return err
+			return removeTemporaryAfterError(temporaryPath, fmt.Errorf("close temporary output for %q: %w", entry.Path, err))
 		}
 
-		offset, length, expectedSize, expectedHash, mode := differential(entry, direction)
-		progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: len(parsed.Header.Files), Path: entry.Path, Stage: "applying", TotalBytes: expectedSize})
-		err = zstd.DecompressSegment(path, patchPath, parsed.DataOffset+offset, length, temporaryPath, expectedSize, func(processed, total uint64) {
-			progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: len(parsed.Header.Files), Path: entry.Path, Stage: "applying", ProcessedBytes: processed, TotalBytes: total})
+		progress.Report(callback, progress.Event{
+			FileIndex:  index + 1,
+			FileCount:  len(parsed.Header.Files),
+			Path:       entry.Path,
+			Stage:      progress.StageApplying,
+			TotalBytes: expectedOutput.size,
+		})
+		err = zstd.DecompressSegment(sourceSnapshot.SnapshotPath, patchSnapshot.SnapshotPath, parsed.DataOffset+offset, length, temporaryPath, expectedOutput.size, func(processed, total uint64) {
+			progress.Report(callback, progress.Event{
+				FileIndex:      index + 1,
+				FileCount:      len(parsed.Header.Files),
+				Path:           entry.Path,
+				Stage:          progress.StageApplying,
+				ProcessedBytes: processed,
+				TotalBytes:     total,
+			})
 		})
 		if err != nil {
-			os.Remove(temporaryPath)
-			return fmt.Errorf("apply %s differential for %q: %w", direction, entry.Path, err)
+			return removeTemporaryAfterError(temporaryPath, fmt.Errorf("apply %s differential for %q: %w", direction, entry.Path, err))
 		}
+
+		progress.Report(callback, progress.Event{
+			FileIndex: index + 1,
+			FileCount: len(parsed.Header.Files),
+			Path:      entry.Path,
+			Stage:     progress.StageVerifying,
+		})
 		digest, size, err := hashutil.File(temporaryPath)
 		if err != nil {
-			os.Remove(temporaryPath)
-			return err
+			return removeTemporaryAfterError(temporaryPath, fmt.Errorf("hash generated file %q: %w", entry.Path, err))
 		}
-		if digest != expectedHash || size != expectedSize {
-			os.Remove(temporaryPath)
-			return fmt.Errorf("generated file %q failed integrity verification", entry.Path)
+		if digest != expectedOutput.hash || size != expectedOutput.size {
+			return removeTemporaryAfterError(temporaryPath, fmt.Errorf("generated file %q failed integrity verification", entry.Path))
 		}
-		if err := os.Chmod(temporaryPath, mode); err != nil {
-			os.Remove(temporaryPath)
-			return fmt.Errorf("set permissions for %q: %w", entry.Path, err)
+		if err := setPortableMode(temporaryPath, expectedOutput.mode, operations.chmod); err != nil {
+			return removeTemporaryAfterError(temporaryPath, fmt.Errorf("set permissions for %q: %w", entry.Path, err))
 		}
-		prepared = append(prepared, preparedFile{path: path, temporary: temporaryPath, mode: mode})
-		progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: len(parsed.Header.Files), Path: entry.Path, Stage: "file-completed", ProcessedBytes: expectedSize, TotalBytes: expectedSize})
+		if err := transaction.Add(path, temporaryPath, fileExpectation{
+			Identity: sourceSnapshot.Identity,
+			Hash:     sourceSnapshot.Hash,
+			Size:     sourceSnapshot.Size,
+			Mode:     sourceSnapshot.Mode,
+		}); err != nil {
+			return removeTemporaryAfterError(temporaryPath, err)
+		}
+		progress.Report(callback, progress.Event{
+			FileIndex:      index + 1,
+			FileCount:      len(parsed.Header.Files),
+			Path:           entry.Path,
+			Stage:          progress.StageFileCompleted,
+			ProcessedBytes: expectedOutput.size,
+			TotalBytes:     expectedOutput.size,
+		})
 	}
 
-	if err := commitPrepared(prepared); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	progress.Report(callback, progress.Event{FileIndex: len(parsed.Header.Files), FileCount: len(parsed.Header.Files), Stage: "completed"})
+	if err := transaction.Commit(); err != nil {
+		return err
+	}
+	progress.Report(callback, progress.Event{
+		FileIndex: len(parsed.Header.Files),
+		FileCount: len(parsed.Header.Files),
+		Stage:     progress.StageCompleted,
+	})
 	return nil
 }
 
-func differential(entry patchformat.FileEntry, direction Direction) (offset, length, size uint64, hash string, mode os.FileMode) {
+func removeTemporaryAfterError(path string, operationError error) error {
+	removeError := os.Remove(path)
+	if removeError == nil || os.IsNotExist(removeError) {
+		return operationError
+	}
+	return errors.Join(operationError, fmt.Errorf("remove temporary file %q: %w", path, removeError))
+}
+
+type fileState struct {
+	hash string
+	size uint64
+	mode uint32
+}
+
+func differential(entry patchformat.FileEntry, direction Direction) (offset, length uint64, input, output fileState) {
 	if direction == Reverse {
-		return entry.ReverseOffset, entry.ReverseLength, entry.SourceSize, entry.SourceHash, os.FileMode(entry.SourceMode)
+		return entry.ReverseOffset, entry.ReverseLength,
+			fileState{hash: entry.TargetHash, size: entry.TargetSize, mode: entry.TargetMode & portablePermissionMask},
+			fileState{hash: entry.SourceHash, size: entry.SourceSize, mode: entry.SourceMode & portablePermissionMask}
 	}
-	return entry.ForwardOffset, entry.ForwardLength, entry.TargetSize, entry.TargetHash, os.FileMode(entry.TargetMode)
+	return entry.ForwardOffset, entry.ForwardLength,
+		fileState{hash: entry.SourceHash, size: entry.SourceSize, mode: entry.SourceMode & portablePermissionMask},
+		fileState{hash: entry.TargetHash, size: entry.TargetSize, mode: entry.TargetMode & portablePermissionMask}
 }
 
-func commitPrepared(files []preparedFile) error {
-	for index := range files {
-		backupFile, err := os.CreateTemp(filepath.Dir(files[index].path), ".viper-patcher-backup-*")
-		if err != nil {
-			rollbackPrepared(files, index)
-			return fmt.Errorf("reserve backup path: %w", err)
-		}
-		files[index].backup = backupFile.Name()
-		backupFile.Close()
-		os.Remove(files[index].backup)
-
-		if err := os.Rename(files[index].path, files[index].backup); err != nil {
-			rollbackPrepared(files, index)
-			return fmt.Errorf("backup %q: %w", files[index].path, err)
-		}
-		if err := os.Rename(files[index].temporary, files[index].path); err != nil {
-			_ = os.Rename(files[index].backup, files[index].path)
-			rollbackPrepared(files, index)
-			return fmt.Errorf("replace %q: %w", files[index].path, err)
-		}
-		files[index].committed = true
+func setPortableMode(path string, mode uint32, chmod func(string, os.FileMode) error) error {
+	if chmod == nil {
+		return fmt.Errorf("file permission operation is not configured")
 	}
-	for index := range files {
-		// The replacement is already committed. Backup cleanup is best-effort so a
-		// transient antivirus or indexer lock cannot turn a successful patch into
-		// a reported failure.
-		_ = os.Remove(files[index].backup)
-	}
-	return nil
-}
-
-func rollbackPrepared(files []preparedFile, committedCount int) {
-	for index := committedCount - 1; index >= 0; index-- {
-		if files[index].committed {
-			_ = os.Remove(files[index].path)
-			_ = os.Rename(files[index].backup, files[index].path)
-			files[index].committed = false
-		}
-	}
+	return chmod(path, os.FileMode(mode&portablePermissionMask))
 }

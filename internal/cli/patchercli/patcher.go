@@ -66,7 +66,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		return 1
 	}
 	if !validation.Ready(direction) {
-		fmt.Fprintf(stderr, "Cannot apply %s patch: %v\n", direction, validation.Error())
+		fmt.Fprintf(stderr, "Cannot apply %s patch: %v\n", direction, validation.ErrorFor(direction))
 		return 1
 	}
 
@@ -107,11 +107,11 @@ func newTerminalProgress(writer io.Writer) *terminalProgress {
 }
 
 func (reporter *terminalProgress) Report(event progress.Event) {
-	if event.Stage == "completed" {
+	if event.Stage == progress.StageCompleted {
 		reporter.Finish()
 		return
 	}
-	if event.Stage == "file-completed" {
+	if event.Stage == progress.StageFileCompleted {
 		reporter.Finish()
 		if event.FileIndex != reporter.lastCompleted {
 			fmt.Fprintf(reporter.writer, "  After:  %s\n", event.Path)

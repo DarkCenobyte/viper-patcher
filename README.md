@@ -21,20 +21,21 @@ available, the application prints a warning and falls back to CLI mode.
 - Exact libzstd **1.5.7** dependency, statically linked in release builds.
 - Patch-from behavior implemented directly through libzstd's advanced API.
 - Dynamic per-file compression parameters based on reference and target size.
-- Ordered multi-file patches with source-relative paths.
+- Ordered multi-file patches with explicit source/target file pairs.
 - SHA-256 source and target integrity metadata.
 - Optional reverse differential for every file.
 - Strict, versioned, and bounds-checked `.vipr` container.
-- Transactional application and rollback.
+- Immutable creation and application snapshots.
+- Transactional file replacement with best-effort rollback and aggregated errors.
 - File-level and byte-level progress reporting.
 - Fyne GUI plus deterministic CLI behavior.
 - MIT-licensed Go code.
 
 ## Important path behavior
 
-The source file list defines paths inside the patch. Viper Patcher computes the
-nearest common parent directory of all source files and stores every source path
-relative to that directory.
+The source side of each file pair defines its path inside the patch. Viper
+Patcher computes the nearest common parent directory of all source files and
+stores every source path relative to that directory.
 
 For example:
 
@@ -57,24 +58,25 @@ creation. Their locations are not used when applying the patch.
 
 The creator interface provides:
 
-- Multiple source files.
-- Multiple target files in matching order.
+- An **Add file pair** action that first selects one source file and then its
+  associated target file.
+- A visible list in which every row permanently represents one source/target
+  pair.
 - Compression levels 1 through 22.
 - A patch comment.
 - `Generate a reverse patch`.
-- A `.vipr` save dialog.
+- An output directory and `.vipr` filename.
 - Progress by file and by processed bytes.
 
-The source and target lists must contain exactly the same number of entries.
+The selected output file is opened only by the patch creation core. Cancelling
+or failing validation therefore does not truncate an existing patch.
 
 ## Creator CLI
 
 ```text
 creator --headless \
-  --source-files old/bin/game.exe \
-  --target-files new/bin/game.exe \
-  --source-files old/data/assets.bin \
-  --target-files new/data/assets.bin \
+  --file-pair old/bin/game.exe::new/bin/game.exe \
+  --file-pair old/data/assets.bin::new/data/assets.bin \
   --compression-level 12 \
   --comment "Version 1.1 update" \
   --create-reverse \
@@ -84,20 +86,20 @@ creator --headless \
 Supported parameters:
 
 ```text
---source-files <file>          Required. Repeat once per source file.
---target-files <file>          Required. Repeat once per target file.
+--file-pair <source>::<target> Required. Repeat once per associated file pair.
 [--compression-level <level>]  Default: 3.
 [--comment <text>]             Default: Created with Viper-Patcher.
 [--create-reverse]             Default: false.
 [--headless]                   Force CLI mode.
 [--version]                    Show version information.
 [--help]                       Show help.
-<output.vipr>                  Required. Patch file output
+<output.vipr>                  Required. Patch file output.
 ```
 
-The CLI accepts libzstd's complete compression-level range, including negative
-fast levels and ultra levels. The GUI deliberately presents the conventional
-1–22 range.
+The `::` delimiter belongs to the option syntax. Source and target paths are
+parsed together, so their association cannot become misaligned. The CLI accepts
+libzstd's complete compression-level range, including negative fast levels and
+ultra levels. The GUI deliberately presents the conventional 1–22 range.
 
 ## Patcher GUI
 
@@ -105,12 +107,19 @@ The patcher starts with instructions to select a `.vipr` patch. After selection,
 the patch comment is displayed read-only. Selecting a target directory triggers
 a complete preflight:
 
-- Every required file must exist.
-- Every file must match all source hashes to enable **Patch**.
-- When reverse data exists, every file must match all target hashes to enable
-  **Reverse**.
-- Mixed, unknown, or missing states disable both actions and report the first
-  affected path plus the total problem count.
+- Every required path must resolve to a regular file without traversing a
+  symbolic link.
+- File hash, size, and portable permission bits must match the source state to
+  enable **Patch**.
+- When reverse data exists, the same properties must match the target state to
+  enable **Reverse**.
+- A file that validly matches both states enables both directions.
+- Mixed, unknown, non-regular, permission-mismatched, or missing states disable
+  the affected directions and report the first problem.
+
+Patch and directory selections are locked while an operation is running. The
+operation uses captured selections rather than mutable GUI state and rejects a
+patch whose SHA-256 digest changed after the displayed preflight inspection.
 
 ## Patcher CLI
 
@@ -149,9 +158,13 @@ wrapper applies the same core configuration used by zstd 1.5.7 patch-from mode:
 - The source file is attached with `ZSTD_CCtx_refPrefix`.
 - Application attaches the current file with `ZSTD_DCtx_refPrefix`.
 - Target content size and checksum are stored in each zstd frame.
+- Decompression stops before writing beyond the size declared by the VIPR
+  header.
 
 Reference files are memory-mapped. Target, patch, and output data are streamed
-through bounded buffers, allowing detailed progress for large files.
+through bounded buffers, allowing detailed progress for large files. Native
+platform I/O, compression, decompression, and common error handling are kept in
+separate C translation units.
 
 ## Building
 
@@ -191,19 +204,22 @@ make test
 make vet
 ```
 
-The repository includes unit and integration tests for path normalization,
-container parsing, malformed metadata, CLI validation, zstd streaming,
-progress, patch creation, forward application, reverse application, preflight
-states, output replacement, and integrity checks. CI enforces at least 80%
-statement coverage across the non-GUI core and compiles the complete GUI
-executables. See [Testing strategy](docs/TESTING.md).
+The repository includes unit, integration, race, fuzz, native sanitizer, and
+vulnerability-reachability checks for path normalization, container parsing,
+malformed metadata, CLI validation, zstd streaming, immutable snapshots,
+transaction rollback, GUI state models, patch creation, forward application,
+reverse application, preflight states, output replacement, and integrity
+checks. CI enforces at least 80% statement coverage across the non-GUI core and
+compiles the complete GUI executables. See [Testing strategy](docs/TESTING.md).
 
 ## GitHub Actions
 
-- `ci.yml` checks formatting, tests, vets, and compiles on every push and pull
+- `ci.yml` checks formatting, runs race and sanitizer tests, vets the code,
+  executes `govulncheck`, enforces coverage, and compiles on every push and pull
   request.
-- `release.yml` creates unsigned cross-platform archives when a `v*` tag is
-  pushed.
+- `release.yml` validates one release version, builds unsigned cross-platform
+  archives, and grants write access only to the publication job.
+- Third-party actions are referenced by immutable commit identifiers.
 
 See [GitHub Actions CI/CD](docs/CI-CD.md) for initial repository configuration,
 release tags, and future code-signing insertion points.

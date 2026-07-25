@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -48,10 +48,24 @@ jobs:
           CGO_ENABLED: "1"
         run: go test -race -count=1 -tags vipr_static_zstd ./...
 
+      - name: Run native sanitizer tests
+        env:
+          CGO_ENABLED: "1"
+          CGO_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+          CGO_LDFLAGS: "-fsanitize=address,undefined"
+          ASAN_OPTIONS: "detect_leaks=0:halt_on_error=1"
+          UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+        run: go test -count=1 -tags vipr_static_zstd ./internal/zstd ./internal/patch
+
       - name: Run go vet
         env:
           CGO_ENABLED: "1"
         run: go vet -tags vipr_static_zstd ./...
+
+      - name: Run vulnerability analysis
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          govulncheck -tags vipr_static_zstd ./...
 
       - name: Enforce core coverage threshold
         env:
