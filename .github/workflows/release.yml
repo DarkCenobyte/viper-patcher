@@ -232,35 +232,56 @@ jobs:
         include:
           - name: x64
             goarch: amd64
-            go_toolchain_architecture: x64
             msystem: MINGW64
             compiler_package: mingw-w64-x86_64-gcc
             make_package: mingw-w64-x86_64-make
             tool_directory: mingw64
           - name: x86
             goarch: "386"
-            go_toolchain_architecture: x86
             msystem: MINGW32
             compiler_package: mingw-w64-i686-gcc
             make_package: mingw-w64-i686-make
             tool_directory: mingw32
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - name: Set up Go for Windows x64
+        if: matrix.name == 'x64'
+        uses: actions/setup-go@v7
         with:
           go-version: "1.26.5"
-          architecture: ${{ matrix.go_toolchain_architecture }}
           cache: true
+      - name: Set up Go for Windows x86
+        if: matrix.name == 'x86'
+        shell: pwsh
+        run: |
+          $archiveName = "go1.26.5.windows-386.zip"
+          $expectedHash = "cab0f6847c17f4c904c0bacb6ec6b84e730fc797f4ba885f42383d580fc2d399"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archiveName
+          $installRoot = Join-Path $env:RUNNER_TEMP "go-windows-386"
+
+          Invoke-WebRequest -Uri "https://go.dev/dl/$archiveName" -OutFile $archivePath
+
+          $actualHash = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "Unexpected SHA-256 for $archiveName. Expected $expectedHash, got $actualHash."
+          }
+
+          Remove-Item -Recurse -Force $installRoot -ErrorAction SilentlyContinue
+          Expand-Archive -Path $archivePath -DestinationPath $installRoot
+          $goRoot = Join-Path $installRoot "go"
+
+          "GOROOT=$goRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          (Join-Path $goRoot "bin") | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Verify Windows toolchain
         shell: pwsh
         run: |
           $hostArchitecture = go env GOHOSTARCH
           $expectedHostArchitecture = "${{ matrix.goarch }}"
           if ($hostArchitecture -ne $expectedHostArchitecture) {
-            throw "Expected the Go host architecture $expectedHostArchitecture, but setup-go installed $hostArchitecture."
+            throw "Expected the Go host architecture $expectedHostArchitecture, but found $hostArchitecture."
           }
           go version
-          go env GOHOSTOS GOHOSTARCH GOOS GOARCH CGO_ENABLED
+          go env GOROOT GOTOOLDIR GOHOSTOS GOHOSTARCH GOOS GOARCH CGO_ENABLED
       - name: Install Windows resource tool
         shell: pwsh
         run: go install github.com/tc-hib/go-winres@v0.3.3
