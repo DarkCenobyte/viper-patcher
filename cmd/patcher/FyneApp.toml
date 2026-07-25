@@ -1,7 +1,7 @@
 [Details]
 Name = "Viper-Patcher"
 ID = "io.github.darkcenobyte.viperpatcher.patcher"
-Version = "0.2.0"
+Version = "0.2.1"
 Build = 1
 
 [Migrations]
