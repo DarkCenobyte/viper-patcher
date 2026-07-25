@@ -1,6 +1,6 @@
 # Viper-Patcher
 
-![Viper-Patcher logo](assets/branding/viper-patcher-logo.png)
+![Viper-Patcher logo](assets/logo.png)
 
 [![CI](https://github.com/DarkCenobyte/viper-patcher/actions/workflows/ci.yml/badge.svg)](https://github.com/DarkCenobyte/viper-patcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
