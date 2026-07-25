@@ -1,20 +1,27 @@
 package creatorgui
 
 import (
-	"fmt"
+	"path/filepath"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/DarkCenobyte/viper-patcher/internal/gui/nativedialog"
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
+)
+
+const (
+	filePairTableHeight = 270
+	filePairColumnWidth = 430
 )
 
 type filePairEditor struct {
 	model        filePairModel
+	display      []filePairDisplay
 	selected     int
-	list         *widget.List
+	table        *widget.Table
 	box          *fyne.Container
 	window       fyne.Window
 	addButton    *widget.Button
@@ -24,87 +31,111 @@ type filePairEditor struct {
 
 func newFilePairEditor(window fyne.Window) *filePairEditor {
 	editor := &filePairEditor{selected: -1, window: window}
-	editor.list = widget.NewList(
-		func() int { return editor.model.Len() },
+	editor.table = widget.NewTable(
+		func() (int, int) { return len(editor.display), 2 },
 		func() fyne.CanvasObject {
-			source := widget.NewLabel("")
-			source.Wrapping = fyne.TextWrapOff
-			target := widget.NewLabel("")
-			target.Wrapping = fyne.TextWrapOff
-			return container.NewVBox(source, target)
+			label := widget.NewLabel("")
+			label.Wrapping = fyne.TextWrapOff
+			return label
 		},
-		func(id widget.ListItemID, object fyne.CanvasObject) {
-			pair := editor.model.Pairs()[id]
-			labels := object.(*fyne.Container).Objects
-			labels[0].(*widget.Label).SetText("Source: " + pair.SourcePath)
-			labels[1].(*widget.Label).SetText("Target: " + pair.TargetPath)
+		func(id widget.TableCellID, object fyne.CanvasObject) {
+			label := object.(*widget.Label)
+			if id.Row < 0 || id.Row >= len(editor.display) {
+				label.SetText("")
+				return
+			}
+			if id.Col == 0 {
+				label.SetText(editor.display[id.Row].Source)
+				return
+			}
+			label.SetText(editor.display[id.Row].Target)
 		},
 	)
-	editor.list.OnSelected = func(id widget.ListItemID) { editor.selected = id }
-	editor.list.OnUnselected = func(widget.ListItemID) { editor.selected = -1 }
+	editor.table.ShowHeaderRow = true
+	editor.table.CreateHeader = func() fyne.CanvasObject {
+		return widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	}
+	editor.table.UpdateHeader = func(id widget.TableCellID, object fyne.CanvasObject) {
+		label := object.(*widget.Label)
+		if id.Row != -1 {
+			label.SetText("")
+			return
+		}
+		if id.Col == 0 {
+			label.SetText("Source")
+			return
+		}
+		label.SetText("Target")
+	}
+	editor.table.SetColumnWidth(0, filePairColumnWidth)
+	editor.table.SetColumnWidth(1, filePairColumnWidth)
+	editor.table.OnSelected = func(id widget.TableCellID) {
+		editor.selected = id.Row
+	}
+	editor.table.OnUnselected = func(widget.TableCellID) {
+		editor.selected = -1
+	}
 	editor.addButton = widget.NewButton("Add file pair", editor.addPair)
 	editor.removeButton = widget.NewButton("Remove selected", editor.removeSelected)
 	editor.clearButton = widget.NewButton("Clear", editor.clear)
+	tableContainer := container.NewGridWrap(editor.table, fyne.NewSize(filePairColumnWidth*2+20, filePairTableHeight))
 	editor.box = container.NewBorder(
 		nil,
 		container.NewHBox(editor.addButton, editor.removeButton, editor.clearButton),
 		nil,
 		nil,
-		editor.list,
+		tableContainer,
 	)
-	editor.box.Resize(fyne.NewSize(900, 300))
 	return editor
 }
 
 func (editor *filePairEditor) addPair() {
-	dialog.ShowFileOpen(func(source fyne.URIReadCloser, err error) {
+	nativedialog.OpenFile(editor.window, nativedialog.FileOptions{Title: "Select source file"}, func(sourcePath string, err error) {
 		if err != nil {
 			dialog.ShowError(err, editor.window)
 			return
 		}
-		if source == nil {
+		if sourcePath == "" {
 			return
 		}
-		sourcePath := source.URI().Path()
-		if err := source.Close(); err != nil {
-			dialog.ShowError(fmt.Errorf("close selected source file: %w", err), editor.window)
-			return
-		}
-		dialog.ShowFileOpen(func(target fyne.URIReadCloser, targetErr error) {
+		nativedialog.OpenFile(editor.window, nativedialog.FileOptions{
+			Title:       "Select target file",
+			InitialPath: filepath.Dir(sourcePath),
+		}, func(targetPath string, targetErr error) {
 			if targetErr != nil {
 				dialog.ShowError(targetErr, editor.window)
 				return
 			}
-			if target == nil {
-				return
-			}
-			targetPath := target.URI().Path()
-			if err := target.Close(); err != nil {
-				dialog.ShowError(fmt.Errorf("close selected target file: %w", err), editor.window)
+			if targetPath == "" {
 				return
 			}
 			if err := editor.model.Add(sourcePath, targetPath); err != nil {
 				dialog.ShowError(err, editor.window)
 				return
 			}
-			editor.list.Refresh()
-		}, editor.window)
-	}, editor.window)
+			editor.refresh()
+		})
+	})
 }
 
 func (editor *filePairEditor) removeSelected() {
 	if editor.model.Remove(editor.selected) {
 		editor.selected = -1
-		editor.list.UnselectAll()
-		editor.list.Refresh()
+		editor.table.UnselectAll()
+		editor.refresh()
 	}
 }
 
 func (editor *filePairEditor) clear() {
 	editor.model.Clear()
 	editor.selected = -1
-	editor.list.UnselectAll()
-	editor.list.Refresh()
+	editor.table.UnselectAll()
+	editor.refresh()
+}
+
+func (editor *filePairEditor) refresh() {
+	editor.display = editor.model.DisplayPairs()
+	editor.table.Refresh()
 }
 
 func (editor *filePairEditor) Pairs() []patch.FilePair { return editor.model.Pairs() }

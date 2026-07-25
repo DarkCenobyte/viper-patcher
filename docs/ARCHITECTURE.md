@@ -6,7 +6,8 @@
 mode and delegate all business logic to internal packages.
 
 - `internal/cli`: deterministic command-line parsing and terminal progress.
-- `internal/gui`: Fyne desktop interfaces and small synchronized state models.
+- `internal/gui`: Fyne desktop interfaces, native-dialog adapters, shared
+  branding, and small synchronized state models.
 - `internal/patch`: creation, inspection, immutable snapshots, and transactional
   application.
 - `internal/patchformat`: versioned `.vipr` container serialization.
@@ -19,7 +20,9 @@ The creator CLI accepts repeatable `--file-pair <source>::<target>` options. A
 single `patch.FilePair` value carries each association from CLI or GUI parsing to
 the creation core. The output `.vipr` path is the single final positional
 argument, so every option must precede that path. The patcher CLI keeps its
-target directory as its final positional argument.
+target directory as its final positional argument. GUI file selection prefers
+native operating-system dialogs and falls back to Fyne when no native provider
+is available.
 
 ## Patch creation
 

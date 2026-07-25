@@ -19,5 +19,6 @@ func main() {
 		}
 		os.Exit(creatorcli.Run(context.Background(), arguments, os.Stdout, os.Stderr))
 	}
+	appmode.PrepareGUI()
 	creatorgui.Run()
 }

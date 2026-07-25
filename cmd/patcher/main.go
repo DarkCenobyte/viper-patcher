@@ -19,5 +19,6 @@ func main() {
 		}
 		os.Exit(patchercli.Run(context.Background(), arguments, os.Stdout, os.Stderr))
 	}
+	appmode.PrepareGUI()
 	patchergui.Run()
 }

@@ -14,8 +14,17 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/DarkCenobyte/viper-patcher/assets"
+	"github.com/DarkCenobyte/viper-patcher/internal/gui/branding"
+	"github.com/DarkCenobyte/viper-patcher/internal/gui/nativedialog"
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
+)
+
+const (
+	creatorWindowWidth  = 1040
+	creatorWindowHeight = 940
+	creatorLogoWidth    = 360
+	creatorLogoHeight   = 166
 )
 
 type creatorController struct {
@@ -37,14 +46,14 @@ func newCreatorController(application fyne.App) *creatorController {
 	controller := &creatorController{}
 	controller.window = application.NewWindow("Viper Patcher - Creator")
 	controller.window.SetIcon(assets.AppIcon)
-	controller.window.Resize(fyne.NewSize(980, 760))
+	controller.window.Resize(fyne.NewSize(creatorWindowWidth, creatorWindowHeight))
 
 	controller.pairs = newFilePairEditor(controller.window)
 	controller.levelSelect = widget.NewSelect(integerOptions(1, 22), nil)
 	controller.levelSelect.SetSelected("3")
 	controller.comment = widget.NewMultiLineEntry()
 	controller.comment.SetText("Created with Viper-Patcher")
-	controller.comment.SetMinRowsVisible(4)
+	controller.comment.SetMinRowsVisible(3)
 	controller.reverse = widget.NewCheck("Generate reverse differentials", nil)
 	controller.outputDirectoryLabel = widget.NewLabel("No output folder selected")
 	controller.outputDirectoryLabel.Wrapping = fyne.TextWrapWord
@@ -64,21 +73,20 @@ func newCreatorController(application fyne.App) *creatorController {
 func (controller *creatorController) buildContent() fyne.CanvasObject {
 	pairCard := widget.NewCard(
 		"Source and target file pairs",
-		"Each row is one permanent source-to-target association. Patch paths are derived from source files.",
+		"Each row is one permanent source-to-target association. Paths are displayed relative to the common folder of each column.",
 		controller.pairs.Container(),
 	)
-	settingsCard := widget.NewCard(
-		"Patch settings",
-		"Configure compression, reverse support, and the embedded comment.",
-		container.NewVBox(
-			container.NewGridWithColumns(2,
-				widget.NewLabel("Compression level"), controller.levelSelect,
-				widget.NewLabel("Reverse support"), controller.reverse,
-			),
-			widget.NewLabel("Patch comment"),
-			controller.comment,
-		),
+	commentCard := widget.NewCard(
+		"Comment",
+		"This text is embedded in the patch and displayed by Viper-Patcher before application.",
+		controller.comment,
 	)
+	settingsContent := container.NewGridWithColumns(2,
+		widget.NewLabel("Compression level"), controller.levelSelect,
+		widget.NewLabel("Reverse support"), controller.reverse,
+	)
+	settings := widget.NewAccordion(widget.NewAccordionItem("Settings", settingsContent))
+	settings.CloseAll()
 	outputCard := widget.NewCard(
 		"Output",
 		"The core writes through a temporary file and safely replaces an existing regular patch.",
@@ -87,30 +95,36 @@ func (controller *creatorController) buildContent() fyne.CanvasObject {
 			container.NewGridWithColumns(2, widget.NewLabel("Filename"), controller.outputName),
 		),
 	)
+	header := container.NewVBox(
+		branding.NewLogo(assets.AppLogo, fyne.NewSize(creatorLogoWidth, creatorLogoHeight)),
+		widget.NewLabelWithStyle("Create a differential patch", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		widget.NewLabelWithStyle("Add each source file together with the exact target file that replaces it.", fyne.TextAlignCenter, fyne.TextStyle{}),
+	)
+	content := container.NewVBox(pairCard, commentCard, settings, outputCard, layout.NewSpacer())
 	return container.NewBorder(
-		container.NewVBox(
-			widget.NewLabelWithStyle("Create a differential patch", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-			widget.NewLabel("Add each source file together with the exact target file that replaces it."),
-		),
+		header,
 		container.NewVBox(controller.progressBar, controller.status, controller.createButton),
 		nil,
 		nil,
-		container.NewVScroll(container.NewVBox(pairCard, settingsCard, outputCard, layout.NewSpacer())),
+		container.NewVScroll(content),
 	)
 }
 
 func (controller *creatorController) chooseOutputDirectory() {
-	dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
+	nativedialog.OpenDirectory(controller.window, nativedialog.DirectoryOptions{
+		Title:       "Choose output folder",
+		InitialPath: controller.outputDirectory,
+	}, func(path string, err error) {
 		if err != nil {
 			dialog.ShowError(err, controller.window)
 			return
 		}
-		if uri == nil {
+		if path == "" {
 			return
 		}
-		controller.outputDirectory = uri.Path()
-		controller.outputDirectoryLabel.SetText(controller.outputDirectory)
-	}, controller.window).Show()
+		controller.outputDirectory = path
+		controller.outputDirectoryLabel.SetText(path)
+	})
 }
 
 func (controller *creatorController) createPatch() {
