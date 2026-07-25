@@ -244,44 +244,21 @@ jobs:
             tool_directory: mingw32
     steps:
       - uses: actions/checkout@v7
-      - name: Set up Go for Windows x64
-        if: matrix.name == 'x64'
+      - name: Set up Go
         uses: actions/setup-go@v7
         with:
           go-version: "1.26.5"
+          architecture: x64
           cache: true
-      - name: Set up Go for Windows x86
-        if: matrix.name == 'x86'
-        shell: pwsh
-        run: |
-          $archiveName = "go1.26.5.windows-386.zip"
-          $expectedHash = "cab0f6847c17f4c904c0bacb6ec6b84e730fc797f4ba885f42383d580fc2d399"
-          $archivePath = Join-Path $env:RUNNER_TEMP $archiveName
-          $installRoot = Join-Path $env:RUNNER_TEMP "go-windows-386"
-
-          Invoke-WebRequest -Uri "https://go.dev/dl/$archiveName" -OutFile $archivePath
-
-          $actualHash = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualHash -ne $expectedHash) {
-            throw "Unexpected SHA-256 for $archiveName. Expected $expectedHash, got $actualHash."
-          }
-
-          Remove-Item -Recurse -Force $installRoot -ErrorAction SilentlyContinue
-          Expand-Archive -Path $archivePath -DestinationPath $installRoot
-          $goRoot = Join-Path $installRoot "go"
-
-          "GOROOT=$goRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          (Join-Path $goRoot "bin") | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Verify Windows toolchain
+      - name: Verify Go host toolchain
         shell: pwsh
         run: |
           $hostArchitecture = go env GOHOSTARCH
-          $expectedHostArchitecture = "${{ matrix.goarch }}"
-          if ($hostArchitecture -ne $expectedHostArchitecture) {
-            throw "Expected the Go host architecture $expectedHostArchitecture, but found $hostArchitecture."
+          if ($hostArchitecture -ne "amd64") {
+            throw "Expected the Go host architecture amd64, but found $hostArchitecture."
           }
           go version
-          go env GOROOT GOTOOLDIR GOHOSTOS GOHOSTARCH GOOS GOARCH CGO_ENABLED
+          go env GOROOT GOTOOLDIR GOHOSTOS GOHOSTARCH
       - name: Install Windows resource tool
         shell: pwsh
         run: go install github.com/tc-hib/go-winres@v0.3.3
@@ -291,6 +268,86 @@ jobs:
           msystem: ${{ matrix.msystem }}
           update: true
           install: ${{ matrix.compiler_package }} ${{ matrix.make_package }}
+      - name: Configure MinGW toolchain
+        shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+          TOOL_DIRECTORY: ${{ matrix.tool_directory }}
+        run: |
+          $toolDirectory = Join-Path $env:MSYS2_ROOT $env:TOOL_DIRECTORY
+          $binDirectory = Join-Path $toolDirectory "bin"
+          $compiler = Join-Path $binDirectory "gcc.exe"
+          $cxxCompiler = Join-Path $binDirectory "g++.exe"
+          $archiver = Join-Path $binDirectory "ar.exe"
+          $ranlib = Join-Path $binDirectory "ranlib.exe"
+          $windres = Join-Path $binDirectory "windres.exe"
+
+          foreach ($tool in @($compiler, $cxxCompiler, $archiver, $ranlib, $windres)) {
+            if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
+              throw "Required MinGW tool was not found: $tool"
+            }
+          }
+
+          $binDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CC=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=$cxxCompiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AR=$archiver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RANLIB=$ranlib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "WINDRES=$windres" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Verify MinGW and cgo
+        shell: pwsh
+        env:
+          CGO_ENABLED: "1"
+          GOOS: windows
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          $compilerTarget = (& $env:CC -dumpmachine).Trim()
+          $expectedTarget = if ($env:GOARCH -eq "386") { "i686-w64-mingw32" } else { "x86_64-w64-mingw32" }
+          if ($compilerTarget -ne $expectedTarget) {
+            throw "Expected MinGW target $expectedTarget, but found $compilerTarget."
+          }
+
+          & $env:CC --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "The MinGW C compiler could not be executed."
+          }
+
+          $probeDirectory = Join-Path $env:RUNNER_TEMP "viper-cgo-probe-$env:GOARCH"
+          Remove-Item -Recurse -Force $probeDirectory -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $probeDirectory | Out-Null
+
+          @'
+          module viper-cgo-probe
+
+          go 1.26.0
+          '@ | Set-Content -LiteralPath (Join-Path $probeDirectory "go.mod") -Encoding utf8
+
+          @'
+          package main
+
+          /*
+          static int vipr_cgo_probe(void) {
+              return 42;
+          }
+          */
+          import "C"
+
+          func main() {
+              if C.vipr_cgo_probe() != 42 {
+                  panic("unexpected cgo probe result")
+              }
+          }
+          '@ | Set-Content -LiteralPath (Join-Path $probeDirectory "main.go") -Encoding utf8
+
+          Push-Location $probeDirectory
+          try {
+            go build -x -trimpath -o "probe.exe" .
+            if ($LASTEXITCODE -ne 0) {
+              throw "The Windows $env:GOARCH cgo probe failed."
+            }
+          } finally {
+            Pop-Location
+          }
       - shell: pwsh
         run: go mod download
       - name: Build libzstd
@@ -306,7 +363,6 @@ jobs:
           CGO_ENABLED: "1"
           GOOS: windows
           GOARCH: ${{ matrix.goarch }}
-          CC: ${{ steps.msys2.outputs.msys2-location }}\${{ matrix.tool_directory }}\bin\gcc.exe
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
         run: |
           $version = $env:RELEASE_VERSION
