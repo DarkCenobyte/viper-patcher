@@ -109,14 +109,14 @@ jobs:
           sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install --yes curl gcc-multilib libc6-dev-i386 \
-            libgl-dev:i386 libx11-dev:i386 libxcursor-dev:i386 \
+            libgl-dev:i386 libegl-dev:i386 libx11-dev:i386 libxcursor-dev:i386 \
             libxrandr-dev:i386 libxinerama-dev:i386 libxi-dev:i386 \
             libxxf86vm-dev:i386 libwayland-dev:i386 libxkbcommon-dev:i386
           printf '#!/bin/sh\nexec gcc -m32 "$@"\n' > "$RUNNER_TEMP/gcc-386"
           chmod +x "$RUNNER_TEMP/gcc-386"
           PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig \
             pkg-config --print-errors --exists \
-              gl x11 xcursor xrandr xinerama xi xxf86vm wayland-client xkbcommon
+              gl egl x11 xcursor xrandr xinerama xi xxf86vm wayland-client xkbcommon
       - run: go mod download
       - name: Build 32-bit libzstd
         env:
@@ -289,7 +289,7 @@ jobs:
             --product-name "Viper-Patcher Creator" `
             --file-description "Create VIPR differential patches" `
             --original-filename "creator.exe" `
-            --output "cmd/creator/rsrc"
+            --out "cmd/creator/rsrc"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
@@ -300,7 +300,7 @@ jobs:
             --product-name "Viper-Patcher" `
             --file-description "Apply and reverse VIPR differential patches" `
             --original-filename "patcher.exe" `
-            --output "cmd/patcher/rsrc"
+            --out "cmd/patcher/rsrc"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
