@@ -24,8 +24,13 @@ metadata.
 - Compression algorithm (`zstd`), linked library version, patch mode, and level.
 - Reverse availability.
 - Ordered file entries containing source-relative path, optional target filename
-  hint, source/target hashes, sizes, permissions, and forward/reverse frame
-  ranges.
+  hint, source/target hashes, sizes, portable permissions, and forward/reverse
+  frame ranges.
+
+`sourceMode` and `targetMode` contain only the portable Unix permission bits
+`0000` through `0777`. Readers reject set-user-ID, set-group-ID, sticky, file
+type, and every other unknown bit. Application masks the value to `0777` again
+immediately before changing permissions as a second defensive boundary.
 
 ## Compatibility rules
 

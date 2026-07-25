@@ -51,7 +51,7 @@ func TestRunAppliesForwardAndReversePatch(t *testing.T) {
 	}
 	patchPath := filepath.Join(root, "update.vipr")
 	if err := patch.Create(context.Background(), patch.CreateOptions{
-		SourceFiles: []string{source}, TargetFiles: []string{target}, OutputPath: patchPath,
+		Files: []patch.FilePair{{SourcePath: source, TargetPath: target}}, OutputPath: patchPath,
 		CompressionLevel: 3, CreateReverse: true,
 	}, nil); err != nil {
 		t.Fatal(err)

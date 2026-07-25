@@ -81,6 +81,9 @@ func TestValidateHeaderFailures(t *testing.T) {
 		{"empty files", func(header *Header) { header.Files = nil }},
 		{"empty path", func(header *Header) { header.Files[0].Path = "" }},
 		{"bad digest", func(header *Header) { header.Files[0].SourceHash = "bad" }},
+		{"special source mode", func(header *Header) { header.Files[0].SourceMode = 0o4755 }},
+		{"special target mode", func(header *Header) { header.Files[0].TargetMode = 0o1000 }},
+		{"unknown mode bit", func(header *Header) { header.Files[0].TargetMode = 1 << 31 }},
 		{"non-hex digest", func(header *Header) { header.Files[0].SourceHash = strings.Repeat("z", 64) }},
 		{"uppercase digest", func(header *Header) { header.Files[0].SourceHash = strings.Repeat("A", 64) }},
 		{"traversal path", func(header *Header) { header.Files[0].Path = "../game.exe" }},
@@ -146,4 +149,16 @@ func TestDecodeRejectsTrailingJSON(t *testing.T) {
 	if _, err := Decode(&buffer); err == nil {
 		t.Fatalf("expected invalid trailing JSON to be rejected: %#v", header)
 	}
+}
+
+func FuzzDecode(f *testing.F) {
+	var valid bytes.Buffer
+	if _, err := EncodePrefix(&valid, validHeader()); err != nil {
+		f.Fatal(err)
+	}
+	f.Add(valid.Bytes())
+	f.Add([]byte("not a patch"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = Decode(bytes.NewReader(data))
+	})
 }

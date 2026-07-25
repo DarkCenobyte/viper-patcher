@@ -1,19 +1,24 @@
 # GitHub Actions CI/CD
 
-Two workflows are included.
+Two workflows are included. Every external GitHub Action is referenced by its
+full commit identifier rather than a mutable tag.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on pushes and pull requests. It:
+`.github/workflows/ci.yml` runs on pushes and pull requests with read-only
+repository permissions. It:
 
 1. Installs desktop build dependencies.
 2. Downloads and verifies zstd 1.5.7.
 3. Builds the static library.
 4. Checks formatting.
-5. Runs tests with the race detector.
-6. Runs `go vet`.
-7. Enforces at least 80% statement coverage across core packages.
-8. Compiles both executables, including their Fyne GUI packages.
+5. Runs the complete test suite with the race detector.
+6. Runs native patch and zstd tests with AddressSanitizer and
+   UndefinedBehaviorSanitizer.
+7. Runs `go vet`.
+8. Runs `govulncheck`.
+9. Enforces at least 80% statement coverage across core packages.
+10. Compiles both executables, including their Fyne GUI packages.
 
 ## Releases
 
@@ -32,17 +37,22 @@ libzstd's upstream license files, and collected license/notice files for every
 resolved Go module. A final job generates `SHA256SUMS.txt` and publishes a
 GitHub Release.
 
-A manual run asks for an explicit version number. A tag run derives the version
-from the `v*` tag.
+A dedicated read-only job resolves the release version once. Manual input is
+passed through an environment variable, validated against the accepted version
+syntax, and exported as job outputs. Build scripts consume only those validated
+outputs; untrusted expression text is never inserted directly into Bash or
+PowerShell source.
+
+All build jobs remain read-only. Only the final publication job receives
+`contents: write`, after every platform artifact has been produced successfully.
 
 ## Initial repository setup
 
 1. Replace the placeholder module path and commit `go.sum` after `go mod tidy`.
 2. Push the repository to GitHub.
 3. Open **Settings → Actions → General** and allow GitHub Actions.
-4. The CI workflow only needs read access. The release workflow declares
-   `contents: write`; ensure organization policy allows that explicit
-   permission for tagged or manually dispatched releases.
+4. Keep the default workflow token permissions read-only. The publication job
+   declares its narrower `contents: write` requirement directly.
 5. Push normally to run CI.
 6. Create and push a release tag:
 

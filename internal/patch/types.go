@@ -10,50 +10,85 @@ const (
 	Reverse Direction = "reverse"
 )
 
+// FilePair keeps one source file permanently associated with its target file.
+type FilePair struct {
+	SourcePath string
+	TargetPath string
+}
+
 // ValidationState describes the files currently present in a target directory.
 type ValidationState string
 
 const (
-	StateForwardReady ValidationState = "forward-ready"
-	StateReverseReady ValidationState = "reverse-ready"
-	StateMissingFiles ValidationState = "missing-files"
-	StateHashMismatch ValidationState = "hash-mismatch"
+	StateForwardReady       ValidationState = "forward-ready"
+	StateReverseReady       ValidationState = "reverse-ready"
+	StateBidirectionalReady ValidationState = "bidirectional-ready"
+	StateMissingFiles       ValidationState = "missing-files"
+	StateMixedFiles         ValidationState = "mixed-files"
+	StateInvalidFiles       ValidationState = "invalid-files"
 )
 
-// HashMismatch records one existing file whose digest is not expected.
-type HashMismatch struct {
-	Path   string
-	Actual string
+// IssueReason identifies why an existing file cannot be used in either direction.
+type IssueReason string
+
+const (
+	IssueHashMismatch IssueReason = "hash-mismatch"
+	IssueModeMismatch IssueReason = "mode-mismatch"
+	IssueNotRegular   IssueReason = "not-regular"
+)
+
+// FileIssue records one existing file that does not match an expected state.
+type FileIssue struct {
+	Path       string
+	Reason     IssueReason
+	ActualHash string
+	ActualMode uint32
 }
 
-// ValidationResult describes whether a patch can be applied or reversed.
+// ValidationResult describes which patch directions can be applied safely.
 type ValidationResult struct {
-	State      ValidationState
-	Missing    []string
-	Mismatched []HashMismatch
+	State           ValidationState
+	CanApplyForward bool
+	CanApplyReverse bool
+	Missing         []string
+	Issues          []FileIssue
 }
 
+// Ready reports whether direction can be applied to the inspected directory.
 func (result ValidationResult) Ready(direction Direction) bool {
-	return (direction == Forward && result.State == StateForwardReady) ||
-		(direction == Reverse && result.State == StateReverseReady)
+	switch direction {
+	case Forward:
+		return result.CanApplyForward
+	case Reverse:
+		return result.CanApplyReverse
+	default:
+		return false
+	}
 }
 
-func (result ValidationResult) Error() error {
-	switch result.State {
-	case StateForwardReady, StateReverseReady:
+// ErrorFor describes why direction cannot be applied safely.
+func (result ValidationResult) ErrorFor(direction Direction) error {
+	if result.Ready(direction) {
 		return nil
+	}
+	prefix := fmt.Sprintf("%s patch cannot be applied", direction)
+	switch result.State {
 	case StateMissingFiles:
 		if len(result.Missing) == 0 {
-			return fmt.Errorf("one or more files required by the patch are missing")
+			return fmt.Errorf("%s: one or more required files are missing", prefix)
 		}
-		problemCount := len(result.Missing) + len(result.Mismatched)
-		return fmt.Errorf("%d file(s) have a problem (%d missing); first missing file: %s", problemCount, len(result.Missing), result.Missing[0])
-	case StateHashMismatch:
-		if len(result.Mismatched) == 0 {
-			return fmt.Errorf("one or more file hashes do not match the patch")
+		problemCount := len(result.Missing) + len(result.Issues)
+		return fmt.Errorf("%s: %d file(s) have a problem (%d missing); first missing file: %s", prefix, problemCount, len(result.Missing), result.Missing[0])
+	case StateMixedFiles:
+		return fmt.Errorf("%s: the target directory contains a mixture of source and target file states", prefix)
+	case StateInvalidFiles:
+		if len(result.Issues) == 0 {
+			return fmt.Errorf("%s: one or more files do not match the patch", prefix)
 		}
-		return fmt.Errorf("%d file hash(es) do not match; first mismatched file: %s", len(result.Mismatched), result.Mismatched[0].Path)
+		return fmt.Errorf("%s: %d file(s) do not match; first affected file: %s (%s)", prefix, len(result.Issues), result.Issues[0].Path, result.Issues[0].Reason)
+	case StateForwardReady, StateReverseReady, StateBidirectionalReady:
+		return fmt.Errorf("%s: the installed files match only the opposite patch direction", prefix)
 	default:
-		return fmt.Errorf("unknown validation state %q", result.State)
+		return fmt.Errorf("%s: unknown validation state %q", prefix, result.State)
 	}
 }

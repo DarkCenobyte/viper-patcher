@@ -80,3 +80,30 @@ func TestSecureJoinExistingAllowsMissingFile(t *testing.T) {
 		t.Fatalf("joined = %q", joined)
 	}
 }
+
+func TestSecureJoinExistingRejectsSymbolicLinkRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic-link creation normally requires additional privileges on Windows")
+	}
+	realRoot := t.TempDir()
+	linkRoot := filepath.Join(t.TempDir(), "root-link")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SecureJoinExisting(linkRoot, "file.bin"); err == nil {
+		t.Fatal("expected symbolic-link root to be rejected")
+	}
+}
+
+func FuzzSecureJoin(f *testing.F) {
+	f.Add("data/file.bin")
+	f.Add("../escape")
+	f.Add(`data\file.bin`)
+	f.Fuzz(func(t *testing.T, patchPath string) {
+		root := t.TempDir()
+		joined, err := SecureJoin(root, patchPath)
+		if err == nil && !isWithin(root, joined) {
+			t.Fatalf("joined path escaped root: %q", joined)
+		}
+	})
+}

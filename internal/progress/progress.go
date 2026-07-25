@@ -1,5 +1,19 @@
 package progress
 
+// Stage identifies one phase of a patch creation or application operation.
+type Stage string
+
+const (
+	StagePreparing          Stage = "preparing"
+	StageSnapshotting       Stage = "snapshotting"
+	StageCompressingForward Stage = "compressing-forward"
+	StageCompressingReverse Stage = "compressing-reverse"
+	StageApplying           Stage = "applying"
+	StageVerifying          Stage = "verifying"
+	StageFileCompleted      Stage = "file-completed"
+	StageCompleted          Stage = "completed"
+)
+
 // Event reports progress for one file in a multi-file operation.
 type Event struct {
 	FileIndex      int
@@ -7,7 +21,7 @@ type Event struct {
 	Path           string
 	ProcessedBytes uint64
 	TotalBytes     uint64
-	Stage          string
+	Stage          Stage
 }
 
 // Callback receives progress events. Implementations must be concurrency-safe.

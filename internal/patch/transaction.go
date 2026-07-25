@@ -1,0 +1,210 @@
+package patch
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+type transactionOperations struct {
+	createTemp func(string, string) (*os.File, error)
+	rename     func(string, string) error
+	remove     func(string) error
+	verify     func(string, fileExpectation) error
+}
+
+var defaultTransactionOperations = transactionOperations{
+	createTemp: os.CreateTemp,
+	rename:     os.Rename,
+	remove:     os.Remove,
+	verify:     verifyFileExpectation,
+}
+
+type transactionFile struct {
+	target      string
+	temporary   string
+	backup      string
+	expectation fileExpectation
+	backedUp    bool
+	committed   bool
+}
+
+// Transaction replaces a group of prepared files and performs a best-effort
+// rollback when a later replacement fails.
+type Transaction struct {
+	files      []transactionFile
+	operations transactionOperations
+	finished   bool
+}
+
+// NewTransaction creates an empty file replacement transaction.
+func NewTransaction() *Transaction {
+	return newTransactionWithOperations(defaultTransactionOperations)
+}
+
+func newTransactionWithOperations(operations transactionOperations) *Transaction {
+	return &Transaction{operations: operations}
+}
+
+// Add registers one prepared replacement and the identity of the validated file.
+func (transaction *Transaction) Add(target, temporary string, expectation fileExpectation) error {
+	if transaction.finished {
+		return fmt.Errorf("transaction is already finished")
+	}
+	if target == "" || temporary == "" || expectation.Identity == nil {
+		return fmt.Errorf("transaction replacement is incomplete")
+	}
+	transaction.files = append(transaction.files, transactionFile{
+		target:      target,
+		temporary:   temporary,
+		expectation: expectation,
+	})
+	return nil
+}
+
+// Commit replaces every registered file. Any failure includes rollback errors.
+func (transaction *Transaction) Commit() error {
+	if transaction.finished {
+		return fmt.Errorf("transaction is already finished")
+	}
+	for index := range transaction.files {
+		file := &transaction.files[index]
+		if err := transaction.operations.verify(file.target, file.expectation); err != nil {
+			return transaction.fail(index-1, err)
+		}
+		if err := transaction.reserveBackup(file); err != nil {
+			return transaction.fail(index-1, err)
+		}
+		if err := transaction.operations.rename(file.target, file.backup); err != nil {
+			return transaction.fail(index-1, fmt.Errorf("backup %q: %w", file.target, err))
+		}
+		file.backedUp = true
+		if err := transaction.operations.rename(file.temporary, file.target); err != nil {
+			return transaction.fail(index, fmt.Errorf("replace %q: %w", file.target, err))
+		}
+		file.committed = true
+	}
+
+	transaction.finished = true
+	return transaction.removeBackups()
+}
+
+// Cleanup removes prepared files when a transaction is abandoned before commit.
+func (transaction *Transaction) Cleanup() error {
+	if transaction.finished {
+		return nil
+	}
+	cleanupError := transaction.cleanupPreparedFiles()
+	transaction.finished = true
+	return cleanupError
+}
+
+func (transaction *Transaction) reserveBackup(file *transactionFile) error {
+	backup, err := transaction.operations.createTemp(filepath.Dir(file.target), ".viper-patcher-backup-*")
+	if err != nil {
+		return fmt.Errorf("reserve backup path for %q: %w", file.target, err)
+	}
+	file.backup = backup.Name()
+	if err := backup.Close(); err != nil {
+		removeError := transaction.operations.remove(file.backup)
+		return errors.Join(
+			fmt.Errorf("close backup placeholder for %q: %w", file.target, err),
+			wrapRemoveError("remove backup placeholder", file.backup, removeError),
+		)
+	}
+	if err := transaction.operations.remove(file.backup); err != nil {
+		return fmt.Errorf("release backup path for %q: %w", file.target, err)
+	}
+	return nil
+}
+
+func (transaction *Transaction) fail(lastIndex int, operationError error) error {
+	rollbackError := transaction.rollback(lastIndex)
+	cleanupError := transaction.cleanupPreparedFiles()
+	transaction.finished = true
+	return errors.Join(
+		operationError,
+		wrapJoinedError("rollback failed", rollbackError),
+		wrapJoinedError("cleanup after failed transaction", cleanupError),
+	)
+}
+
+func (transaction *Transaction) cleanupPreparedFiles() error {
+	var cleanupErrors []error
+	for index := range transaction.files {
+		file := &transaction.files[index]
+		if file.temporary != "" {
+			if err := transaction.operations.remove(file.temporary); err != nil && !os.IsNotExist(err) {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("remove temporary file %q: %w", file.temporary, err))
+			} else {
+				file.temporary = ""
+			}
+		}
+		if file.backup != "" && !file.backedUp {
+			if err := transaction.operations.remove(file.backup); err != nil && !os.IsNotExist(err) {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("remove backup placeholder %q: %w", file.backup, err))
+			} else {
+				file.backup = ""
+			}
+		}
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func (transaction *Transaction) rollback(lastIndex int) error {
+	var rollbackErrors []error
+	if lastIndex >= len(transaction.files) {
+		lastIndex = len(transaction.files) - 1
+	}
+	for index := lastIndex; index >= 0; index-- {
+		file := &transaction.files[index]
+		if !file.backedUp {
+			continue
+		}
+		if file.committed {
+			if err := transaction.operations.remove(file.target); err != nil && !os.IsNotExist(err) {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("remove replacement %q: %w", file.target, err))
+				continue
+			}
+		}
+		if err := transaction.operations.rename(file.backup, file.target); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore %q: %w", file.target, err))
+			continue
+		}
+		file.backedUp = false
+		file.committed = false
+	}
+	return errors.Join(rollbackErrors...)
+}
+
+func (transaction *Transaction) removeBackups() error {
+	var cleanupErrors []error
+	for index := range transaction.files {
+		file := &transaction.files[index]
+		if file.backup == "" {
+			continue
+		}
+		if err := transaction.operations.remove(file.backup); err != nil && !os.IsNotExist(err) {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove committed backup %q: %w", file.backup, err))
+			continue
+		}
+		file.backup = ""
+		file.backedUp = false
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func wrapRemoveError(operation, path string, err error) error {
+	if err == nil || os.IsNotExist(err) {
+		return nil
+	}
+	return fmt.Errorf("%s %q: %w", operation, path, err)
+}
+
+func wrapJoinedError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
+}
