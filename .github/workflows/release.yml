@@ -232,12 +232,14 @@ jobs:
         include:
           - name: x64
             goarch: amd64
+            go_toolchain_architecture: x64
             msystem: MINGW64
             compiler_package: mingw-w64-x86_64-gcc
             make_package: mingw-w64-x86_64-make
             tool_directory: mingw64
           - name: x86
             goarch: "386"
+            go_toolchain_architecture: x86
             msystem: MINGW32
             compiler_package: mingw-w64-i686-gcc
             make_package: mingw-w64-i686-make
@@ -247,7 +249,18 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26.5"
+          architecture: ${{ matrix.go_toolchain_architecture }}
           cache: true
+      - name: Verify Windows toolchain
+        shell: pwsh
+        run: |
+          $hostArchitecture = go env GOHOSTARCH
+          $expectedHostArchitecture = "${{ matrix.goarch }}"
+          if ($hostArchitecture -ne $expectedHostArchitecture) {
+            throw "Expected the Go host architecture $expectedHostArchitecture, but setup-go installed $hostArchitecture."
+          }
+          go version
+          go env GOHOSTOS GOHOSTARCH GOOS GOARCH CGO_ENABLED
       - name: Install Windows resource tool
         shell: pwsh
         run: go install github.com/tc-hib/go-winres@v0.3.3
