@@ -15,14 +15,18 @@ import (
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/DarkCenobyte/viper-patcher/assets"
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
 
 // Run starts the creator graphical interface.
 func Run() {
-	application := app.NewWithID("io.github.viperpatcher.creator")
+	application := app.NewWithID("io.github.darkcenobyte.viperpatcher.creator")
+	application.SetIcon(assets.AppIcon)
+
 	window := application.NewWindow("Viper Patcher - Creator")
+	window.SetIcon(assets.AppIcon)
 	window.Resize(fyne.NewSize(920, 700))
 
 	sources := newFileSelector("Source files", window)
@@ -30,7 +34,7 @@ func Run() {
 	levelSelect := widget.NewSelect(integerOptions(1, 22), nil)
 	levelSelect.SetSelected("3")
 	comment := widget.NewMultiLineEntry()
-	comment.SetText("REPLACEME")
+	comment.SetText("Created with Viper-Patcher")
 	comment.SetMinRowsVisible(5)
 	reverse := widget.NewCheck("Generate a reverse patch", nil)
 	progressBar := widget.NewProgressBar()

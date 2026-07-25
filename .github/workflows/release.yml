@@ -138,6 +138,8 @@ jobs:
         with:
           go-version: "1.26.5"
           cache: true
+      - name: Install Fyne packaging tool
+        run: go install fyne.io/tools/cmd/fyne@v1.7.2
       - run: go mod download
       - name: Build libzstd
         run: |
@@ -161,6 +163,31 @@ jobs:
           mkdir -p "dist/${package}"
           go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o "dist/${package}/creator" ./cmd/creator
           go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o "dist/${package}/patcher" ./cmd/patcher
+          root="$PWD"
+          fyne_tool="$(go env GOPATH)/bin/fyne"
+          icon="$root/assets/icon.png"
+          "$fyne_tool" package \
+            --os darwin \
+            --source-dir "$root/cmd/creator" \
+            --executable "$root/dist/${package}/creator" \
+            --name "Viper-Patcher Creator" \
+            --app-id "io.github.darkcenobyte.viperpatcher.creator" \
+            --app-version "$version" \
+            --app-build "$GITHUB_RUN_NUMBER" \
+            --icon "$icon" \
+            --release
+          mv "Viper-Patcher Creator.app" "dist/${package}/"
+          "$fyne_tool" package \
+            --os darwin \
+            --source-dir "$root/cmd/patcher" \
+            --executable "$root/dist/${package}/patcher" \
+            --name "Viper-Patcher" \
+            --app-id "io.github.darkcenobyte.viperpatcher.patcher" \
+            --app-version "$version" \
+            --app-build "$GITHUB_RUN_NUMBER" \
+            --icon "$icon" \
+            --release
+          mv "Viper-Patcher.app" "dist/${package}/"
           cp README.md LICENSE "dist/${package}/"
           mkdir -p "dist/${package}/third-party-licenses"
           cp third_party/zstd/LICENSE third_party/zstd/COPYING "dist/${package}/third-party-licenses/"
@@ -196,6 +223,9 @@ jobs:
         with:
           go-version: "1.26.5"
           cache: true
+      - name: Install Windows resource tool
+        shell: pwsh
+        run: go install github.com/tc-hib/go-winres@v0.3.3
       - uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
@@ -224,6 +254,29 @@ jobs:
           $ldflags = "-s -w -X $module/internal/buildinfo.Version=$version -X $module/internal/buildinfo.Commit=$env:GITHUB_SHA -X $module/internal/buildinfo.BuildDate=$buildDate"
           $package = "viper-patcher_${version}_windows_${env:GOARCH}"
           New-Item -ItemType Directory -Force -Path "dist/$package/third-party-licenses" | Out-Null
+          $goWinRes = Join-Path (go env GOPATH) "bin/go-winres.exe"
+          & $goWinRes simply `
+            --arch "${{ matrix.goarch }}" `
+            --icon "assets/icon.png" `
+            --manifest cli `
+            --product-name "Viper-Patcher Creator" `
+            --file-description "Create VIPR differential patches" `
+            --original-filename "creator.exe" `
+            --output "cmd/creator/rsrc"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          & $goWinRes simply `
+            --arch "${{ matrix.goarch }}" `
+            --icon "assets/icon.png" `
+            --manifest cli `
+            --product-name "Viper-Patcher" `
+            --file-description "Apply and reverse VIPR differential patches" `
+            --original-filename "patcher.exe" `
+            --output "cmd/patcher/rsrc"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
           go build -trimpath -tags vipr_static_zstd -ldflags $ldflags -o "dist/$package/creator.exe" ./cmd/creator
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -trimpath -tags vipr_static_zstd -ldflags $ldflags -o "dist/$package/patcher.exe" ./cmd/patcher

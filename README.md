@@ -1,4 +1,9 @@
-# Viper Patcher
+# Viper-Patcher
+
+![Viper-Patcher logo](assets/branding/viper-patcher-logo.png)
+
+[![CI](https://github.com/DarkCenobyte/viper-patcher/actions/workflows/ci.yml/badge.svg)](https://github.com/DarkCenobyte/viper-patcher/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Viper Patcher is a cross-platform differential patch creator and applicator for
 binary files. It provides two executables:
@@ -55,7 +60,7 @@ The creator interface provides:
 - Multiple source files.
 - Multiple target files in matching order.
 - Compression levels 1 through 22.
-- A patch comment, initially `REPLACEME`.
+- A patch comment.
 - `Generate a reverse patch`.
 - A `.vipr` save dialog.
 - Progress by file and by processed bytes.
@@ -82,8 +87,8 @@ Supported parameters:
 --source-files <file>          Required. Repeat once per source file.
 --target-files <file>          Required. Repeat once per target file.
 --output <file.vipr>           Required in CLI mode.
-[--compression-level <level>] Default: 3.
-[--comment <text>]             Default: REPLACEME.
+[--compression-level <level>]  Default: 3.
+[--comment <text>]             Default: Created with Viper-Patcher.
 [--create-reverse]             Default: false.
 [--headless]                   Force CLI mode.
 [--version]                    Show version information.
@@ -124,7 +129,7 @@ patcher --headless --patch-file update.vipr --reverse /path/to/application
 Supported parameters:
 
 ```text
---patch-file <file.vipr>       Required.
+--patch-file <file.vipr>      Required.
 <target-directory>            Required positional argument.
 [--reverse]                   Default: false.
 [--headless]                  Force CLI mode.
