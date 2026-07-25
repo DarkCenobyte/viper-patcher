@@ -34,7 +34,8 @@ make build
 Install Go and MSYS2. Install the required compiler in an MSYS2 terminal:
 
 ```sh
-pacman -S --needed make mingw-w64-x86_64-gcc mingw-w64-i686-gcc
+pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-make
+pacman -S --needed mingw-w64-i686-gcc mingw-w64-i686-make
 ```
 
 Then use PowerShell:
@@ -51,6 +52,15 @@ go build -tags vipr_static_zstd -o dist/patcher.exe ./cmd/patcher
 
 Use `-Architecture x86`, `GOARCH=386`, and the `mingw32` compiler directory for
 32-bit Windows.
+
+The PowerShell build script detects a standard `C:\msys64` installation. If
+MSYS2 is installed elsewhere, pass its root explicitly:
+
+```powershell
+./scripts/build-zstd.ps1 -Architecture x64 -MSYS2Root "D:\path\to\msys64"
+```
+
+The same value can be provided through the `MSYS2_ROOT` environment variable.
 
 ## System libzstd development mode
 

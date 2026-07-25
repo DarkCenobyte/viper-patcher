@@ -1,6 +1,8 @@
 param(
     [ValidateSet("x64", "x86")]
-    [string]$Architecture = "x64"
+    [string]$Architecture = "x64",
+
+    [string]$MSYS2Root = $env:MSYS2_ROOT
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,29 +10,70 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Source = Join-Path $Root "third_party/zstd"
 $Output = Join-Path $Root "build/zstd"
 
+function Resolve-MSYS2Root {
+    param(
+        [string]$PreferredRoot
+    )
+
+    $Candidates = @(
+        $PreferredRoot,
+        $env:MSYS2_ROOT,
+        "C:\msys64",
+        "D:\msys64"
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+    foreach ($Candidate in $Candidates) {
+        $ResolvedCandidate = [System.IO.Path]::GetFullPath($Candidate)
+        if (Test-Path (Join-Path $ResolvedCandidate "usr/bin/bash.exe")) {
+            return $ResolvedCandidate
+        }
+    }
+
+    throw "MSYS2 was not found. Pass its installation directory with -MSYS2Root or set MSYS2_ROOT."
+}
+
+function Invoke-MinGWMake {
+    param(
+        [string[]]$Arguments
+    )
+
+    & $Make @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "MinGW make failed with exit code $LASTEXITCODE."
+    }
+}
+
 if (-not (Test-Path (Join-Path $Source "lib/zstd.h"))) {
     throw "zstd source is missing. Run scripts/fetch-zstd.ps1 first."
 }
 
-if ($Architecture -eq "x86") {
-    $ToolDirectory = "C:\msys64\mingw32\bin"
-}
-else {
-    $ToolDirectory = "C:\msys64\mingw64\bin"
-}
+$ResolvedMSYS2Root = Resolve-MSYS2Root -PreferredRoot $MSYS2Root
+$ToolName = if ($Architecture -eq "x86") { "mingw32" } else { "mingw64" }
+$ToolDirectory = Join-Path $ResolvedMSYS2Root "$ToolName/bin"
+$MSYSDirectory = Join-Path $ResolvedMSYS2Root "usr/bin"
 $Make = Join-Path $ToolDirectory "mingw32-make.exe"
+$Compiler = Join-Path $ToolDirectory "gcc.exe"
+
 if (-not (Test-Path $Make)) {
-    throw "MinGW make was not found at $Make. Install MSYS2 and the matching MinGW toolchain."
+    $Package = if ($Architecture -eq "x86") { "mingw-w64-i686-make" } else { "mingw-w64-x86_64-make" }
+    throw "MinGW make was not found at $Make. Install the $Package package."
+}
+if (-not (Test-Path $Compiler)) {
+    $Package = if ($Architecture -eq "x86") { "mingw-w64-i686-gcc" } else { "mingw-w64-x86_64-gcc" }
+    throw "MinGW GCC was not found at $Compiler. Install the $Package package."
 }
 
 $OldPath = $env:Path
-$env:Path = "$ToolDirectory;$env:Path"
+$env:Path = "$ToolDirectory;$MSYSDirectory;$env:Path"
 try {
-    & $Make -C (Join-Path $Source "lib") clean | Out-Null
-    & $Make -C (Join-Path $Source "lib") -j2 libzstd.a ZSTD_LEGACY_SUPPORT=0 ZSTD_MULTITHREAD_SUPPORT=0 MOREFLAGS=-O3
-    if ($LASTEXITCODE -ne 0) {
-        throw "libzstd build failed with exit code $LASTEXITCODE."
-    }
+    Invoke-MinGWMake -Arguments @("-C", (Join-Path $Source "lib"), "clean")
+    Invoke-MinGWMake -Arguments @(
+        "-C", (Join-Path $Source "lib"), "-j2", "libzstd.a",
+        "CC=gcc",
+        "ZSTD_LEGACY_SUPPORT=0",
+        "ZSTD_MULTITHREAD_SUPPORT=0",
+        "MOREFLAGS=-O3"
+    )
 }
 finally {
     $env:Path = $OldPath

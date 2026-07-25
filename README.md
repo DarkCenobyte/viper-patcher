@@ -194,6 +194,10 @@ go build -tags vipr_static_zstd -o dist/creator.exe ./cmd/creator
 go build -tags vipr_static_zstd -o dist/patcher.exe ./cmd/patcher
 ```
 
+The PowerShell build script detects a standard `C:\msys64` installation. For
+another location, pass `-MSYS2Root "D:\path\to\msys64"` or set the
+`MSYS2_ROOT` environment variable.
+
 See [Building](docs/BUILDING.md) for dependencies, x86 instructions, and module
 path setup.
 
