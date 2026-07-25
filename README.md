@@ -75,10 +75,10 @@ creator --headless \
   --target-files new/bin/game.exe \
   --source-files old/data/assets.bin \
   --target-files new/data/assets.bin \
-  --output update.vipr \
   --compression-level 12 \
   --comment "Version 1.1 update" \
-  --create-reverse
+  --create-reverse \
+  update.vipr
 ```
 
 Supported parameters:
@@ -86,13 +86,13 @@ Supported parameters:
 ```text
 --source-files <file>          Required. Repeat once per source file.
 --target-files <file>          Required. Repeat once per target file.
---output <file.vipr>           Required in CLI mode.
 [--compression-level <level>]  Default: 3.
 [--comment <text>]             Default: Created with Viper-Patcher.
 [--create-reverse]             Default: false.
 [--headless]                   Force CLI mode.
 [--version]                    Show version information.
 [--help]                       Show help.
+<output.vipr>                  Required. Patch file output
 ```
 
 The CLI accepts libzstd's complete compression-level range, including negative

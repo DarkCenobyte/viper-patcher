@@ -13,7 +13,7 @@ make vet
 The test suite covers:
 
 - GUI/CLI mode selection helpers.
-- Creator and patcher command parsing, help, version, failure, and success paths.
+- Creator and patcher command parsing, including their required final positional arguments, help, version, failure, and success paths.
 - SHA-256 hashing.
 - Common-root and safe path handling, including symbolic-link rejection.
 - Strict VIPR header parsing and malformed metadata.

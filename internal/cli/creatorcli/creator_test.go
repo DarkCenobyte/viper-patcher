@@ -18,7 +18,7 @@ func TestRunHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d", code)
 	}
-	if !strings.Contains(stdout.String(), "Example:") || !strings.Contains(stdout.String(), "--source-files") {
+	if !strings.Contains(stdout.String(), "Example:") || !strings.Contains(stdout.String(), "--source-files") || !strings.Contains(stdout.String(), "<output.vipr>") {
 		t.Fatalf("unexpected help: %s", stdout.String())
 	}
 }
@@ -49,8 +49,8 @@ func TestRunCreatesPatch(t *testing.T) {
 		"--headless",
 		"--source-files", source,
 		"--target-files", target,
-		"--output", output,
 		"--create-reverse",
+		output,
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
@@ -80,16 +80,47 @@ func TestRunRejectsUnknownParameter(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run(context.Background(), []string{"--unknown"}, &stdout, &stderr)
-	if code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined") || !strings.Contains(stderr.String(), "Supported parameters:") {
+	if code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined") || !strings.Contains(stderr.String(), "Supported parameters and arguments:") {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
 }
 
-func TestRunRejectsUnexpectedPositionalArgument(t *testing.T) {
+func TestRunRejectsRemovedOutputFlag(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := Run(context.Background(), []string{"unexpected"}, &stdout, &stderr)
-	if code != 2 || !strings.Contains(stderr.String(), "unexpected positional argument") {
+	arguments := []string{"--source-files", "one", "--target-files", "two", "--output", "update.vipr"}
+	code := Run(context.Background(), arguments, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined: -output") {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+}
+
+func TestRunRejectsMissingOutputPath(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	arguments := []string{"--source-files", "one", "--target-files", "two"}
+	code := Run(context.Background(), arguments, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "output .vipr path is required as the final argument") {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+}
+
+func TestRunRejectsMultipleOutputPaths(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	arguments := []string{"--source-files", "one", "--target-files", "two", "first.vipr", "second.vipr"}
+	code := Run(context.Background(), arguments, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "expected exactly one output .vipr path") {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+}
+
+func TestRunRejectsOptionAfterOutputPath(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	arguments := []string{"--source-files", "one", "--target-files", "two", "update.vipr", "--comment", "too late"}
+	code := Run(context.Background(), arguments, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "expected exactly one output .vipr path") {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
 }
@@ -106,7 +137,7 @@ func TestRunRejectsEmptyRepeatedValue(t *testing.T) {
 func TestRunRejectsUnequalLists(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	arguments := []string{"--source-files", "one", "--target-files", "two", "--target-files", "three", "--output", "x.vipr"}
+	arguments := []string{"--source-files", "one", "--target-files", "two", "--target-files", "three", "x.vipr"}
 	code := Run(context.Background(), arguments, &stdout, &stderr)
 	if code != 2 || !strings.Contains(stderr.String(), "source-files contains 1") {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())

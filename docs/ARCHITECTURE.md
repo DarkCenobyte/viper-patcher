@@ -13,6 +13,11 @@ mode and delegate all business logic to internal packages.
 - `internal/pathutil`: common-root calculation and traversal-safe path joining.
 - `internal/hashutil`: SHA-256 file integrity.
 
+The creator CLI accepts source and target files through repeatable flags. Its
+output `.vipr` path is the single final positional argument, so every option
+must precede that path. The patcher CLI keeps its target directory as its final
+positional argument.
+
 ## Patch creation
 
 For each ordered source/target pair, the creator:

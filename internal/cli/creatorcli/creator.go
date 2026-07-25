@@ -29,7 +29,6 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.SetOutput(io.Discard)
 	var sources stringList
 	var targets stringList
-	var output string
 	var level int
 	var comment string
 	var reverse bool
@@ -38,7 +37,6 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	var version bool
 	flags.Var(&sources, "source-files", "source file; repeat for each file")
 	flags.Var(&targets, "target-files", "target file; repeat for each file")
-	flags.StringVar(&output, "output", "", "output .vipr patch path")
 	flags.IntVar(&level, "compression-level", 3, "zstd compression level")
 	flags.StringVar(&comment, "comment", "Created with Viper-Patcher", "comment stored in the patch")
 	flags.BoolVar(&reverse, "create-reverse", false, "include reverse differentials")
@@ -64,17 +62,30 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stdout, "viper-patcher creator %s (%s, %s)\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 		return 0
 	}
-	if flags.NArg() != 0 {
-		fmt.Fprintf(stderr, "Error: unexpected positional argument %q\n\n", flags.Arg(0))
-		printUsage(stderr)
-		return 2
-	}
-	if len(sources) == 0 || len(targets) == 0 || output == "" {
-		fmt.Fprintln(stderr, "Error: --source-files, --target-files, and --output are required and must have values.")
+	if len(sources) == 0 || len(targets) == 0 {
+		fmt.Fprintln(stderr, "Error: --source-files and --target-files are required and must have values.")
 		fmt.Fprintln(stderr)
 		printUsage(stderr)
 		return 2
 	}
+	if flags.NArg() == 0 {
+		fmt.Fprintln(stderr, "Error: the output .vipr path is required as the final argument.")
+		fmt.Fprintln(stderr)
+		printUsage(stderr)
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintf(stderr, "Error: expected exactly one output .vipr path as the final argument, got %d positional arguments.\n\n", flags.NArg())
+		printUsage(stderr)
+		return 2
+	}
+	if strings.TrimSpace(flags.Arg(0)) == "" {
+		fmt.Fprintln(stderr, "Error: the output .vipr path must not be empty.")
+		fmt.Fprintln(stderr)
+		printUsage(stderr)
+		return 2
+	}
+	output := flags.Arg(0)
 	if len(sources) != len(targets) {
 		fmt.Fprintf(stderr, "Error: source-files contains %d file(s), but target-files contains %d file(s).\n\n", len(sources), len(targets))
 		printUsage(stderr)
@@ -101,18 +112,18 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 
 func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "Example:")
-	fmt.Fprintln(writer, "  creator --headless --source-files old/bin/game.exe --target-files new/bin/game.exe --source-files old/data/assets.bin --target-files new/data/assets.bin --output update.vipr --compression-level 12 --comment \"Version 1.1 update\" --create-reverse")
+	fmt.Fprintln(writer, "  creator --headless --source-files old/bin/game.exe --target-files new/bin/game.exe --source-files old/data/assets.bin --target-files new/data/assets.bin --compression-level 12 --comment \"Version 1.1 update\" --create-reverse update.vipr")
 	fmt.Fprintln(writer)
-	fmt.Fprintln(writer, "Supported parameters:")
+	fmt.Fprintln(writer, "Supported parameters and arguments:")
 	fmt.Fprintln(writer, "  --source-files <file>          Required. Repeat once per source file.")
 	fmt.Fprintln(writer, "  --target-files <file>          Required. Repeat once per target file, in matching order.")
-	fmt.Fprintln(writer, "  --output <file.vipr>           Required in CLI mode.")
 	fmt.Fprintln(writer, "  [--compression-level <level>]  Default: 3.")
 	fmt.Fprintln(writer, "  [--comment <text>]             Default: Created with Viper-Patcher.")
 	fmt.Fprintln(writer, "  [--create-reverse]             Default: false.")
 	fmt.Fprintln(writer, "  [--headless]                   Force CLI mode.")
 	fmt.Fprintln(writer, "  [--version]                    Show version information.")
 	fmt.Fprintln(writer, "  [--help]                       Show this help.")
+	fmt.Fprintln(writer, "  <output.vipr>                  Required final positional argument.")
 }
 
 type terminalProgress struct {
