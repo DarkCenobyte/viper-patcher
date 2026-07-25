@@ -109,11 +109,14 @@ jobs:
           sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install --yes curl gcc-multilib libc6-dev-i386 \
-            libgl1-mesa-dev:i386 libx11-dev:i386 libxcursor-dev:i386 \
+            libgl-dev:i386 libx11-dev:i386 libxcursor-dev:i386 \
             libxrandr-dev:i386 libxinerama-dev:i386 libxi-dev:i386 \
             libxxf86vm-dev:i386 libwayland-dev:i386 libxkbcommon-dev:i386
           printf '#!/bin/sh\nexec gcc -m32 "$@"\n' > "$RUNNER_TEMP/gcc-386"
           chmod +x "$RUNNER_TEMP/gcc-386"
+          PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig \
+            pkg-config --print-errors --exists \
+              gl x11 xcursor xrandr xinerama xi xxf86vm wayland-client xkbcommon
       - run: go mod download
       - name: Build 32-bit libzstd
         env:
@@ -127,6 +130,7 @@ jobs:
           GOOS: linux
           GOARCH: "386"
           CC: ${{ runner.temp }}/gcc-386
+          PKG_CONFIG_LIBDIR: /usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
         run: |
           version="$RELEASE_VERSION"
@@ -229,13 +233,15 @@ jobs:
           - name: x64
             goarch: amd64
             msystem: MINGW64
-            package: mingw-w64-x86_64-gcc
-            compiler: C:\msys64\mingw64\bin\gcc.exe
+            compiler_package: mingw-w64-x86_64-gcc
+            make_package: mingw-w64-x86_64-make
+            tool_directory: mingw64
           - name: x86
             goarch: "386"
             msystem: MINGW32
-            package: mingw-w64-i686-gcc
-            compiler: C:\msys64\mingw32\bin\gcc.exe
+            compiler_package: mingw-w64-i686-gcc
+            make_package: mingw-w64-i686-make
+            tool_directory: mingw32
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -246,24 +252,27 @@ jobs:
         shell: pwsh
         run: go install github.com/tc-hib/go-winres@v0.3.3
       - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: ${{ matrix.msystem }}
           update: true
-          install: make ${{ matrix.package }}
+          install: ${{ matrix.compiler_package }} ${{ matrix.make_package }}
       - shell: pwsh
         run: go mod download
       - name: Build libzstd
         shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
         run: |
           ./scripts/fetch-zstd.ps1
-          ./scripts/build-zstd.ps1 -Architecture ${{ matrix.name }}
+          ./scripts/build-zstd.ps1 -Architecture ${{ matrix.name }} -MSYS2Root $env:MSYS2_ROOT
       - name: Build and package
         shell: pwsh
         env:
           CGO_ENABLED: "1"
           GOOS: windows
           GOARCH: ${{ matrix.goarch }}
-          CC: ${{ matrix.compiler }}
+          CC: ${{ steps.msys2.outputs.msys2-location }}\${{ matrix.tool_directory }}\bin\gcc.exe
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
         run: |
           $version = $env:RELEASE_VERSION
