@@ -11,7 +11,7 @@ int vipr_decompress_segment(
     const char *patch_path,
     uint64_t patch_offset,
     uint64_t patch_length,
-    const char *output_path,
+    uintptr_t output_handle,
     uint64_t expected_output_size,
     uintptr_t progress_handle,
     char *error_buffer,
@@ -40,9 +40,9 @@ int vipr_decompress_segment(
         vipr_set_error(error_buffer, error_buffer_size, "seek to differential segment failed");
         goto cleanup;
     }
-    output = vipr_open_write(output_path);
+    output = vipr_open_write_handle(output_handle);
     if (output == NULL) {
-        vipr_set_errno_error(error_buffer, error_buffer_size, "create patched output file");
+        vipr_set_errno_error(error_buffer, error_buffer_size, "duplicate patched output handle");
         goto cleanup;
     }
     context = ZSTD_createDCtx();

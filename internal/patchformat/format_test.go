@@ -3,6 +3,7 @@ package patchformat
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +40,32 @@ func TestEncodeDecode(t *testing.T) {
 	}
 	if parsed.DataOffset != offset || parsed.Header.Comment != "hello" {
 		t.Fatalf("unexpected parsed patch: %#v", parsed)
+	}
+}
+
+func TestLegacyTargetHintCompatibility(t *testing.T) {
+	header := validHeader()
+	payload, err := json.Marshal(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(payload, []byte(`"targetHint"`)) {
+		t.Fatal("current headers must not write targetHint")
+	}
+
+	payload = bytes.Replace(payload, []byte(`"path":"bin/game.exe"`), []byte(`"path":"bin/game.exe","targetHint":"renamed.exe"`), 1)
+	var buffer bytes.Buffer
+	buffer.Write(Magic[:])
+	if err := binary.Write(&buffer, binary.LittleEndian, uint64(len(payload))); err != nil {
+		t.Fatal(err)
+	}
+	buffer.Write(payload)
+	parsed, err := Decode(&buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Header.Files[0].LegacyTargetHint != "renamed.exe" {
+		t.Fatalf("legacy target hint = %q", parsed.Header.Files[0].LegacyTargetHint)
 	}
 }
 
@@ -97,6 +124,12 @@ func TestValidateHeaderFailures(t *testing.T) {
 		{"case collision", func(header *Header) {
 			duplicate := header.Files[0]
 			duplicate.Path = "BIN/GAME.EXE"
+			header.Files = append(header.Files, duplicate)
+		}},
+		{"Unicode normalization collision", func(header *Header) {
+			duplicate := header.Files[0]
+			header.Files[0].Path = "data/é.txt"
+			duplicate.Path = "data/e\u0301.txt"
 			header.Files = append(header.Files, duplicate)
 		}},
 	}

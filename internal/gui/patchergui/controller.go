@@ -89,7 +89,7 @@ func (controller *patcherController) buildContent() fyne.CanvasObject {
 	)
 	operationCard := widget.NewCard(
 		"Preflight and operation",
-		"Actions are enabled only when every file matches the required hash and permission mode.",
+		"Actions are enabled only when every file matches the required hash and size.",
 		container.NewVBox(controller.status, controller.progressBar, container.NewGridWithColumns(2, controller.patchButton, controller.reverseButton)),
 	)
 	header := container.NewVBox(
@@ -231,7 +231,7 @@ func (controller *patcherController) runDirection(direction patch.Direction) {
 		fyne.Do(func() {
 			controller.state.End()
 			controller.setSelectionEnabled(true)
-			if err != nil {
+			if err != nil && !patch.IsCommittedWarning(err) {
 				controller.status.SetText("Patch operation failed.")
 				dialog.ShowError(err, controller.window)
 				controller.validate()
@@ -239,7 +239,11 @@ func (controller *patcherController) runDirection(direction patch.Direction) {
 			}
 			controller.progressBar.SetValue(1)
 			controller.status.SetText(fmt.Sprintf("%s patch applied successfully.", direction))
-			dialog.ShowInformation("Operation completed", fmt.Sprintf("The %s patch was applied successfully.", direction), controller.window)
+			if err != nil {
+				dialog.ShowInformation("Operation completed with warning", fmt.Sprintf("The %s patch was applied successfully, but cleanup reported a warning:\n\n%s", direction, err), controller.window)
+			} else {
+				dialog.ShowInformation("Operation completed", fmt.Sprintf("The %s patch was applied successfully.", direction), controller.window)
+			}
 			controller.validate()
 		})
 	}(selection)

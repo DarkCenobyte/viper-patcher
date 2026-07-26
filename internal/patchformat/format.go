@@ -11,6 +11,8 @@ import (
 	pathpkg "path"
 	"strings"
 	"time"
+
+	"github.com/DarkCenobyte/viper-patcher/internal/pathutil"
 )
 
 var Magic = [8]byte{'V', 'I', 'P', 'R', '\r', '\n', 0x1a, 0x01}
@@ -48,18 +50,20 @@ type Compression struct {
 }
 
 type FileEntry struct {
-	Path          string `json:"path"`
-	TargetHint    string `json:"targetHint,omitempty"`
-	SourceHash    string `json:"sourceHash"`
-	TargetHash    string `json:"targetHash"`
-	SourceSize    uint64 `json:"sourceSize"`
-	TargetSize    uint64 `json:"targetSize"`
-	SourceMode    uint32 `json:"sourceMode"`
-	TargetMode    uint32 `json:"targetMode"`
-	ForwardOffset uint64 `json:"forwardOffset"`
-	ForwardLength uint64 `json:"forwardLength"`
-	ReverseOffset uint64 `json:"reverseOffset,omitempty"`
-	ReverseLength uint64 `json:"reverseLength,omitempty"`
+	Path string `json:"path"`
+	// LegacyTargetHint accepts the unused targetHint field written by older
+	// version 1 creators. New patches never populate it.
+	LegacyTargetHint string `json:"targetHint,omitempty"`
+	SourceHash       string `json:"sourceHash"`
+	TargetHash       string `json:"targetHash"`
+	SourceSize       uint64 `json:"sourceSize"`
+	TargetSize       uint64 `json:"targetSize"`
+	SourceMode       uint32 `json:"sourceMode"`
+	TargetMode       uint32 `json:"targetMode"`
+	ForwardOffset    uint64 `json:"forwardOffset"`
+	ForwardLength    uint64 `json:"forwardLength"`
+	ReverseOffset    uint64 `json:"reverseOffset,omitempty"`
+	ReverseLength    uint64 `json:"reverseLength,omitempty"`
 }
 
 // Patch provides parsed metadata and the absolute offset of the data section.
@@ -161,15 +165,15 @@ func ValidateHeader(header Header) error {
 
 	seen := make(map[string]struct{}, len(header.Files))
 	for index, entry := range header.Files {
-		if err := validatePatchPath(entry.Path); err != nil {
+		if err := ValidatePath(entry.Path); err != nil {
 			return fmt.Errorf("file entry %d: %w", index, err)
 		}
 		// VIPR archives are intended to be portable. Detect collisions using a
 		// case-insensitive key so an archive cannot address two files that become
 		// the same path on Windows or a case-insensitive macOS volume.
-		key := strings.ToLower(entry.Path)
+		key := pathutil.CaseInsensitiveKey(entry.Path)
 		if _, exists := seen[key]; exists {
-			return fmt.Errorf("duplicate or case-colliding patch path %q", entry.Path)
+			return fmt.Errorf("duplicate, Unicode-equivalent, or case-colliding patch path %q", entry.Path)
 		}
 		seen[key] = struct{}{}
 		if !validSHA256(entry.SourceHash) || !validSHA256(entry.TargetHash) {
@@ -202,7 +206,8 @@ func validSHA256(value string) bool {
 	return err == nil
 }
 
-func validatePatchPath(value string) error {
+// ValidatePath validates one canonical, portable path stored in a VIPR patch.
+func ValidatePath(value string) error {
 	if value == "" || strings.ContainsRune(value, '\x00') {
 		return fmt.Errorf("patch path is empty or contains NUL")
 	}

@@ -25,7 +25,7 @@ int vipr_decompress_segment(
     const char *patch_path,
     uint64_t patch_offset,
     uint64_t patch_length,
-    const char *output_path,
+    uintptr_t output_handle,
     uint64_t expected_output_size,
     uintptr_t progress_handle,
     char *error_buffer,

@@ -5,20 +5,28 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/DarkCenobyte/viper-patcher/internal/pathutil"
 )
 
 type transactionOperations struct {
-	createTemp func(string, string) (*os.File, error)
+	createTemp func(string, string) (*os.File, string, error)
 	rename     func(string, string) error
 	remove     func(string) error
 	verify     func(string, fileExpectation) error
 }
 
 var defaultTransactionOperations = transactionOperations{
-	createTemp: os.CreateTemp,
-	rename:     os.Rename,
-	remove:     os.Remove,
-	verify:     verifyFileExpectation,
+	createTemp: func(directory, pattern string) (*os.File, string, error) {
+		file, err := os.CreateTemp(directory, pattern)
+		if err != nil {
+			return nil, "", err
+		}
+		return file, file.Name(), nil
+	},
+	rename: os.Rename,
+	remove: os.Remove,
+	verify: verifyFileExpectation,
 }
 
 type transactionFile struct {
@@ -38,9 +46,22 @@ type Transaction struct {
 	finished   bool
 }
 
-// NewTransaction creates an empty file replacement transaction.
+// NewTransaction creates an empty path-based file replacement transaction.
 func NewTransaction() *Transaction {
 	return newTransactionWithOperations(defaultTransactionOperations)
+}
+
+func newRootTransaction(root *os.Root) *Transaction {
+	return newTransactionWithOperations(transactionOperations{
+		createTemp: func(directory, pattern string) (*os.File, string, error) {
+			return createRootTemp(root, directory, pattern)
+		},
+		rename: root.Rename,
+		remove: root.Remove,
+		verify: func(path string, expectation fileExpectation) error {
+			return verifyRootFileExpectation(root, path, expectation)
+		},
+	})
 }
 
 func newTransactionWithOperations(operations transactionOperations) *Transaction {
@@ -55,6 +76,12 @@ func (transaction *Transaction) Add(target, temporary string, expectation fileEx
 	if target == "" || temporary == "" || expectation.Identity == nil {
 		return fmt.Errorf("transaction replacement is incomplete")
 	}
+	targetKey := pathutil.CaseInsensitiveKey(target)
+	for _, existing := range transaction.files {
+		if pathutil.CaseInsensitiveKey(existing.target) == targetKey || existing.temporary == temporary {
+			return fmt.Errorf("transaction contains duplicate target or temporary path %q", target)
+		}
+	}
 	transaction.files = append(transaction.files, transactionFile{
 		target:      target,
 		temporary:   temporary,
@@ -63,7 +90,9 @@ func (transaction *Transaction) Add(target, temporary string, expectation fileEx
 	return nil
 }
 
-// Commit replaces every registered file. Any failure includes rollback errors.
+// Commit replaces every registered file. Any replacement failure includes
+// rollback errors. Cleanup errors after a successful commit are returned as a
+// CommittedWarning and do not mean the replacements failed.
 func (transaction *Transaction) Commit() error {
 	if transaction.finished {
 		return fmt.Errorf("transaction is already finished")
@@ -84,10 +113,11 @@ func (transaction *Transaction) Commit() error {
 			return transaction.fail(index, fmt.Errorf("replace %q: %w", file.target, err))
 		}
 		file.committed = true
+		file.temporary = ""
 	}
 
 	transaction.finished = true
-	return transaction.removeBackups()
+	return committedWarning("file replacement", transaction.removeBackups())
 }
 
 // Cleanup removes prepared files when a transaction is abandoned before commit.
@@ -101,11 +131,11 @@ func (transaction *Transaction) Cleanup() error {
 }
 
 func (transaction *Transaction) reserveBackup(file *transactionFile) error {
-	backup, err := transaction.operations.createTemp(filepath.Dir(file.target), ".viper-patcher-backup-*")
+	backup, backupPath, err := transaction.operations.createTemp(filepath.Dir(file.target), ".viper-patcher-backup-")
 	if err != nil {
 		return fmt.Errorf("reserve backup path for %q: %w", file.target, err)
 	}
-	file.backup = backup.Name()
+	file.backup = backupPath
 	if err := backup.Close(); err != nil {
 		removeError := transaction.operations.remove(file.backup)
 		return errors.Join(

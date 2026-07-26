@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
-	"github.com/DarkCenobyte/viper-patcher/internal/pathutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 	"github.com/DarkCenobyte/viper-patcher/internal/zstd"
 )
@@ -17,10 +17,12 @@ import (
 const portablePermissionMask uint32 = 0o777
 
 type applyOperations struct {
-	chmod func(string, os.FileMode) error
+	chmod func(*os.File, os.FileMode) error
 }
 
-var defaultApplyOperations = applyOperations{chmod: os.Chmod}
+var defaultApplyOperations = applyOperations{chmod: func(file *os.File, mode os.FileMode) error {
+	return file.Chmod(mode)
+}}
 
 // ApplyOptions configures one patch application operation.
 type ApplyOptions struct {
@@ -40,12 +42,9 @@ func ApplyWithOptions(ctx context.Context, options ApplyOptions, callback progre
 	return applyWithOperations(ctx, options, callback, defaultApplyOperations)
 }
 
-func applyWithOperations(ctx context.Context, options ApplyOptions, callback progress.Callback, operations applyOperations) (resultError error) {
-	patchPath := options.PatchPath
-	root := options.Root
-	direction := options.Direction
-	if direction != Forward && direction != Reverse {
-		return fmt.Errorf("unsupported patch direction %q", direction)
+func applyWithOperations(ctx context.Context, options ApplyOptions, callback progress.Callback, operations applyOperations) error {
+	if options.Direction != Forward && options.Direction != Reverse {
+		return fmt.Errorf("unsupported patch direction %q", options.Direction)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -55,165 +54,219 @@ func applyWithOperations(ctx context.Context, options ApplyOptions, callback pro
 	if err != nil {
 		return fmt.Errorf("create application work directory: %w", err)
 	}
-	defer func() {
-		if cleanupError := os.RemoveAll(workDirectory); cleanupError != nil {
-			resultError = errors.Join(resultError, fmt.Errorf("remove application work directory: %w", cleanupError))
-		}
-	}()
-
-	patchSnapshot, err := copyPatchSnapshot(patchPath, workDirectory)
+	root, err := openInstallationRoot(options.Root)
 	if err != nil {
-		return err
+		return errors.Join(
+			err,
+			wrapJoinedError("remove application work directory", os.RemoveAll(workDirectory)),
+		)
 	}
-	if options.ExpectedPatchHash != "" && patchSnapshot.Hash != options.ExpectedPatchHash {
-		return fmt.Errorf("selected patch changed after it was inspected")
+
+	callback = synchronizedProgress(callback)
+	patchSnapshot, operationError := copyPatchSnapshot(options.PatchPath, workDirectory, options.ExpectedPatchHash)
+	if options.ExpectedPatchHash != "" && (errors.Is(operationError, errSnapshotContentMismatch) ||
+		(operationError == nil && patchSnapshot.Hash != options.ExpectedPatchHash)) {
+		operationError = fmt.Errorf("selected patch changed after it was inspected")
 	}
 	progress.Report(callback, progress.Event{Stage: progress.StagePreparing})
-	parsed, err := Open(patchSnapshot.SnapshotPath)
-	if err != nil {
-		return err
+
+	var parsed patchformat.Patch
+	if operationError == nil {
+		parsed, operationError = openPrivatePatchSnapshot(patchSnapshot)
 	}
-	if direction == Reverse && !parsed.Header.Reverse {
-		return fmt.Errorf("patch does not contain reverse differentials")
-	}
-	validation, err := Inspect(root, parsed)
-	if err != nil {
-		return err
-	}
-	if !validation.Ready(direction) {
-		return validation.ErrorFor(direction)
+	if operationError == nil && options.Direction == Reverse && !parsed.Header.Reverse {
+		operationError = fmt.Errorf("patch does not contain reverse differentials")
 	}
 
-	transaction := NewTransaction()
-	defer func() {
-		if cleanupError := transaction.Cleanup(); cleanupError != nil {
-			resultError = errors.Join(resultError, cleanupError)
-		}
-	}()
+	transaction := newRootTransaction(root.root)
+	prepared := make([]progress.Event, 0, len(parsed.Header.Files))
+	if operationError == nil {
+		for index, entry := range parsed.Header.Files {
+			if err := ctx.Err(); err != nil {
+				operationError = err
+				break
+			}
+			offset, length, expectedInput, expectedOutput := differential(entry, options.Direction)
+			sourceSnapshot, targetName, err := snapshotInstallationFile(
+				root,
+				entry.Path,
+				filepath.Join(workDirectory, fmt.Sprintf("%06d.reference", index)),
+				snapshotContentExpectation{hash: expectedInput.hash, size: expectedInput.size, hasSize: true},
+			)
+			if err != nil {
+				operationError = fmt.Errorf("snapshot installed file %q: %w", entry.Path, err)
+				break
+			}
+			if sourceSnapshot.Hash != expectedInput.hash || sourceSnapshot.Size != expectedInput.size {
+				operationError = fmt.Errorf("installed file %q does not match the required %s input state", entry.Path, options.Direction)
+				break
+			}
+			segmentOffset, ok := checkedAdd(parsed.DataOffset, offset)
+			if !ok {
+				operationError = fmt.Errorf("differential offset for %q overflows", entry.Path)
+				break
+			}
 
-	for index, entry := range parsed.Header.Files {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		path, err := pathutil.SecureJoinExisting(root, entry.Path)
-		if err != nil {
-			return err
-		}
-		sourceSnapshot, err := snapshotRegularFile(path, filepath.Join(workDirectory, fmt.Sprintf("%06d.reference", index)))
-		if err != nil {
-			return fmt.Errorf("snapshot installed file %q: %w", entry.Path, err)
-		}
-		offset, length, expectedInput, expectedOutput := differential(entry, direction)
-		if sourceSnapshot.Hash != expectedInput.hash || sourceSnapshot.Size != expectedInput.size || sourceSnapshot.Mode != expectedInput.mode {
-			return fmt.Errorf("installed file %q changed after preflight validation", entry.Path)
-		}
-
-		temporary, err := os.CreateTemp(filepath.Dir(path), ".viper-patcher-output-*")
-		if err != nil {
-			return fmt.Errorf("create temporary output for %q: %w", entry.Path, err)
-		}
-		temporaryPath := temporary.Name()
-		if err := temporary.Close(); err != nil {
-			return removeTemporaryAfterError(temporaryPath, fmt.Errorf("close temporary output for %q: %w", entry.Path, err))
-		}
-
-		progress.Report(callback, progress.Event{
-			FileIndex:  index + 1,
-			FileCount:  len(parsed.Header.Files),
-			Path:       entry.Path,
-			Stage:      progress.StageApplying,
-			TotalBytes: expectedOutput.size,
-		})
-		err = zstd.DecompressSegment(sourceSnapshot.SnapshotPath, patchSnapshot.SnapshotPath, parsed.DataOffset+offset, length, temporaryPath, expectedOutput.size, func(processed, total uint64) {
+			temporary, temporaryName, err := createRootTemp(root.root, filepath.Dir(targetName), ".viper-patcher-output-")
+			if err != nil {
+				operationError = fmt.Errorf("create temporary output for %q: %w", entry.Path, err)
+				break
+			}
 			progress.Report(callback, progress.Event{
+				FileIndex:  index + 1,
+				FileCount:  len(parsed.Header.Files),
+				Path:       entry.Path,
+				Stage:      progress.StageApplying,
+				TotalBytes: expectedOutput.size,
+			})
+			err = zstd.DecompressSegmentToFile(sourceSnapshot.SnapshotPath, patchSnapshot.SnapshotPath, segmentOffset, length, temporary, expectedOutput.size, func(processed, total uint64) {
+				progress.Report(callback, progress.Event{
+					FileIndex:      index + 1,
+					FileCount:      len(parsed.Header.Files),
+					Path:           entry.Path,
+					Stage:          progress.StageApplying,
+					ProcessedBytes: processed,
+					TotalBytes:     total,
+				})
+			})
+			if err != nil {
+				operationError = cleanupRootTemporary(root.root, temporary, temporaryName, fmt.Errorf("apply %s differential for %q: %w", options.Direction, entry.Path, err))
+				break
+			}
+			if err := temporary.Sync(); err != nil {
+				operationError = cleanupRootTemporary(root.root, temporary, temporaryName, fmt.Errorf("sync generated file %q: %w", entry.Path, err))
+				break
+			}
+			progress.Report(callback, progress.Event{
+				FileIndex: index + 1,
+				FileCount: len(parsed.Header.Files),
+				Path:      entry.Path,
+				Stage:     progress.StageVerifying,
+			})
+			if _, err := temporary.Seek(0, io.SeekStart); err != nil {
+				operationError = cleanupRootTemporary(root.root, temporary, temporaryName, fmt.Errorf("rewind generated file %q: %w", entry.Path, err))
+				break
+			}
+			digest, size, err := hashutil.Reader(temporary)
+			if err != nil {
+				operationError = cleanupRootTemporary(root.root, temporary, temporaryName, fmt.Errorf("hash generated file %q: %w", entry.Path, err))
+				break
+			}
+			if digest != expectedOutput.hash || size != expectedOutput.size {
+				operationError = cleanupRootTemporary(root.root, temporary, temporaryName, fmt.Errorf("generated file %q failed integrity verification", entry.Path))
+				break
+			}
+			if err := applyOutputMode(temporary, sourceSnapshot.Mode, operations.chmod); err != nil {
+				operationError = cleanupRootTemporary(root.root, temporary, temporaryName, fmt.Errorf("set permissions for %q: %w", entry.Path, err))
+				break
+			}
+			outputInfo, err := temporary.Stat()
+			if err != nil {
+				operationError = cleanupRootTemporary(root.root, temporary, temporaryName, fmt.Errorf("inspect generated file %q: %w", entry.Path, err))
+				break
+			}
+			if !outputModeMatches(uint32(outputInfo.Mode().Perm()), sourceSnapshot.Mode) {
+				operationError = cleanupRootTemporary(root.root, temporary, temporaryName, fmt.Errorf("generated file %q does not preserve the installed permissions", entry.Path))
+				break
+			}
+			if err := temporary.Sync(); err != nil {
+				operationError = cleanupRootTemporary(root.root, temporary, temporaryName, fmt.Errorf("sync generated metadata for %q: %w", entry.Path, err))
+				break
+			}
+			if err := temporary.Close(); err != nil {
+				operationError = errors.Join(fmt.Errorf("close generated file %q: %w", entry.Path, err), wrapRootRemoveError(root.root, temporaryName))
+				break
+			}
+			if err := transaction.Add(targetName, temporaryName, fileExpectation{
+				Identity: sourceSnapshot.Identity,
+				Hash:     sourceSnapshot.Hash,
+				Size:     sourceSnapshot.Size,
+			}); err != nil {
+				operationError = errors.Join(err, wrapRootRemoveError(root.root, temporaryName))
+				break
+			}
+			preparedEvent := progress.Event{
 				FileIndex:      index + 1,
 				FileCount:      len(parsed.Header.Files),
 				Path:           entry.Path,
-				Stage:          progress.StageApplying,
-				ProcessedBytes: processed,
-				TotalBytes:     total,
-			})
-		})
-		if err != nil {
-			return removeTemporaryAfterError(temporaryPath, fmt.Errorf("apply %s differential for %q: %w", direction, entry.Path, err))
+				Stage:          progress.StageFilePrepared,
+				ProcessedBytes: expectedOutput.size,
+				TotalBytes:     expectedOutput.size,
+			}
+			prepared = append(prepared, preparedEvent)
+			progress.Report(callback, preparedEvent)
 		}
-
-		progress.Report(callback, progress.Event{
-			FileIndex: index + 1,
-			FileCount: len(parsed.Header.Files),
-			Path:      entry.Path,
-			Stage:     progress.StageVerifying,
-		})
-		digest, size, err := hashutil.File(temporaryPath)
-		if err != nil {
-			return removeTemporaryAfterError(temporaryPath, fmt.Errorf("hash generated file %q: %w", entry.Path, err))
-		}
-		if digest != expectedOutput.hash || size != expectedOutput.size {
-			return removeTemporaryAfterError(temporaryPath, fmt.Errorf("generated file %q failed integrity verification", entry.Path))
-		}
-		if err := setPortableMode(temporaryPath, expectedOutput.mode, operations.chmod); err != nil {
-			return removeTemporaryAfterError(temporaryPath, fmt.Errorf("set permissions for %q: %w", entry.Path, err))
-		}
-		if err := transaction.Add(path, temporaryPath, fileExpectation{
-			Identity: sourceSnapshot.Identity,
-			Hash:     sourceSnapshot.Hash,
-			Size:     sourceSnapshot.Size,
-			Mode:     sourceSnapshot.Mode,
-		}); err != nil {
-			return removeTemporaryAfterError(temporaryPath, err)
-		}
-		progress.Report(callback, progress.Event{
-			FileIndex:      index + 1,
-			FileCount:      len(parsed.Header.Files),
-			Path:           entry.Path,
-			Stage:          progress.StageFileCompleted,
-			ProcessedBytes: expectedOutput.size,
-			TotalBytes:     expectedOutput.size,
-		})
 	}
 
-	if err := ctx.Err(); err != nil {
-		return err
+	if operationError == nil {
+		if err := ctx.Err(); err != nil {
+			operationError = err
+		} else {
+			operationError = transaction.Commit()
+		}
 	}
-	if err := transaction.Commit(); err != nil {
-		return err
+	committed := operationError == nil || IsCommittedWarning(operationError)
+	transactionCleanup := transaction.Cleanup()
+	rootCloseError := root.Close()
+	workCleanupError := os.RemoveAll(workDirectory)
+	if !committed {
+		return errors.Join(
+			operationError,
+			wrapJoinedError("cleanup abandoned transaction", transactionCleanup),
+			wrapJoinedError("close target root", rootCloseError),
+			wrapJoinedError("remove application work directory", workCleanupError),
+		)
+	}
+
+	for _, event := range prepared {
+		event.Stage = progress.StageFileCompleted
+		progress.Report(callback, event)
 	}
 	progress.Report(callback, progress.Event{
 		FileIndex: len(parsed.Header.Files),
 		FileCount: len(parsed.Header.Files),
 		Stage:     progress.StageCompleted,
 	})
-	return nil
+	return committedWarning(
+		"patch application",
+		operationError,
+		wrapJoinedError("cleanup committed transaction", transactionCleanup),
+		wrapJoinedError("close target root", rootCloseError),
+		wrapJoinedError("remove application work directory", workCleanupError),
+	)
 }
 
-func removeTemporaryAfterError(path string, operationError error) error {
-	removeError := os.Remove(path)
-	if removeError == nil || os.IsNotExist(removeError) {
-		return operationError
+func cleanupRootTemporary(root *os.Root, file *os.File, path string, operationError error) error {
+	var closeError error
+	if file != nil {
+		closeError = file.Close()
 	}
-	return errors.Join(operationError, fmt.Errorf("remove temporary file %q: %w", path, removeError))
+	return errors.Join(operationError, wrapJoinedError("close temporary output", closeError), wrapRootRemoveError(root, path))
+}
+
+func wrapRootRemoveError(root *os.Root, path string) error {
+	if path == "" {
+		return nil
+	}
+	err := root.Remove(path)
+	if err == nil || os.IsNotExist(err) {
+		return nil
+	}
+	return fmt.Errorf("remove temporary output %q: %w", path, err)
 }
 
 type fileState struct {
 	hash string
 	size uint64
-	mode uint32
 }
 
 func differential(entry patchformat.FileEntry, direction Direction) (offset, length uint64, input, output fileState) {
 	if direction == Reverse {
 		return entry.ReverseOffset, entry.ReverseLength,
-			fileState{hash: entry.TargetHash, size: entry.TargetSize, mode: entry.TargetMode & portablePermissionMask},
-			fileState{hash: entry.SourceHash, size: entry.SourceSize, mode: entry.SourceMode & portablePermissionMask}
+			fileState{hash: entry.TargetHash, size: entry.TargetSize},
+			fileState{hash: entry.SourceHash, size: entry.SourceSize}
 	}
 	return entry.ForwardOffset, entry.ForwardLength,
-		fileState{hash: entry.SourceHash, size: entry.SourceSize, mode: entry.SourceMode & portablePermissionMask},
-		fileState{hash: entry.TargetHash, size: entry.TargetSize, mode: entry.TargetMode & portablePermissionMask}
-}
-
-func setPortableMode(path string, mode uint32, chmod func(string, os.FileMode) error) error {
-	if chmod == nil {
-		return fmt.Errorf("file permission operation is not configured")
-	}
-	return chmod(path, os.FileMode(mode&portablePermissionMask))
+		fileState{hash: entry.SourceHash, size: entry.SourceSize},
+		fileState{hash: entry.TargetHash, size: entry.TargetSize}
 }

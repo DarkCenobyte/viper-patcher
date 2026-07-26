@@ -14,11 +14,12 @@ type creationSnapshot struct {
 	target fileSnapshot
 }
 
-func snapshotCreationInputs(ctx context.Context, plan createPlan, workDirectory string, callback progress.Callback) ([]creationSnapshot, error) {
+func snapshotCreationInputs(ctx context.Context, plan createPlan, workDirectory string, parallelism int, callback progress.Callback) ([]creationSnapshot, error) {
 	snapshots := make([]creationSnapshot, len(plan.pairs))
-	for index, pair := range plan.pairs {
+	err := parallelFor(ctx, len(plan.pairs), parallelism, func(ctx context.Context, index int) error {
+		pair := plan.pairs[index]
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 		progress.Report(callback, progress.Event{
 			FileIndex: index + 1,
@@ -28,13 +29,17 @@ func snapshotCreationInputs(ctx context.Context, plan createPlan, workDirectory 
 		})
 		source, err := snapshotRegularFile(pair.sourcePath, filepath.Join(workDirectory, fmt.Sprintf("%06d.source", index)))
 		if err != nil {
-			return nil, fmt.Errorf("snapshot source file %q: %w", pair.relativePath, err)
+			return fmt.Errorf("snapshot source file %q: %w", pair.relativePath, err)
 		}
 		target, err := snapshotRegularFile(pair.targetPath, filepath.Join(workDirectory, fmt.Sprintf("%06d.target", index)))
 		if err != nil {
-			return nil, fmt.Errorf("snapshot target file %q: %w", pair.relativePath, err)
+			return fmt.Errorf("snapshot target file %q: %w", pair.relativePath, err)
 		}
 		snapshots[index] = creationSnapshot{pair: pair, source: source, target: target}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return snapshots, nil
 }

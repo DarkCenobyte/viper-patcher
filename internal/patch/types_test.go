@@ -1,6 +1,7 @@
 package patch
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -65,10 +66,10 @@ func TestValidationResultErrorFor(t *testing.T) {
 			name: "invalid details",
 			result: ValidationResult{
 				State:  StateInvalidFiles,
-				Issues: []FileIssue{{Path: "one.bin", Reason: IssueModeMismatch}},
+				Issues: []FileIssue{{Path: "one.bin", Reason: IssueNotRegular}},
 			},
 			direction: Forward,
-			want:      "one.bin (mode-mismatch)",
+			want:      "one.bin (not-regular)",
 		},
 		{
 			name:      "unknown",
@@ -91,5 +92,26 @@ func TestValidationResultErrorFor(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestCommittedWarningHelpers(t *testing.T) {
+	var nilWarning *CommittedWarning
+	if nilWarning.Error() != "" || nilWarning.Unwrap() != nil {
+		t.Fatal("nil committed warning must be empty")
+	}
+
+	causeOne := errors.New("cleanup one")
+	causeTwo := errors.New("cleanup two")
+	withoutOperation := &CommittedWarning{Err: causeOne}
+	if !strings.Contains(withoutOperation.Error(), "operation committed") || !errors.Is(withoutOperation, causeOne) {
+		t.Fatalf("unexpected warning: %v", withoutOperation)
+	}
+	withOperation := committedWarning("patch creation", causeOne, nil, &CommittedWarning{Err: causeTwo})
+	if !IsCommittedWarning(withOperation) || !errors.Is(withOperation, causeOne) || !errors.Is(withOperation, causeTwo) {
+		t.Fatalf("unexpected joined warning: %v", withOperation)
+	}
+	if committedWarning("unused", nil) != nil || IsCommittedWarning(errors.New("ordinary failure")) {
+		t.Fatal("warning classification is incorrect")
 	}
 }

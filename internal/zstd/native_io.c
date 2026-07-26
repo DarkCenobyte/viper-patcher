@@ -9,6 +9,8 @@
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <fcntl.h>
+#include <io.h>
 #include <wchar.h>
 #else
 #include <fcntl.h>
@@ -60,6 +62,34 @@ FILE *vipr_open_read(const char *path) {
 FILE *vipr_open_write(const char *path) {
     return vipr_fopen_utf8(path, L"wb");
 }
+
+FILE *vipr_open_write_handle(uintptr_t handle_value) {
+    HANDLE duplicate = NULL;
+    int descriptor;
+    FILE *file;
+    if (!DuplicateHandle(
+            GetCurrentProcess(),
+            (HANDLE)handle_value,
+            GetCurrentProcess(),
+            &duplicate,
+            0,
+            FALSE,
+            DUPLICATE_SAME_ACCESS)) {
+        errno = EIO;
+        return NULL;
+    }
+    descriptor = _open_osfhandle((intptr_t)duplicate, _O_BINARY | _O_WRONLY);
+    if (descriptor < 0) {
+        CloseHandle(duplicate);
+        return NULL;
+    }
+    file = _fdopen(descriptor, "wb");
+    if (file == NULL) {
+        _close(descriptor);
+        return NULL;
+    }
+    return file;
+}
 #else
 FILE *vipr_open_read(const char *path) {
     return fopen(path, "rb");
@@ -67,6 +97,20 @@ FILE *vipr_open_read(const char *path) {
 
 FILE *vipr_open_write(const char *path) {
     return fopen(path, "wb");
+}
+
+FILE *vipr_open_write_handle(uintptr_t handle_value) {
+    int descriptor = dup((int)handle_value);
+    FILE *file;
+    if (descriptor < 0) {
+        return NULL;
+    }
+    file = fdopen(descriptor, "wb");
+    if (file == NULL) {
+        close(descriptor);
+        return NULL;
+    }
+    return file;
 }
 #endif
 

@@ -51,7 +51,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		return 2
 	}
 
-	parsed, err := patch.Open(patchFile)
+	parsed, patchDigest, err := patch.OpenWithDigest(patchFile)
 	if err != nil {
 		fmt.Fprintf(stderr, "Patch validation failed: %v\n", err)
 		return 1
@@ -71,13 +71,21 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	}
 
 	reporter := newTerminalProgress(stderr)
-	if err := patch.Apply(ctx, patchFile, flags.Arg(0), direction, reporter.Report); err != nil {
-		reporter.Finish()
-		fmt.Fprintf(stderr, "Patch operation failed: %v\n", err)
+	applyError := patch.ApplyWithOptions(ctx, patch.ApplyOptions{
+		PatchPath:         patchFile,
+		Root:              flags.Arg(0),
+		Direction:         direction,
+		ExpectedPatchHash: patchDigest,
+	}, reporter.Report)
+	reporter.Finish()
+	if applyError != nil && !patch.IsCommittedWarning(applyError) {
+		fmt.Fprintf(stderr, "Patch operation failed: %v\n", applyError)
 		return 1
 	}
-	reporter.Finish()
 	fmt.Fprintf(stdout, "%s patch applied successfully.\n", direction)
+	if applyError != nil {
+		fmt.Fprintf(stderr, "Warning: %v\n", applyError)
+	}
 	return 0
 }
 
@@ -111,10 +119,15 @@ func (reporter *terminalProgress) Report(event progress.Event) {
 		reporter.Finish()
 		return
 	}
+	if event.Stage == progress.StageFilePrepared {
+		reporter.Finish()
+		fmt.Fprintf(reporter.writer, "  Prepared: %s\n", event.Path)
+		return
+	}
 	if event.Stage == progress.StageFileCompleted {
 		reporter.Finish()
 		if event.FileIndex != reporter.lastCompleted {
-			fmt.Fprintf(reporter.writer, "  After:  %s\n", event.Path)
+			fmt.Fprintf(reporter.writer, "  Committed: %s\n", event.Path)
 			reporter.lastCompleted = event.FileIndex
 		}
 		return

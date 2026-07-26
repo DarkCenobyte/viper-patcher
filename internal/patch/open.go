@@ -47,6 +47,43 @@ func OpenWithDigest(path string) (patchformat.Patch, string, error) {
 	return parsed, digest, nil
 }
 
+func openPrivatePatchSnapshot(snapshot fileSnapshot) (patchformat.Patch, error) {
+	if snapshot.SnapshotIdentity == nil {
+		return patchformat.Patch{}, fmt.Errorf("private patch snapshot identity is unavailable")
+	}
+	file, err := os.Open(snapshot.SnapshotPath)
+	if err != nil {
+		return patchformat.Patch{}, fmt.Errorf("open private patch snapshot: %w", err)
+	}
+	defer file.Close()
+	identity, err := file.Stat()
+	if err != nil {
+		return patchformat.Patch{}, fmt.Errorf("inspect private patch snapshot: %w", err)
+	}
+	if !os.SameFile(snapshot.SnapshotIdentity, identity) || identity.Size() < 0 || uint64(identity.Size()) != snapshot.Size {
+		return patchformat.Patch{}, fmt.Errorf("private patch snapshot changed before parsing")
+	}
+	parsed, err := patchformat.Decode(file)
+	if err != nil {
+		return patchformat.Patch{}, err
+	}
+	if err := validateDifferentialRanges(parsed, snapshot.Size); err != nil {
+		return patchformat.Patch{}, err
+	}
+	current, err := file.Stat()
+	if err != nil {
+		return patchformat.Patch{}, fmt.Errorf("inspect private patch snapshot after parsing: %w", err)
+	}
+	pathInfo, err := os.Lstat(snapshot.SnapshotPath)
+	if err != nil {
+		return patchformat.Patch{}, fmt.Errorf("inspect private patch snapshot path after parsing: %w", err)
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(identity, current) || !os.SameFile(identity, pathInfo) || current.Size() != identity.Size() {
+		return patchformat.Patch{}, fmt.Errorf("private patch snapshot changed while it was being parsed")
+	}
+	return parsed, nil
+}
+
 func validateDifferentialRanges(parsed patchformat.Patch, containerSize uint64) error {
 	type interval struct{ start, end uint64 }
 	intervals := make([]interval, 0, len(parsed.Header.Files)*2)
@@ -95,8 +132,7 @@ func verifyOpenPatch(file *os.File, path string, identity os.FileInfo, expectedD
 	if err != nil {
 		return fmt.Errorf("inspect patch after parsing: %w", err)
 	}
-	if !os.SameFile(identity, currentInfo) || currentInfo.Size() < 0 || uint64(currentInfo.Size()) != expectedSize ||
-		currentInfo.Mode().Perm() != identity.Mode().Perm() || !currentInfo.ModTime().Equal(identity.ModTime()) {
+	if !os.SameFile(identity, currentInfo) || currentInfo.Size() < 0 || uint64(currentInfo.Size()) != expectedSize || !currentInfo.ModTime().Equal(identity.ModTime()) {
 		return fmt.Errorf("patch file changed while it was being parsed")
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
