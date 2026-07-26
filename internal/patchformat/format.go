@@ -282,9 +282,6 @@ func ValidateHeader(header Header) error {
 		} else if entry.ReverseLength != 0 || entry.ReverseOffset != 0 || entry.ReverseMethod != "" || entry.ReverseExpandedLength != 0 {
 			return fmt.Errorf("file entry %q unexpectedly contains reverse data", entry.Path)
 		}
-		if header.FormatVersion == LegacyFormatVersion && (entry.ForwardDifferentialMethod() != MethodPatchFrom || (header.Reverse && entry.ReverseDifferentialMethod() != MethodPatchFrom)) {
-			return fmt.Errorf("version 1 file entry %q uses a version 2 differential method", entry.Path)
-		}
 	}
 	return nil
 }
