@@ -5,44 +5,78 @@ Versioning once the `.vipr` format is declared stable.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-26
+
 ### Added
 
-- Atomic `FilePair` associations shared by the creator core, CLI, and GUI.
-- Immutable snapshots for creation inputs, selected patches, and installed
-  reference files.
-- Dedicated file replacement `Transaction` with aggregated rollback and cleanup
-  errors.
-- Typed progress stages and synchronized GUI state models.
-- Independent forward and reverse inspection capabilities with typed file
-  issues.
-- Fuzz tests, native sanitizer coverage, and `govulncheck` in continuous
-  integration.
+- Traversal-resistant installation access through `os.Root`, including secure
+  temporary-output creation and root-relative transactional renames.
+- Conservative creator disk-space estimates displayed before GUI operations.
+- Optional creator work-directory selection without changing the VIPR format or
+  patcher behavior.
+- Bounded per-file creator parallelism, limited to the available logical CPUs
+  and disabled by default through a default value of one worker.
+- Unicode-normalized, case-insensitive collision detection for portable patch
+  paths.
+- Explicit committed-with-warning results for cleanup failures that occur after
+  successful file replacement.
 
 ### Changed
 
-- Split patch creation into planning, snapshotting, compression, assembly, and
-  commit phases.
-- Split the native wrapper into common, I/O, compression, and decompression
-  translation units.
-- Replaced parallel creator CLI file lists with repeatable
-  `--file-pair <source>::<target>` options.
-- Reworked the creator GUI to add one explicitly associated source/target pair
-  at a time and to select output folder and filename without opening the
-  destination early.
-- Restricted release workflow write permissions to the publication job and
-  validated manual version input before use.
+- Stored permission metadata is advisory. Unix application preserves the
+  installed file mode and Windows ignores Unix mode bits, keeping patches
+  portable across Windows, Linux, and macOS.
+- Native decompression writes through an already-open output handle instead of
+  closing and reopening a temporary path.
+- Private patch snapshots are parsed without redundant full-file rehashes, and
+  application no longer repeats the complete installed-file preflight after
+  snapshot validation.
+- File completion progress is emitted only after the transaction commits;
+  generated but uncommitted files use a separate prepared stage.
+- Release actions are pinned to immutable commits while retaining readable
+  version comments.
+- Dependabot updates are grouped by Fyne, `golang.org/x`, tests, official GitHub
+  actions, and third-party actions.
+- `make check` builds libzstd only once.
 
 ### Fixed
 
-- Stop decompression before writing beyond the output size declared by the
-  patch.
-- Reject non-portable and special file-mode bits at format parsing and mask
-  permissions again before `chmod`.
-- Detect file or patch replacement between validation and commit.
-- Preserve rollback, cleanup, rename, remove, close, and permission errors.
-- Prevent mutable GUI selections from changing an operation after it starts.
-- Report both directions as applicable when source and target states are
-  identical.
+- Bind CLI application to the exact patch digest that was inspected.
+- Reject output paths that collide with a source or target file, including hard
+  links and case/Unicode-equivalent paths.
+- Reject empty creator output filenames.
+- Preserve a parent terminal window when a Windows GUI process detaches from a
+  shared console.
+- Reject external patcher logos with excessive width, height, or pixel count.
+- Report successful commits with cleanup warnings as success instead of a false
+  operation failure.
+
+### Removed
+
+- New patches no longer write the unused `targetHint` metadata field. The
+  version 1 reader retains compatibility with existing patches that contain it.
+
+## [0.2.1] - 2026-07-25
+
+### Fixed
+
+- Corrected the creator file-pair table layout.
+- Updated Go image, networking, and system dependencies to patched releases.
+
+## [0.2.0] - 2026-07-25
+
+### Added
+
+- Native file and directory dialogs with a Fyne fallback.
+- Embedded application branding, optional adjacent patcher logo override, and
+  automatic selection of one adjacent `.vipr` file.
+- Creator file-pair table, dedicated comment card, and collapsed settings.
+- Fyne single-goroutine migration and GUI-only Windows console detachment.
+
+### Changed
+
+- Increased the creator window size and improved GUI progress presentation.
+- Packaged macOS applications without duplicate standalone executables.
 
 ## [0.1.0] - 2026-07-25
 

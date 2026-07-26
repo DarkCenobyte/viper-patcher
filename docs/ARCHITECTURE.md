@@ -32,10 +32,12 @@ into explicit phases:
 1. `createPlanFromOptions` validates every `FilePair`, resolves source paths, and
    derives the source-relative installation paths.
 2. `snapshotCreationInputs` copies source and target files into immutable
-   snapshots while checking identity, content, size, permissions, and
-   replacement races.
+   snapshots while checking identity, content, size, and replacement races.
+   Independent file pairs may use a bounded worker pool; one worker remains the
+   default.
 3. `compressCreationInputs` hashes metadata from those snapshots and produces
-   forward and optional reverse zstd frames.
+   forward and optional reverse zstd frames, preserving deterministic archive
+   order even when independent files are processed concurrently.
 4. `assemblePatch` writes the strict header and frame blobs into a same-directory
    temporary output.
 5. `Transaction` replaces an existing regular output only after verifying that
@@ -50,36 +52,43 @@ files after snapshot creation cannot change the patch being assembled.
 Inspection evaluates source and target states independently. `ValidationResult`
 contains `CanApplyForward` and `CanApplyReverse`, plus typed missing-file and
 file-issue details. A file may validly match both sides when source and target
-content and permissions are identical. Mixed source/target directories,
-permission-only differences, non-regular files, and unknown content are
-reported separately.
+content is identical. Mixed source/target directories, non-regular files, and
+unknown content are reported separately. Permission metadata is deliberately
+excluded from readiness decisions so one patch remains portable across filesystems.
 
 ## Patch application
 
 The patcher parses the selected patch through one stable file handle and records
 its SHA-256 digest. Application copies the patch into an immutable work snapshot
-and, when started from the GUI, rejects a digest that differs from the inspected
-selection. It then validates the container and installation paths, rejects
-symbolic links in existing path components, and checks each regular file against
-source and target hash, size, and portable permission metadata.
+and rejects a digest that differs from the inspected selection when the caller
+provides one, as both the GUI and CLI do. It then validates the private snapshot and opens the installation through
+`os.Root`, so all existing-file opens, temporary-file creation, verification,
+and transactional renames remain traversal-resistant and relative to one stable
+root handle.
 
 For the selected direction, every installed reference file is copied into an
-immutable snapshot before native decompression. Generated outputs are written to
-same-directory temporary files, constrained to the declared decompressed size,
-and checked against expected size, SHA-256 hash, and permission bits.
+immutable snapshot and compared directly with the required state. This replaces
+a redundant second full preflight while retaining the user-visible GUI/CLI
+preflight and the final transaction verification. Generated outputs are written
+through already-open same-directory handles, constrained to the declared
+decompressed size, and checked against expected size and SHA-256 hash. On Unix,
+the generated file retains the installed file's local permission bits; Windows
+does not attempt to reproduce Unix permission metadata.
 
 A dedicated `Transaction` verifies each installed file again immediately before
 replacement. Original files are renamed to backups, prepared outputs are moved
-into place, and a later failure triggers a best-effort rollback. Replacement,
-rollback, cleanup, close, rename, remove, and permission errors are preserved
-with `errors.Join` rather than silently discarded. A process crash or power loss
+into place, and a later failure triggers a best-effort rollback. Replacement, rollback, cleanup, close, rename, remove, and local permission-
+preservation errors are preserved with `errors.Join` rather than silently discarded. A process crash or power loss
 can still interrupt the best-effort rollback because the transaction does not
 use a persistent recovery journal.
 
-The path snapshots and repeated identity checks substantially reduce time-of-
-check/time-of-use windows. Fully eliminating every local filesystem race on all
-supported operating systems would require platform-specific handle-relative
-APIs and is outside the portable path abstraction.
+`os.Root` removes traversal and symlink-escape races from installation access,
+while path snapshots and repeated identity checks substantially reduce file-
+replacement time-of-check/time-of-use windows. A hostile process with write
+access to the same installation directory can still race individual filesystem
+entries between verification and rename; Viper-Patcher therefore continues to
+run with the invoking user's privileges and never treats the target directory as
+a privilege boundary.
 
 ## Native boundary
 

@@ -7,8 +7,7 @@ compilation of both GUI executables.
 ## Local commands
 
 ```sh
-make test
-make vet
+make check
 ```
 
 The test suite covers:
@@ -17,22 +16,27 @@ The test suite covers:
 - Atomic creator file-pair parsing, required final positional arguments, help,
   version, failure, and success paths.
 - SHA-256 hashing.
-- Common-root and safe path handling, including target-root and component
-  symbolic-link rejection.
+- Common-root and traversal-resistant `os.Root` handling, including target-root
+  and component symbolic-link rejection.
+- Unicode-normalized, case-insensitive path collision detection.
 - Strict VIPR header parsing, malformed metadata, unknown fields, and rejection
   of special file-mode bits.
 - Differential-range validation and unreferenced-data rejection.
 - libzstd patch creation and application through cgo.
 - Immediate termination before decompressed output can exceed its declared size.
-- Immutable source, target, installed-file, and patch snapshots.
+- Immutable source, target, installed-file, and patch snapshots, including
+  optimized private-snapshot parsing without redundant full-file rehashes.
 - Multi-file forward and reverse workflows.
 - Independent forward/reverse readiness, including identical source and target
-  states, permission-only mismatches, missing files, non-regular files, mixed
-  states, and unknown content.
+  states, permission-independent matching, missing files, non-regular files,
+  mixed states, and unknown content.
 - Transaction preparation, replacement, cancellation, rollback, cleanup, and
-  injected rename, remove, and permission failures.
+  injected rename, remove, and Unix permission-preservation failures.
 - GUI state locking and captured selections during active operations.
-- File-level and byte-level typed progress callbacks.
+- File-level and byte-level typed progress callbacks with distinct prepared and
+  committed stages.
+- Creator disk estimates, selected work directories, and bounded parallel file
+  processing.
 - Fuzzing of VIPR decoding, patch opening, and secure path joining.
 
 CI runs the complete test suite with the Go race detector. It also rebuilds the

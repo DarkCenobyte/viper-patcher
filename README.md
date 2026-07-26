@@ -26,7 +26,8 @@ available, the application prints a warning and falls back to CLI mode.
 - Optional reverse differential for every file.
 - Strict, versioned, and bounds-checked `.vipr` container.
 - Immutable creation and application snapshots.
-- Transactional file replacement with best-effort rollback and aggregated errors.
+- Traversal-resistant installation access with `os.Root`.
+- Transactional file replacement with best-effort rollback and explicit post-commit warnings.
 - File-level and byte-level progress reporting.
 - Fyne GUI plus deterministic CLI behavior.
 - MIT-licensed Go code.
@@ -64,9 +65,12 @@ The creator interface provides:
   source/target pair. Each column displays paths relative to its nearest common
   parent directory.
 - A dedicated comment section.
-- A collapsed **Settings** section containing compression levels 1 through 22
-  and optional reverse-patch generation.
+- A collapsed **Settings** section containing compression levels 1 through 22,
+  optional reverse-patch generation, creator-only work-directory selection, and
+  bounded per-file parallelism. Parallelism defaults to one worker and cannot
+  exceed the logical CPU count.
 - An output directory and `.vipr` filename.
+- A conservative peak temporary-disk estimate shown before creation starts.
 - Progress by file and by processed bytes.
 
 The selected output file is opened only by the patch creation core. Cancelling
@@ -89,6 +93,8 @@ creator --headless \
   --compression-level 12 \
   --comment "Version 1.1 update" \
   --create-reverse \
+  --parallel 2 \
+  --work-directory /path/to/temporary-storage \
   update.vipr
 ```
 
@@ -99,6 +105,8 @@ Supported parameters:
 [--compression-level <level>]  Default: 3.
 [--comment <text>]             Default: Created with Viper-Patcher.
 [--create-reverse]             Default: false.
+[--work-directory <directory>] Optional creator temporary-data parent.
+[--parallel <count>]           Parallel file operations. Default: 1.
 [--headless]                   Force CLI mode.
 [--version]                    Show version information.
 [--help]                       Show help.
@@ -119,17 +127,20 @@ Selecting a target directory triggers a complete preflight:
 
 - Every required path must resolve to a regular file without traversing a
   symbolic link.
-- File hash, size, and portable permission bits must match the source state to
-  enable **Patch**.
-- When reverse data exists, the same properties must match the target state to
-  enable **Reverse**.
+- File hash and size must match the source state to enable **Patch**.
+- When reverse data exists, the same content checks must match the target state
+  to enable **Reverse**.
 - A file that validly matches both states enables both directions.
-- Mixed, unknown, non-regular, permission-mismatched, or missing states disable
-  the affected directions and report the first problem.
+- Mixed, unknown, non-regular, or missing states disable the affected directions
+  and report the first problem.
+- Stored Unix mode metadata is advisory. Application preserves the installed
+  file mode on Unix and ignores Unix permission bits on Windows, so the same
+  patch remains usable across supported operating systems.
 
 Patch and directory selections are locked while an operation is running. The
 operation uses captured selections rather than mutable GUI state and rejects a
-patch whose SHA-256 digest changed after the displayed preflight inspection.
+patch whose SHA-256 digest changed after the displayed preflight inspection. The
+CLI binds inspection and application to the same digest as well.
 
 ## Patcher CLI
 
@@ -172,7 +183,9 @@ wrapper applies the same core configuration used by zstd 1.5.7 patch-from mode:
   header.
 
 Reference files are memory-mapped. Target, patch, and output data are streamed
-through bounded buffers, allowing detailed progress for large files. Native
+through bounded buffers, allowing detailed progress for large files. Patched
+outputs are written through handles created beneath one traversal-resistant
+installation root, avoiding a close-and-reopen race on temporary paths. Native
 platform I/O, compression, decompression, and common error handling are kept in
 separate C translation units.
 
@@ -208,14 +221,13 @@ The PowerShell build script detects a standard `C:\msys64` installation. For
 another location, pass `-MSYS2Root "D:\path\to\msys64"` or set the
 `MSYS2_ROOT` environment variable.
 
-See [Building](docs/BUILDING.md) for dependencies, x86 instructions, and module
-path setup.
+See [Building](docs/BUILDING.md) for dependencies, x86 instructions, and
+creator temporary-data options.
 
 ## Testing
 
 ```sh
-make test
-make vet
+make check
 ```
 
 The repository includes unit, integration, race, fuzz, native sanitizer, and
@@ -233,7 +245,7 @@ compiles the complete GUI executables. See [Testing strategy](docs/TESTING.md).
   request.
 - `release.yml` validates one release version, builds unsigned cross-platform
   archives, and grants write access only to the publication job.
-- Third-party actions are referenced by immutable commit identifiers.
+- External actions are referenced by immutable commit identifiers.
 
 See [GitHub Actions CI/CD](docs/CI-CD.md) for initial repository configuration,
 release tags, and future code-signing insertion points.
