@@ -55,12 +55,6 @@ func (model *filePairModel) DisplayPairs() []filePairDisplay {
 	return buildFilePairDisplay(model.Pairs())
 }
 
-func (model *filePairModel) Len() int {
-	model.mutex.RLock()
-	defer model.mutex.RUnlock()
-	return len(model.pairs)
-}
-
 func buildFilePairDisplay(pairs []patch.FilePair) []filePairDisplay {
 	sourcePaths := make([]string, len(pairs))
 	targetPaths := make([]string, len(pairs))

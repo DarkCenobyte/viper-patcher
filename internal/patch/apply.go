@@ -32,11 +32,6 @@ type ApplyOptions struct {
 	ExpectedPatchHash string
 }
 
-// Apply validates and applies a patch direction transactionally.
-func Apply(ctx context.Context, patchPath, root string, direction Direction, callback progress.Callback) error {
-	return ApplyWithOptions(ctx, ApplyOptions{PatchPath: patchPath, Root: root, Direction: direction}, callback)
-}
-
 // ApplyWithOptions validates and applies a configured patch operation.
 func ApplyWithOptions(ctx context.Context, options ApplyOptions, callback progress.Callback) error {
 	return applyWithOperations(ctx, options, callback, defaultApplyOperations)

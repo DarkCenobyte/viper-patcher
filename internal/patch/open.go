@@ -10,12 +10,6 @@ import (
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 )
 
-// Open reads a patch and validates every differential range against the container size.
-func Open(path string) (patchformat.Patch, error) {
-	parsed, _, err := OpenWithDigest(path)
-	return parsed, err
-}
-
 // OpenWithDigest reads one stable patch file and returns its verified SHA-256 digest.
 func OpenWithDigest(path string) (patchformat.Patch, string, error) {
 	file, identity, err := openStableRegularFile(path)

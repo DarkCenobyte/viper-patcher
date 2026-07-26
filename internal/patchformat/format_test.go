@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -171,34 +169,6 @@ func TestValidateHeaderFailures(t *testing.T) {
 				t.Fatal("expected an error")
 			}
 		})
-	}
-}
-
-func TestRead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "patch.vipr")
-	file, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := EncodePrefix(file, validHeader()); err != nil {
-		file.Close()
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	parsed, err := Read(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if parsed.Header.Comment != "hello" {
-		t.Fatalf("comment = %q", parsed.Header.Comment)
-	}
-}
-
-func TestReadMissing(t *testing.T) {
-	if _, err := Read(filepath.Join(t.TempDir(), "missing.vipr")); err == nil {
-		t.Fatal("expected an error")
 	}
 }
 

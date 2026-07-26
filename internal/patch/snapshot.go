@@ -213,19 +213,6 @@ func openStableRegularFile(path string) (*os.File, os.FileInfo, error) {
 	return file, info, nil
 }
 
-func verifyFileExpectation(path string, expected fileExpectation) error {
-	file, identity, err := openStableRegularFile(path)
-	if err != nil {
-		return fmt.Errorf("verify %q before replacement: %w", path, err)
-	}
-	verificationError := verifyOpenedFileExpectation(file, identity, path, expected)
-	closeError := file.Close()
-	return errors.Join(
-		verificationError,
-		wrapOperationError("close verified file", path, closeError),
-	)
-}
-
 func verifyRootFileExpectation(root *os.Root, path string, expected fileExpectation) error {
 	if err := rejectSymlinkComponents(root, path); err != nil {
 		return fmt.Errorf("verify %q before replacement: %w", path, err)

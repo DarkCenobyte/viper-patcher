@@ -65,7 +65,7 @@ func TestRunCreatesPatchWithAtomicPairs(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Patch created:") || !strings.Contains(stderr.String(), string("compressing-forward")) {
 		t.Fatalf("stdout = %s, stderr = %s", stdout.String(), stderr.String())
 	}
-	parsed, err := patch.Open(output)
+	parsed, _, err := patch.OpenWithDigest(output)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,7 +7,6 @@ package zstd
 import "C"
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"runtime/cgo"
@@ -79,24 +78,6 @@ func CompressFile(referencePath, targetPath, outputPath string, level int, callb
 	return nil
 }
 
-// DecompressSegment applies one patch-from frame stored inside a VIPR container.
-func DecompressSegment(referencePath, patchPath string, offset, length uint64, outputPath string, expectedOutputSize uint64, callback ProgressFunc) (resultError error) {
-	output, err := os.OpenFile(outputPath, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
-	if err != nil {
-		return fmt.Errorf("open patched output: %w", err)
-	}
-	defer func() {
-		resultError = errors.Join(resultError, wrapFileError("close patched output", output.Close()))
-	}()
-	if err := DecompressSegmentToFile(referencePath, patchPath, offset, length, output, expectedOutputSize, callback); err != nil {
-		return err
-	}
-	if err := output.Sync(); err != nil {
-		return fmt.Errorf("sync patched output: %w", err)
-	}
-	return nil
-}
-
 // DecompressSegmentToFile applies one patch-from frame to an already-open file.
 // Keeping the handle open prevents another process from replacing the output
 // path between secure creation and native decompression.
@@ -136,13 +117,6 @@ func DecompressSegmentToFile(referencePath, patchPath string, offset, length uin
 	return nil
 }
 
-func wrapFileError(operation string, err error) error {
-	if err == nil {
-		return nil
-	}
-	return fmt.Errorf("%s: %w", operation, err)
-}
-
 func newProgressHandle(callback ProgressFunc) cgo.Handle {
 	if callback == nil {
 		callback = func(uint64, uint64) {}
@@ -158,5 +132,3 @@ func viprGoProgress(handle C.uintptr_t, processed C.uint64_t, total C.uint64_t) 
 	}
 	callback(uint64(processed), uint64(total))
 }
-
-var _ unsafe.Pointer

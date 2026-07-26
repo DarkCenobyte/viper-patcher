@@ -1,6 +1,7 @@
 package zstd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,7 +41,7 @@ func TestCompressAndDecompressFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var decompressionProgress uint64
-	if err := DecompressSegment(reference, patch, 0, uint64(info.Size()), output, uint64(len(newData)), func(processed, total uint64) {
+	if err := decompressSegmentToPath(reference, patch, 0, uint64(info.Size()), output, uint64(len(newData)), func(processed, total uint64) {
 		decompressionProgress = processed
 	}); err != nil {
 		t.Fatal(err)
@@ -85,7 +86,7 @@ func TestDecompressRejectsTruncatedSegment(t *testing.T) {
 	if err := os.WriteFile(patch, []byte("bad"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := DecompressSegment(reference, patch, 0, 10, output, 1, nil); err == nil {
+	if err := decompressSegmentToPath(reference, patch, 0, 10, output, 1, nil); err == nil {
 		t.Fatal("expected truncated segment to be rejected")
 	}
 }
@@ -111,7 +112,7 @@ func TestDecompressStopsAtDeclaredOutputSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	declaredSize := uint64(2 << 20)
-	if err := DecompressSegment(reference, patch, 0, uint64(patchInfo.Size()), output, declaredSize, nil); err == nil {
+	if err := decompressSegmentToPath(reference, patch, 0, uint64(patchInfo.Size()), output, declaredSize, nil); err == nil {
 		t.Fatal("expected output-size limit to be enforced")
 	}
 	outputInfo, err := os.Stat(output)
@@ -121,4 +122,13 @@ func TestDecompressStopsAtDeclaredOutputSize(t *testing.T) {
 	if outputInfo.Size() > int64(declaredSize) {
 		t.Fatalf("output size = %d, declared maximum = %d", outputInfo.Size(), declaredSize)
 	}
+}
+
+func decompressSegmentToPath(referencePath, patchPath string, offset, length uint64, outputPath string, expectedOutputSize uint64, callback ProgressFunc) error {
+	output, err := os.OpenFile(outputPath, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	operationError := DecompressSegmentToFile(referencePath, patchPath, offset, length, output, expectedOutputSize, callback)
+	return errors.Join(operationError, output.Close())
 }

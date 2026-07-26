@@ -16,19 +16,6 @@ type transactionOperations struct {
 	verify     func(string, fileExpectation) error
 }
 
-var defaultTransactionOperations = transactionOperations{
-	createTemp: func(directory, pattern string) (*os.File, string, error) {
-		file, err := os.CreateTemp(directory, pattern)
-		if err != nil {
-			return nil, "", err
-		}
-		return file, file.Name(), nil
-	},
-	rename: os.Rename,
-	remove: os.Remove,
-	verify: verifyFileExpectation,
-}
-
 type transactionFile struct {
 	target      string
 	temporary   string
@@ -44,11 +31,6 @@ type Transaction struct {
 	files      []transactionFile
 	operations transactionOperations
 	finished   bool
-}
-
-// NewTransaction creates an empty path-based file replacement transaction.
-func NewTransaction() *Transaction {
-	return newTransactionWithOperations(defaultTransactionOperations)
 }
 
 func newRootTransaction(root *os.Root) *Transaction {

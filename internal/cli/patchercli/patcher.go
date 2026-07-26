@@ -35,7 +35,6 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		printUsage(stderr)
 		return 2
 	}
-	_ = headless
 	if help {
 		printUsage(stdout)
 		return 0

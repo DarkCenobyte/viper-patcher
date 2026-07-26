@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	pathpkg "path"
 	"strings"
 	"time"
@@ -105,16 +104,6 @@ func EncodePrefix(writer io.Writer, header Header) (uint64, error) {
 		return 0, err
 	}
 	return uint64(len(Magic) + 8 + len(payload)), nil
-}
-
-// Read opens and validates a VIPR patch header.
-func Read(path string) (Patch, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return Patch{}, fmt.Errorf("open patch: %w", err)
-	}
-	defer file.Close()
-	return Decode(file)
 }
 
 // Decode parses a VIPR patch from reader.

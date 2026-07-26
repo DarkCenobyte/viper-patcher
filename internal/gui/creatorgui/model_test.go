@@ -23,12 +23,12 @@ func TestFilePairModelKeepsAssociations(t *testing.T) {
 	if model.Pairs()[0].SourcePath != "old/one.bin" {
 		t.Fatal("Pairs must return an independent snapshot")
 	}
-	if !model.Remove(0) || model.Len() != 1 || model.Pairs()[0].SourcePath != "old/two.bin" {
+	if !model.Remove(0) || len(model.Pairs()) != 1 || model.Pairs()[0].SourcePath != "old/two.bin" {
 		t.Fatalf("unexpected model after removal: %#v", model.Pairs())
 	}
 	model.Clear()
-	if model.Len() != 0 {
-		t.Fatalf("length = %d", model.Len())
+	if pairs := model.Pairs(); len(pairs) != 0 {
+		t.Fatalf("unexpected pairs after clear: %#v", pairs)
 	}
 }
 

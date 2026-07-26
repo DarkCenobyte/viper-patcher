@@ -678,9 +678,17 @@ func expectationFor(t *testing.T, path string) fileExpectation {
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest, size, err := hashutil.File(path)
+	file, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	digest, size, hashError := hashutil.Reader(file)
+	closeError := file.Close()
+	if hashError != nil {
+		t.Fatal(hashError)
+	}
+	if closeError != nil {
+		t.Fatal(closeError)
 	}
 	return fileExpectation{Identity: info, Hash: digest, Size: size}
 }
@@ -938,11 +946,7 @@ func TestTransactionReturnsCommittedWarningForBackupCleanup(t *testing.T) {
 	assertFile(t, target, []byte("new"))
 }
 
-func TestTransactionPublicConstructorAndErrorWrappers(t *testing.T) {
-	transaction := NewTransaction()
-	if transaction == nil || transaction.finished {
-		t.Fatalf("unexpected transaction: %#v", transaction)
-	}
+func TestTransactionErrorWrappers(t *testing.T) {
 	if err := wrapRemoveError("remove", "unused", nil); err != nil {
 		t.Fatal(err)
 	}
