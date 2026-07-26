@@ -35,6 +35,7 @@ type creatorController struct {
 	footer                fyne.CanvasObject
 	pairs                 *filePairEditor
 	levelSelect           *widget.Select
+	compressionWarning    *widget.Label
 	parallelSelect        *widget.Select
 	comment               *widget.Entry
 	reverse               *widget.Check
@@ -57,7 +58,12 @@ func newCreatorController(application fyne.App) *creatorController {
 	controller.window = application.NewWindow("Viper Patcher - Creator")
 	controller.window.SetIcon(assets.AppIcon)
 	controller.pairs = newFilePairEditor(controller.window)
-	controller.levelSelect = widget.NewSelect(integerOptions(1, 22), nil)
+	controller.compressionWarning = widget.NewLabel("Warning: ultra compression levels 20-22 can severely impact performance, with much longer patch creation times and high CPU usage.")
+	controller.compressionWarning.Wrapping = fyne.TextWrapWord
+	controller.compressionWarning.TextStyle = fyne.TextStyle{Bold: true}
+	controller.compressionWarning.Importance = widget.WarningImportance
+	controller.compressionWarning.Hide()
+	controller.levelSelect = widget.NewSelect(integerOptions(1, 22), controller.updateCompressionWarning)
 	controller.levelSelect.SetSelected("3")
 	controller.parallelSelect = widget.NewSelect(integerOptions(1, runtime.NumCPU()), nil)
 	controller.parallelSelect.SetSelected("1")
@@ -97,6 +103,7 @@ func (controller *creatorController) buildContent() fyne.CanvasObject {
 	)
 	settingsContent := container.NewVBox(
 		container.NewGridWithColumns(2, widget.NewLabel("Compression level"), controller.levelSelect),
+		controller.compressionWarning,
 		container.NewGridWithColumns(2, widget.NewLabel("Parallel files"), controller.parallelSelect),
 		container.NewGridWithColumns(2, widget.NewLabel("Reverse support"), controller.reverse),
 		container.NewBorder(nil, nil, container.NewHBox(controller.selectWorkDirectory, controller.resetWorkDirectory), nil, controller.workDirectoryLabel),
@@ -128,6 +135,21 @@ func (controller *creatorController) buildContent() fyne.CanvasObject {
 		nil,
 		container.NewVScroll(controller.body),
 	)
+}
+
+func (controller *creatorController) updateCompressionWarning(selected string) {
+	if !isUltraCompressionLevel(selected) {
+		controller.compressionWarning.Hide()
+		return
+	}
+
+	controller.compressionWarning.Show()
+	controller.growWindowToFitContent()
+}
+
+func isUltraCompressionLevel(selected string) bool {
+	level, err := strconv.Atoi(selected)
+	return err == nil && level >= 20 && level <= 22
 }
 
 func (controller *creatorController) fitInitialWindow() {
