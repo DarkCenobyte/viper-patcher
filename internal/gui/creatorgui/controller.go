@@ -21,14 +21,16 @@ import (
 )
 
 const (
-	creatorWindowWidth  = 1040
-	creatorWindowHeight = 940
-	creatorLogoWidth    = 360
-	creatorLogoHeight   = 166
+	creatorWindowWidth = 1040
+	creatorLogoWidth   = 360
+	creatorLogoHeight  = 166
 )
 
 type creatorController struct {
 	window                fyne.Window
+	header                fyne.CanvasObject
+	body                  fyne.CanvasObject
+	footer                fyne.CanvasObject
 	pairs                 *filePairEditor
 	levelSelect           *widget.Select
 	parallelSelect        *widget.Select
@@ -52,8 +54,6 @@ func newCreatorController(application fyne.App) *creatorController {
 	controller := &creatorController{}
 	controller.window = application.NewWindow("Viper Patcher - Creator")
 	controller.window.SetIcon(assets.AppIcon)
-	controller.window.Resize(fyne.NewSize(creatorWindowWidth, creatorWindowHeight))
-
 	controller.pairs = newFilePairEditor(controller.window)
 	controller.levelSelect = widget.NewSelect(integerOptions(1, 22), nil)
 	controller.levelSelect.SetSelected("3")
@@ -99,8 +99,11 @@ func (controller *creatorController) buildContent() fyne.CanvasObject {
 		container.NewGridWithColumns(2, widget.NewLabel("Reverse support"), controller.reverse),
 		container.NewBorder(nil, nil, container.NewHBox(controller.selectWorkDirectory, controller.resetWorkDirectory), nil, controller.workDirectoryLabel),
 	)
-	settings := widget.NewAccordion(widget.NewAccordionItem("Settings", settingsContent))
-	settings.CloseAll()
+	settings := newCollapsibleSection("Settings", settingsContent, func(open bool) {
+		if open {
+			controller.growWindowToFitContent()
+		}
+	})
 	outputCard := widget.NewCard(
 		"Output",
 		"The core writes through a temporary file and safely replaces an existing regular patch.",
@@ -109,19 +112,59 @@ func (controller *creatorController) buildContent() fyne.CanvasObject {
 			container.NewGridWithColumns(2, widget.NewLabel("Filename"), controller.outputName),
 		),
 	)
-	header := container.NewVBox(
+	controller.header = container.NewVBox(
 		branding.NewLogo(assets.AppLogo, fyne.NewSize(creatorLogoWidth, creatorLogoHeight)),
 		widget.NewLabelWithStyle("Create a differential patch", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		widget.NewLabelWithStyle("Add each source file together with the exact target file that replaces it.", fyne.TextAlignCenter, fyne.TextStyle{}),
 	)
-	content := container.NewVBox(pairCard, commentCard, settings, outputCard, layout.NewSpacer())
+	controller.body = container.NewVBox(pairCard, commentCard, settings.Container(), outputCard, layout.NewSpacer())
+	controller.footer = container.NewVBox(controller.progressBar, controller.status, controller.createButton)
 	return container.NewBorder(
-		header,
-		container.NewVBox(controller.progressBar, controller.status, controller.createButton),
+		controller.header,
+		controller.footer,
 		nil,
 		nil,
-		container.NewVScroll(content),
+		container.NewVScroll(controller.body),
 	)
+}
+
+func (controller *creatorController) fitInitialWindow() {
+	maximumHeight := maximumCreatorContentHeight(controller.window)
+	controller.pairs.SetTableHeight(filePairTablePreferredHeight)
+
+	desiredHeight := preferredCreatorContentHeight(controller.header, controller.body, controller.footer)
+	tableHeight := fittedFilePairTableHeight(
+		filePairTablePreferredHeight,
+		filePairTableMinimumHeight,
+		desiredHeight,
+		maximumHeight,
+	)
+	controller.pairs.SetTableHeight(tableHeight)
+	desiredHeight = preferredCreatorContentHeight(controller.header, controller.body, controller.footer)
+	if desiredHeight > maximumHeight {
+		desiredHeight = maximumHeight
+	}
+
+	controller.window.Resize(fyne.NewSize(creatorWindowWidth, desiredHeight))
+	controller.window.CenterOnScreen()
+}
+
+func (controller *creatorController) growWindowToFitContent() {
+	desiredHeight := preferredCreatorContentHeight(controller.header, controller.body, controller.footer)
+	maximumHeight := maximumCreatorContentHeight(controller.window)
+	if desiredHeight > maximumHeight {
+		desiredHeight = maximumHeight
+	}
+
+	currentSize := controller.window.Canvas().Size()
+	if desiredHeight <= currentSize.Height {
+		return
+	}
+	width := currentSize.Width
+	if width < creatorWindowWidth {
+		width = creatorWindowWidth
+	}
+	controller.window.Resize(fyne.NewSize(width, desiredHeight))
 }
 
 func (controller *creatorController) chooseOutputDirectory() {

@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	filePairTableHeight = 270
-	filePairColumnWidth = 430
+	filePairTablePreferredHeight = 270
+	filePairTableMinimumHeight   = 120
+	filePairColumnWidth          = 430
 )
 
 type filePairEditor struct {
@@ -22,6 +23,8 @@ type filePairEditor struct {
 	display      []filePairDisplay
 	selected     int
 	table        *widget.Table
+	tableLayout  *fixedSizeLayout
+	tableBox     *fyne.Container
 	box          *fyne.Container
 	window       fyne.Window
 	addButton    *widget.Button
@@ -78,16 +81,17 @@ func newFilePairEditor(window fyne.Window) *filePairEditor {
 	editor.addButton = widget.NewButton("Add file pair", editor.addPair)
 	editor.removeButton = widget.NewButton("Remove selected", editor.removeSelected)
 	editor.clearButton = widget.NewButton("Clear", editor.clear)
-	tableContainer := container.NewGridWrap(
-		fyne.NewSize(filePairColumnWidth*2+20, filePairTableHeight),
-		editor.table,
-	)
+	editor.tableLayout = newFixedSizeLayout(fyne.NewSize(
+		filePairColumnWidth*2+20,
+		filePairTablePreferredHeight,
+	))
+	editor.tableBox = container.New(editor.tableLayout, editor.table)
 	editor.box = container.NewBorder(
 		nil,
 		container.NewHBox(editor.addButton, editor.removeButton, editor.clearButton),
 		nil,
 		nil,
-		tableContainer,
+		editor.tableBox,
 	)
 	return editor
 }
@@ -144,6 +148,17 @@ func (editor *filePairEditor) refresh() {
 func (editor *filePairEditor) Pairs() []patch.FilePair { return editor.model.Pairs() }
 
 func (editor *filePairEditor) Container() fyne.CanvasObject { return editor.box }
+
+func (editor *filePairEditor) SetTableHeight(height float32) {
+	if height < filePairTableMinimumHeight {
+		height = filePairTableMinimumHeight
+	}
+	if height > filePairTablePreferredHeight {
+		height = filePairTablePreferredHeight
+	}
+	editor.tableLayout.SetMinSize(fyne.NewSize(filePairColumnWidth*2+20, height))
+	editor.tableBox.Refresh()
+}
 
 func (editor *filePairEditor) SetEnabled(enabled bool) {
 	if enabled {
