@@ -22,10 +22,10 @@ import (
 )
 
 const (
-	creatorWindowWidth = 1040
+	creatorWindowWidth          = 1040
 	creatorWindowFallbackHeight = 940
-	creatorLogoWidth   = 360
-	creatorLogoHeight  = 166
+	creatorLogoWidth            = 360
+	creatorLogoHeight           = 166
 )
 
 type creatorController struct {
