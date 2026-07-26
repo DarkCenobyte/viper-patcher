@@ -1,27 +1,10 @@
 package patch
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
-
-	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
-	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
-
-func Apply(ctx context.Context, patchPath, root string, direction Direction, callback progress.Callback) error {
-	return ApplyWithOptions(ctx, ApplyOptions{
-		PatchPath: patchPath,
-		Root:      root,
-		Direction: direction,
-	}, callback)
-}
-
-func Open(path string) (patchformat.Patch, error) {
-	parsed, _, err := OpenWithDigest(path)
-	return parsed, err
-}
 
 var defaultTransactionOperations = transactionOperations{
 	createTemp: func(directory, pattern string) (*os.File, string, error) {
