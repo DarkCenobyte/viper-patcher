@@ -31,8 +31,12 @@ func TestPatcherProgressPresentation(t *testing.T) {
 	if text := patcherProgressText(event, patch.Forward); !strings.Contains(text, "forward") || !strings.Contains(text, event.Path) {
 		t.Fatalf("unexpected progress text: %s", text)
 	}
-	if value := patcherOverallProgress(event); value != 0.375 {
-		t.Fatalf("progress = %v, want 0.375", value)
+	if value := patcherOverallProgress(event); value != 0.4 {
+		t.Fatalf("progress = %v, want 0.4", value)
+	}
+	event.Stage = progress.StageVerifying
+	if value := patcherOverallProgress(event); value != 0.275 {
+		t.Fatalf("verification progress = %v, want 0.275", value)
 	}
 	if value := patcherOverallProgress(progress.Event{Stage: progress.StageCompleted}); value != 1 {
 		t.Fatalf("completed progress = %v, want 1", value)

@@ -46,6 +46,8 @@ jobs:
       - name: Run tests with race detector
         env:
           CGO_ENABLED: "1"
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
         run: go test -race -count=1 -tags vipr_static_zstd,migrated_fynedo ./...
 
       - name: Run native sanitizer tests

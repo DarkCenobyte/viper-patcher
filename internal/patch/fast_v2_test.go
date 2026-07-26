@@ -197,7 +197,7 @@ func TestOpenWithDigestReturnsPhysicalFileSHA256(t *testing.T) {
 	}
 }
 
-func TestApplyRejectsHeaderChangedAfterInspection(t *testing.T) {
+func TestApplyRejectsStructurallyInvalidHeaderBeforeDigestCheck(t *testing.T) {
 	fixture := newSingleFileFixture(t, false)
 	_, digest, err := OpenWithDigest(fixture.patchPath)
 	if err != nil {
@@ -221,7 +221,7 @@ func TestApplyRejectsHeaderChangedAfterInspection(t *testing.T) {
 		Direction:         Forward,
 		ExpectedPatchHash: digest,
 	}, nil)
-	if err == nil || err.Error() != "selected patch changed after it was inspected" {
+	if err == nil || err.Error() != "not a VIPR patch" {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	assertFile(t, fixture.installedPath, fixture.sourceData)
