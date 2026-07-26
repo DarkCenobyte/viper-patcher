@@ -58,9 +58,8 @@ func newCreatorController(application fyne.App) *creatorController {
 	controller.window = application.NewWindow("Viper Patcher - Creator")
 	controller.window.SetIcon(assets.AppIcon)
 	controller.pairs = newFilePairEditor(controller.window)
-	controller.compressionWarning = widget.NewLabel("Warning: ultra compression levels 20-22 can severely impact performance, with much longer patch creation times and high CPU usage.")
+	controller.compressionWarning = widget.NewLabel("")
 	controller.compressionWarning.Wrapping = fyne.TextWrapWord
-	controller.compressionWarning.TextStyle = fyne.TextStyle{Bold: true}
 	controller.compressionWarning.Importance = widget.WarningImportance
 	controller.compressionWarning.Hide()
 	controller.levelSelect = widget.NewSelect(integerOptions(1, 22), controller.updateCompressionWarning)
@@ -138,18 +137,45 @@ func (controller *creatorController) buildContent() fyne.CanvasObject {
 }
 
 func (controller *creatorController) updateCompressionWarning(selected string) {
-	if !isUltraCompressionLevel(selected) {
+	switch compressionWarningLevelFor(selected) {
+	case compressionWarningElevated:
+		controller.compressionWarning.SetText("Warning: compression levels 10-19 can negatively affect performance and increase patch creation time.")
+		controller.compressionWarning.TextStyle = fyne.TextStyle{}
+	case compressionWarningUltra:
+		controller.compressionWarning.SetText("Warning: ultra compression levels 20-22 can severely impact performance, with much longer patch creation times and high CPU usage.")
+		controller.compressionWarning.TextStyle = fyne.TextStyle{Bold: true}
+	default:
 		controller.compressionWarning.Hide()
 		return
 	}
 
+	controller.compressionWarning.Refresh()
 	controller.compressionWarning.Show()
 	controller.growWindowToFitContent()
 }
 
-func isUltraCompressionLevel(selected string) bool {
+type compressionWarningLevel uint8
+
+const (
+	compressionWarningNone compressionWarningLevel = iota
+	compressionWarningElevated
+	compressionWarningUltra
+)
+
+func compressionWarningLevelFor(selected string) compressionWarningLevel {
 	level, err := strconv.Atoi(selected)
-	return err == nil && level >= 20 && level <= 22
+	if err != nil {
+		return compressionWarningNone
+	}
+
+	switch {
+	case level >= 20 && level <= 22:
+		return compressionWarningUltra
+	case level >= 10 && level <= 19:
+		return compressionWarningElevated
+	default:
+		return compressionWarningNone
+	}
 }
 
 func (controller *creatorController) fitInitialWindow() {
