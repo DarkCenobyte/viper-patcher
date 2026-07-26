@@ -1,6 +1,7 @@
 package zstd
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -125,10 +126,25 @@ func TestDecompressStopsAtDeclaredOutputSize(t *testing.T) {
 }
 
 func decompressSegmentToPath(referencePath, patchPath string, offset, length uint64, outputPath string, expectedOutputSize uint64, callback ProgressFunc) error {
+	reference, err := os.Open(referencePath)
+	if err != nil {
+		return err
+	}
+	defer reference.Close()
+	patch, err := os.Open(patchPath)
+	if err != nil {
+		return err
+	}
+	defer patch.Close()
 	output, err := os.OpenFile(outputPath, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
-	operationError := DecompressSegmentToFile(referencePath, patchPath, offset, length, output, expectedOutputSize, callback)
-	return errors.Join(operationError, output.Close())
+	decoder, err := NewDecoder()
+	if err != nil {
+		_ = output.Close()
+		return err
+	}
+	operationError := decoder.DecompressSegmentToFile(context.Background(), reference, patch, offset, length, output, expectedOutputSize, callback, nil)
+	return errors.Join(operationError, decoder.Close(), output.Close())
 }

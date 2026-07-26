@@ -37,7 +37,7 @@ func EstimateCreate(options CreateOptions) (CreateEstimate, error) {
 		if estimate.SnapshotBytes, err = addEstimate(estimate.SnapshotBytes, sourceSize, targetSize); err != nil {
 			return CreateEstimate{}, err
 		}
-		forwardBound, err := differentialWorkBound(sourceSize, targetSize)
+		forwardBound, err := differentialWorkBound(targetSize)
 		if err != nil {
 			return CreateEstimate{}, err
 		}
@@ -45,7 +45,7 @@ func EstimateCreate(options CreateOptions) (CreateEstimate, error) {
 			return CreateEstimate{}, err
 		}
 		if options.CreateReverse {
-			reverseBound, err := differentialWorkBound(targetSize, sourceSize)
+			reverseBound, err := differentialWorkBound(sourceSize)
 			if err != nil {
 				return CreateEstimate{}, err
 			}
@@ -85,7 +85,7 @@ func EstimateCreate(options CreateOptions) (CreateEstimate, error) {
 	return estimate, nil
 }
 
-func differentialWorkBound(_ uint64, targetSize uint64) (uint64, error) {
+func differentialWorkBound(targetSize uint64) (uint64, error) {
 	compressed, err := compressionBoundEstimate(targetSize)
 	if err != nil {
 		return 0, err

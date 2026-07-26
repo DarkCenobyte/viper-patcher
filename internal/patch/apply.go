@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 	"github.com/DarkCenobyte/viper-patcher/internal/zstd"
@@ -256,34 +255,47 @@ func prepareApplicationFile(ctx context.Context, root *installationRoot, patch *
 		}
 	}()
 
-	event := progress.Event{FileIndex: index + 1, FileCount: fileCount, Path: entry.Path, Stage: progress.StageApplying, TotalBytes: expectedOutput.size}
-	progress.Report(callback, event)
+	event := progress.Event{FileIndex: index + 1, FileCount: fileCount, Path: entry.Path, TotalBytes: expectedOutput.size}
 
 	switch method {
-	case patchformat.MethodSparse, patchformat.MethodCopyAdd:
-		if method == patchformat.MethodSparse && expectedInput.size != expectedOutput.size {
+	case patchformat.MethodSparse:
+		if expectedInput.size != expectedOutput.size {
 			return preparedApplicationFile{}, fmt.Errorf("sparse differential for %q changes file size", entry.Path)
 		}
-		operationsFile, operationsPath, err := decompressInstructionStream(ctx, patch.file, segmentOffset, length, expandedLength, method, decoders)
+		event.Stage = progress.StageApplying
+		progress.Report(callback, event)
+		decoder := decoders.acquire()
+		err = applyCompressedInstructionStream(ctx, decoder, patch.file, segmentOffset, length, expandedLength, func(reader io.Reader) error {
+			return applySparseStreamContext(ctx, source, reader, temporary, expectedOutput.size, expectedInput.hash, expectedOutput.hash, callback, event)
+		})
+		decoders.release(decoder)
 		if err != nil {
-			return preparedApplicationFile{}, fmt.Errorf("decompress %s operations for %q: %w", method, entry.Path, err)
+			return preparedApplicationFile{}, fmt.Errorf("apply %s differential for %q: %w", method, entry.Path, err)
 		}
-		defer func() {
-			_ = operationsFile.Close()
-			_ = os.Remove(operationsPath)
-		}()
-		if method == patchformat.MethodSparse {
-			err = applySparseStream(source, operationsFile, temporary, expectedOutput.size, expectedInput.hash, expectedOutput.hash, callback, event)
-		} else {
-			err = applyCopyAddStream(source, operationsFile, temporary, expectedInput.size, expectedOutput.size, expectedInput.hash, expectedOutput.hash, callback, event)
+	case patchformat.MethodCopyAdd:
+		if err := verifySourceForDecode(ctx, source, expectedInput, callback, event); err != nil {
+			return preparedApplicationFile{}, fmt.Errorf("validate installed file %q: %w", entry.Path, err)
 		}
+		event.Stage = progress.StageApplying
+		event.ProcessedBytes = 0
+		event.TotalBytes = expectedOutput.size
+		progress.Report(callback, event)
+		decoder := decoders.acquire()
+		err = applyCompressedInstructionStream(ctx, decoder, patch.file, segmentOffset, length, expandedLength, func(reader io.Reader) error {
+			return applyCopyAddStreamContext(ctx, source, reader, temporary, expectedInput.size, expectedOutput.size, expectedOutput.hash, callback, event)
+		})
+		decoders.release(decoder)
 		if err != nil {
 			return preparedApplicationFile{}, fmt.Errorf("apply %s differential for %q: %w", method, entry.Path, err)
 		}
 	case patchformat.MethodPatchFrom, patchformat.MethodReplace:
-		if err := verifySourceForDecode(source, expectedInput); err != nil {
+		if err := verifySourceForDecode(ctx, source, expectedInput, callback, event); err != nil {
 			return preparedApplicationFile{}, fmt.Errorf("validate installed file %q: %w", entry.Path, err)
 		}
+		event.Stage = progress.StageApplying
+		event.ProcessedBytes = 0
+		event.TotalBytes = expectedOutput.size
+		progress.Report(callback, event)
 		outputHash := sha256.New()
 		decoder := decoders.acquire()
 		var reference *os.File
@@ -340,38 +352,6 @@ func prepareApplicationFile(ctx context.Context, root *installationRoot, patch *
 		},
 		preparedEvent: preparedEvent,
 	}, nil
-}
-
-func decompressInstructionStream(ctx context.Context, patch *os.File, offset, length, expandedLength uint64, method string, decoders *decoderPool) (*os.File, string, error) {
-	operationsFile, err := os.CreateTemp("", "viper-patcher-operations-*")
-	if err != nil {
-		return nil, "", fmt.Errorf("create operation buffer: %w", err)
-	}
-	operationsPath := operationsFile.Name()
-	decoder := decoders.acquire()
-	decodeError := decoder.DecompressSegmentToFile(ctx, nil, patch, offset, length, operationsFile, expandedLength, nil, nil)
-	decoders.release(decoder)
-	if decodeError != nil {
-		_ = operationsFile.Close()
-		_ = os.Remove(operationsPath)
-		return nil, "", fmt.Errorf("decode %s stream: %w", method, decodeError)
-	}
-	return operationsFile, operationsPath, nil
-}
-
-func verifySourceForDecode(source *os.File, expected fileState) error {
-	if _, err := source.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	digest, size, err := hashutil.Reader(source)
-	if err != nil {
-		return err
-	}
-	if digest != expected.hash || size != expected.size {
-		return fmt.Errorf("source SHA-256 or size does not match patch metadata")
-	}
-	_, err = source.Seek(0, io.SeekStart)
-	return err
 }
 
 type fileState struct {

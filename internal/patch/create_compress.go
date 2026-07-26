@@ -124,11 +124,11 @@ func createBestDifferentials(ctx context.Context, options CreateOptions, snapsho
 		if options.CreateReverse {
 			reverseRaw = filepath.Join(workDirectory, fmt.Sprintf("%06d.reverse.sparse", index))
 		}
-		stats, err := createSparseStreams(snapshot.source.SnapshotPath, snapshot.target.SnapshotPath, forwardRaw, reverseRaw)
+		stats, usable, err := createSparseStreamsOptimized(ctx, snapshot.source.SnapshotPath, snapshot.target.SnapshotPath, forwardRaw, reverseRaw, snapshot.target.Size)
 		if err != nil {
 			return createdDifferential{}, createdDifferential{}, err
 		}
-		if sparseWorthUsing(stats, snapshot.target.Size) {
+		if usable {
 			forward, err := compressPreparedPayload(ctx, emptyReference, forwardRaw, filepath.Join(workDirectory, fmt.Sprintf("%06d.forward.sparse.zst", index)), patchformat.MethodSparse, stats.expandedSize, options.CompressionLevel, compressionProgress(callback, index, fileCount, snapshot.pair.relativePath, progress.StageCompressingForward))
 			if err != nil {
 				return createdDifferential{}, createdDifferential{}, err
@@ -146,10 +146,6 @@ func createBestDifferentials(ctx context.Context, options CreateOptions, snapsho
 				_ = os.Remove(reverseRaw)
 			}
 			return forward, reverse, nil
-		}
-		_ = os.Remove(forwardRaw)
-		if reverseRaw != "" {
-			_ = os.Remove(reverseRaw)
 		}
 	}
 
@@ -170,16 +166,15 @@ func createBestDifferentials(ctx context.Context, options CreateOptions, snapsho
 
 func createCopyAddOrReplace(ctx context.Context, sourcePath, targetPath string, targetSize uint64, workDirectory, emptyReference string, index int, direction string, level int, callback zstd.ProgressFunc) (createdDifferential, error) {
 	copyAddRaw := filepath.Join(workDirectory, fmt.Sprintf("%06d.%s.copy-add", index, direction))
-	stats, err := createCopyAddStream(ctx, sourcePath, targetPath, copyAddRaw)
+	stats, usable, err := createCopyAddStreamOptimized(ctx, sourcePath, targetPath, copyAddRaw, targetSize)
 	if err != nil {
 		return createdDifferential{}, err
 	}
-	if copyAddWorthUsing(stats, targetSize) {
+	if usable {
 		result, err := compressPreparedPayload(ctx, emptyReference, copyAddRaw, filepath.Join(workDirectory, fmt.Sprintf("%06d.%s.copy-add.zst", index, direction)), patchformat.MethodCopyAdd, stats.expandedSize, level, callback)
 		_ = os.Remove(copyAddRaw)
 		return result, err
 	}
-	_ = os.Remove(copyAddRaw)
 	return compressPreparedPayload(ctx, emptyReference, targetPath, filepath.Join(workDirectory, fmt.Sprintf("%06d.%s.replace.zst", index, direction)), patchformat.MethodReplace, 0, level, callback)
 }
 

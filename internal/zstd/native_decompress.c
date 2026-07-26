@@ -46,10 +46,12 @@ void vipr_decoder_free(vipr_decoder *decoder) {
 
 int vipr_decoder_decompress_segment(
     vipr_decoder *decoder,
+    int has_reference,
     uintptr_t reference_handle,
     uintptr_t patch_handle,
     uint64_t patch_offset,
     uint64_t patch_length,
+    int write_output,
     uintptr_t output_handle,
     uint64_t expected_output_size,
     uintptr_t callback_handle,
@@ -68,25 +70,23 @@ int vipr_decoder_decompress_segment(
         vipr_set_error(error_buffer, error_buffer_size, "decoder is unavailable");
         return -1;
     }
-    if (patch_handle == 0 || output_handle == 0) {
-        vipr_set_error(error_buffer, error_buffer_size, "patch and output handles are required");
-        return -1;
-    }
     if (patch_length == 0) {
         vipr_set_error(error_buffer, error_buffer_size, "empty differential segment");
         return -1;
     }
 
-    if (reference_handle != 0) {
+    if (has_reference) {
         if (vipr_map_handle(reference_handle, &reference, error_buffer, error_buffer_size) != 0) {
             return -1;
         }
         reference_mapped = 1;
     }
-    output = vipr_open_write_handle(output_handle);
-    if (output == NULL) {
-        vipr_set_errno_error(error_buffer, error_buffer_size, "duplicate patched output handle");
-        goto cleanup;
+    if (write_output) {
+        output = vipr_open_write_handle(output_handle);
+        if (output == NULL) {
+            vipr_set_errno_error(error_buffer, error_buffer_size, "duplicate patched output handle");
+            goto cleanup;
+        }
     }
 
     {
@@ -105,7 +105,7 @@ int vipr_decoder_decompress_segment(
             vipr_set_zstd_error(error_buffer, error_buffer_size, "configure decompression window", code);
             goto cleanup;
         }
-        if (reference_handle != 0) {
+        if (has_reference) {
             code = ZSTD_DCtx_refPrefix(decoder->context, reference.data, (size_t)reference.size);
             if (ZSTD_isError(code)) {
                 vipr_set_zstd_error(error_buffer, error_buffer_size, "attach patch reference", code);
@@ -154,7 +154,7 @@ int vipr_decoder_decompress_segment(
                     goto cleanup;
                 }
                 if (out.pos > 0) {
-                    if (fwrite(decoder->output_buffer, 1, out.pos, output) != out.pos) {
+                    if (output != NULL && fwrite(decoder->output_buffer, 1, out.pos, output) != out.pos) {
                         vipr_set_errno_error(error_buffer, error_buffer_size, "write patched output file");
                         goto cleanup;
                     }
@@ -180,7 +180,7 @@ int vipr_decoder_decompress_segment(
         }
     }
 
-    if (fflush(output) != 0) {
+    if (output != NULL && fflush(output) != 0) {
         vipr_set_errno_error(error_buffer, error_buffer_size, "flush patched output file");
         goto cleanup;
     }

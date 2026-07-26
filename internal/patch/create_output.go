@@ -133,8 +133,7 @@ func replaceRootOutput(root *os.Root, source, destination string) error {
 		return err
 	}
 	if err := transaction.Commit(); err != nil {
-		cleanupError := transaction.Cleanup()
-		return errors.Join(fmt.Errorf("commit patch output: %w", err), cleanupError)
+		return fmt.Errorf("commit patch output: %w", err)
 	}
 	return nil
 }

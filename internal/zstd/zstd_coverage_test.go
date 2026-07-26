@@ -56,25 +56,14 @@ func TestDecoderValidationAndCloseCoverage(t *testing.T) {
 	if err := decoder.DecompressSegmentToFile(context.Background(), nil, nil, 0, 0, nil, 0, nil, nil); err == nil || !strings.Contains(err.Error(), "required") {
 		t.Fatalf("unexpected nil file error: %v", err)
 	}
-	if err := decoder.Close(); err != nil {
-		t.Fatal(err)
+	if err := decoder.DecompressSegmentToWriter(context.Background(), nil, nil, 0, 0, nil, 0, nil); err == nil || !strings.Contains(err.Error(), "writer") {
+		t.Fatalf("unexpected nil writer error: %v", err)
 	}
 	if err := decoder.Close(); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func TestPathBasedDecoderValidationCoverage(t *testing.T) {
-	if err := DecompressSegmentToFile("", "", 0, 0, nil, 0, nil); err == nil || !strings.Contains(err.Error(), "output file") {
-		t.Fatalf("unexpected nil output error: %v", err)
-	}
-	output := coverageOutputFile(t)
-	missing := filepath.Join(t.TempDir(), "missing")
-	if err := DecompressSegmentToFile(missing, missing, 0, 1, output, 0, nil); err == nil || !strings.Contains(err.Error(), "open patch reference") {
-		t.Fatalf("unexpected reference error: %v", err)
-	}
-	if err := DecompressSegmentToFile("", missing, 0, 1, output, 0, nil); err == nil || !strings.Contains(err.Error(), "open patch file") {
-		t.Fatalf("unexpected patch error: %v", err)
+	if err := decoder.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -121,6 +110,19 @@ func TestDecoderCallbacksAndCancellationCoverage(t *testing.T) {
 		}
 		if processed != uint64(len(targetData)) {
 			t.Fatalf("processed = %d", processed)
+		}
+	})
+
+	t.Run("writer", func(t *testing.T) {
+		var output bytes.Buffer
+		err := decoder.DecompressSegmentToWriter(
+			context.Background(), nil, patch, 0, uint64(info.Size()), &output, uint64(len(targetData)), nil,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(output.Bytes(), targetData) {
+			t.Fatal("writer did not receive the decompressed data")
 		}
 	})
 

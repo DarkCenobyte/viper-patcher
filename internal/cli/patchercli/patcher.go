@@ -98,6 +98,7 @@ type terminalProgress struct {
 	writer        io.Writer
 	lastFile      int
 	lastCompleted int
+	lastStage     progress.Stage
 	lineActive    bool
 }
 
@@ -123,14 +124,19 @@ func (reporter *terminalProgress) Report(event progress.Event) {
 		}
 		return
 	}
-	if event.FileIndex != reporter.lastFile {
+	if event.FileIndex != reporter.lastFile || event.Stage != reporter.lastStage {
 		reporter.Finish()
 		fmt.Fprintf(reporter.writer, "[%d/%d] Before: %s\n", event.FileIndex, event.FileCount, event.Path)
 		reporter.lastFile = event.FileIndex
+		reporter.lastStage = event.Stage
 	}
 	if event.TotalBytes > 0 {
 		percentage := float64(event.ProcessedBytes) * 100 / float64(event.TotalBytes)
-		fmt.Fprintf(reporter.writer, "\r  Applying: %6.2f%% (%d/%d bytes)", percentage, event.ProcessedBytes, event.TotalBytes)
+		label := "Applying"
+		if event.Stage == progress.StageVerifying {
+			label = "Verifying"
+		}
+		fmt.Fprintf(reporter.writer, "\r  %s: %6.2f%% (%d/%d bytes)", label, percentage, event.ProcessedBytes, event.TotalBytes)
 		reporter.lineActive = true
 	}
 }

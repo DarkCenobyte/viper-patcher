@@ -2,6 +2,7 @@ package patchergui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -26,20 +27,22 @@ const (
 )
 
 type patcherController struct {
-	window          fyne.Window
-	header          fyne.CanvasObject
-	body            fyne.CanvasObject
-	state           *patcherState
-	patchLabel      *widget.Label
-	directoryLabel  *widget.Label
-	comment         *widget.Label
-	status          *widget.Label
-	progressBar     *widget.ProgressBar
-	patchButton     *widget.Button
-	reverseButton   *widget.Button
-	selectPatch     *widget.Button
-	selectDirectory *widget.Button
-	logo            fyne.Resource
+	window               fyne.Window
+	header               fyne.CanvasObject
+	body                 fyne.CanvasObject
+	state                *patcherState
+	patchLabel           *widget.Label
+	directoryLabel       *widget.Label
+	comment              *widget.Label
+	status               *widget.Label
+	progressBar          *widget.ProgressBar
+	patchButton          *widget.Button
+	reverseButton        *widget.Button
+	selectPatch          *widget.Button
+	selectDirectory      *widget.Button
+	logo                 fyne.Resource
+	validationCancel     context.CancelFunc
+	validationGeneration uint64
 }
 
 func newPatcherController(application fyne.App) *patcherController {
@@ -213,31 +216,60 @@ func (controller *patcherController) selectAdjacentPatch(executablePath string) 
 	}
 }
 
+func (controller *patcherController) cancelValidation() {
+	controller.validationGeneration++
+	if controller.validationCancel != nil {
+		controller.validationCancel()
+		controller.validationCancel = nil
+	}
+}
+
 func (controller *patcherController) validate() {
 	if controller.state.Active() {
 		return
 	}
-	defer controller.growWindowToFitContent()
+	controller.cancelValidation()
 	selection := controller.state.Snapshot()
 	controller.patchButton.Disable()
 	controller.reverseButton.Disable()
 	if selection.patchPath == "" || selection.targetDirectory == "" {
 		controller.status.SetText("Select a patch and a target directory.")
+		controller.growWindowToFitContent()
 		return
 	}
-	result, err := patch.Inspect(selection.targetDirectory, selection.parsed)
-	if err != nil {
-		controller.status.SetText("Preflight inspection failed.")
-		dialog.ShowError(err, controller.window)
-		return
-	}
-	if result.CanApplyForward {
-		controller.patchButton.Enable()
-	}
-	if result.CanApplyReverse {
-		controller.reverseButton.Enable()
-	}
-	controller.status.SetText(patcherValidationText(result))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	controller.validationCancel = cancel
+	generation := controller.validationGeneration
+	controller.status.SetText("Inspecting installed files...")
+	controller.growWindowToFitContent()
+
+	go func() {
+		result, err := patch.InspectContext(ctx, selection.targetDirectory, selection.parsed)
+		fyne.Do(func() {
+			if generation != controller.validationGeneration || controller.state.Active() {
+				return
+			}
+			controller.validationCancel = nil
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				controller.status.SetText("Preflight inspection failed.")
+				dialog.ShowError(err, controller.window)
+				controller.growWindowToFitContent()
+				return
+			}
+			if result.CanApplyForward {
+				controller.patchButton.Enable()
+			}
+			if result.CanApplyReverse {
+				controller.reverseButton.Enable()
+			}
+			controller.status.SetText(patcherValidationText(result))
+			controller.growWindowToFitContent()
+		})
+	}()
 }
 
 func (controller *patcherController) runDirection(direction patch.Direction) {
@@ -246,6 +278,7 @@ func (controller *patcherController) runDirection(direction patch.Direction) {
 		dialog.ShowError(err, controller.window)
 		return
 	}
+	controller.cancelValidation()
 	controller.setSelectionEnabled(false)
 	controller.progressBar.SetValue(0)
 	controller.progressBar.Show()

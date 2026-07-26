@@ -27,10 +27,12 @@ void vipr_decoder_free(vipr_decoder *decoder);
 
 int vipr_decoder_decompress_segment(
     vipr_decoder *decoder,
+    int has_reference,
     uintptr_t reference_handle,
     uintptr_t patch_handle,
     uint64_t patch_offset,
     uint64_t patch_length,
+    int write_output,
     uintptr_t output_handle,
     uint64_t expected_output_size,
     uintptr_t callback_handle,

@@ -9,6 +9,7 @@ import "C"
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"runtime/cgo"
 	"unsafe"
@@ -126,11 +127,34 @@ type decodeCallbacks struct {
 // still resident in the native buffer, allowing SHA-256 to be calculated during
 // the write pass.
 func (decoder *Decoder) DecompressSegmentToFile(ctx context.Context, reference, patch *os.File, offset, length uint64, output *os.File, expectedOutputSize uint64, callback ProgressFunc, outputCallback OutputFunc) error {
+	return decoder.decompressSegment(ctx, reference, patch, offset, length, output, expectedOutputSize, callback, outputCallback)
+}
+
+// DecompressSegmentToWriter streams one frame to writer without materializing an
+// intermediate file. Memory use remains bounded by the native decoder buffers and
+// the writer's own buffering.
+func (decoder *Decoder) DecompressSegmentToWriter(ctx context.Context, reference, patch *os.File, offset, length uint64, writer io.Writer, expectedOutputSize uint64, callback ProgressFunc) error {
+	if writer == nil {
+		return fmt.Errorf("decompressed output writer is required")
+	}
+	return decoder.decompressSegment(ctx, reference, patch, offset, length, nil, expectedOutputSize, callback, func(block []byte) error {
+		written, err := writer.Write(block)
+		if err == nil && written != len(block) {
+			return io.ErrShortWrite
+		}
+		return err
+	})
+}
+
+func (decoder *Decoder) decompressSegment(ctx context.Context, reference, patch *os.File, offset, length uint64, output *os.File, expectedOutputSize uint64, callback ProgressFunc, outputCallback OutputFunc) error {
 	if decoder == nil || decoder.native == nil {
 		return fmt.Errorf("zstd decoder is closed")
 	}
-	if patch == nil || output == nil {
-		return fmt.Errorf("patch and output files are required")
+	if patch == nil {
+		return fmt.Errorf("patch file is required")
+	}
+	if output == nil && outputCallback == nil {
+		return fmt.Errorf("decompressed output destination is required")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -145,17 +169,27 @@ func (decoder *Decoder) DecompressSegmentToFile(ctx context.Context, reference, 
 	}
 	defer C.free(errorBuffer)
 
+	var hasReference C.int
 	var referenceHandle C.uintptr_t
 	if reference != nil {
+		hasReference = 1
 		referenceHandle = C.uintptr_t(reference.Fd())
+	}
+	var writeOutput C.int
+	var outputHandle C.uintptr_t
+	if output != nil {
+		writeOutput = 1
+		outputHandle = C.uintptr_t(output.Fd())
 	}
 	result := C.vipr_decoder_decompress_segment(
 		decoder.native,
+		hasReference,
 		referenceHandle,
 		C.uintptr_t(patch.Fd()),
 		C.uint64_t(offset),
 		C.uint64_t(length),
-		C.uintptr_t(output.Fd()),
+		writeOutput,
+		outputHandle,
 		C.uint64_t(expectedOutputSize),
 		C.uintptr_t(handle),
 		(*C.char)(errorBuffer),
@@ -168,35 +202,6 @@ func (decoder *Decoder) DecompressSegmentToFile(ctx context.Context, reference, 
 		return fmt.Errorf("zstd patch application failed: %s", C.GoString((*C.char)(errorBuffer)))
 	}
 	return nil
-}
-
-// DecompressSegmentToFile preserves the previous path-based API for callers
-// outside the patch package while routing through the reusable handle-based
-// decoder.
-func DecompressSegmentToFile(referencePath, patchPath string, offset, length uint64, output *os.File, expectedOutputSize uint64, callback ProgressFunc) error {
-	if output == nil {
-		return fmt.Errorf("patched output file is required")
-	}
-	var reference *os.File
-	var err error
-	if referencePath != "" {
-		reference, err = os.Open(referencePath)
-		if err != nil {
-			return fmt.Errorf("open patch reference: %w", err)
-		}
-		defer reference.Close()
-	}
-	patch, err := os.Open(patchPath)
-	if err != nil {
-		return fmt.Errorf("open patch file: %w", err)
-	}
-	defer patch.Close()
-	decoder, err := NewDecoder()
-	if err != nil {
-		return err
-	}
-	defer decoder.Close()
-	return decoder.DecompressSegmentToFile(context.Background(), reference, patch, offset, length, output, expectedOutputSize, callback, nil)
 }
 
 func newProgressHandle(callback ProgressFunc) cgo.Handle {

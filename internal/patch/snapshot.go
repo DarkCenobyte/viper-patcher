@@ -17,12 +17,10 @@ type fileExpectation struct {
 }
 
 type fileSnapshot struct {
-	SnapshotPath     string
-	SnapshotIdentity os.FileInfo
-	Hash             string
-	Size             uint64
-	Mode             uint32
-	Identity         os.FileInfo
+	SnapshotPath string
+	Hash         string
+	Size         uint64
+	Mode         uint32
 }
 
 type stableFileSource struct {
@@ -101,12 +99,10 @@ func snapshotStableFile(source stableFileSource, destinationPath string) (snapsh
 	sourceClosed = true
 	committed = true
 	return fileSnapshot{
-		SnapshotPath:     destinationPath,
-		SnapshotIdentity: snapshotIdentity,
-		Hash:             hex.EncodeToString(hash.Sum(nil)),
-		Size:             uint64(written),
-		Mode:             uint32(identity.Mode().Perm()),
-		Identity:         identity,
+		SnapshotPath: destinationPath,
+		Hash:         hex.EncodeToString(hash.Sum(nil)),
+		Size:         uint64(written),
+		Mode:         uint32(identity.Mode().Perm()),
 	}, nil
 }
 

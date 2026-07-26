@@ -3,9 +3,7 @@ package patch
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -50,119 +48,61 @@ type copyAddStreamWriter struct {
 }
 
 func createCopyAddStream(ctx context.Context, sourcePath, targetPath, outputPath string) (copyAddStats, error) {
-	source, err := os.Open(sourcePath)
+	info, err := os.Stat(targetPath)
 	if err != nil {
-		return copyAddStats{}, fmt.Errorf("open copy-add source: %w", err)
+		return copyAddStats{}, fmt.Errorf("inspect copy-add target: %w", err)
 	}
-	defer source.Close()
-
-	index := make(map[[32]byte][]indexedChunk)
-	if err := forEachContentChunk(ctx, source, func(chunk contentChunk) error {
-		digest := sha256.Sum256(chunk.data)
-		candidates := index[digest]
-		if len(candidates) < copyAddMaxCandidates {
-			index[digest] = append(candidates, indexedChunk{offset: chunk.offset, length: uint32(len(chunk.data))})
-		}
-		return nil
-	}); err != nil {
-		return copyAddStats{}, fmt.Errorf("index copy-add source: %w", err)
+	if info.Size() < 0 {
+		return copyAddStats{}, fmt.Errorf("copy-add target has an invalid size")
 	}
-
-	target, err := os.Open(targetPath)
-	if err != nil {
-		return copyAddStats{}, fmt.Errorf("open copy-add target: %w", err)
-	}
-	defer target.Close()
-	output, err := os.OpenFile(outputPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return copyAddStats{}, fmt.Errorf("create copy-add stream: %w", err)
-	}
-	committed := false
-	defer func() {
-		_ = output.Close()
-		if !committed {
-			_ = os.Remove(outputPath)
-		}
-	}()
-
-	stream := &copyAddStreamWriter{writer: bufio.NewWriterSize(output, sparseIOBufferSize)}
-	if _, err := stream.writer.Write(copyAddMagic[:]); err != nil {
-		return copyAddStats{}, err
-	}
-	stream.expandedSize = uint64(len(copyAddMagic))
-	compareBuffer := make([]byte, copyAddChunkMax)
-	var stats copyAddStats
-	if err := forEachContentChunk(ctx, target, func(chunk contentChunk) error {
-		digest := sha256.Sum256(chunk.data)
-		for _, candidate := range index[digest] {
-			if int(candidate.length) != len(chunk.data) {
-				continue
-			}
-			if _, err := source.ReadAt(compareBuffer[:len(chunk.data)], int64(candidate.offset)); err != nil {
-				return fmt.Errorf("verify copy-add source chunk: %w", err)
-			}
-			if !equalBytes(compareBuffer[:len(chunk.data)], chunk.data) {
-				continue
-			}
-			if err := stream.copy(candidate.offset, uint64(len(chunk.data))); err != nil {
-				return err
-			}
-			stats.copiedBytes += uint64(len(chunk.data))
-			return nil
-		}
-		return stream.add(chunk.data)
-	}); err != nil {
-		return copyAddStats{}, fmt.Errorf("build copy-add stream: %w", err)
-	}
-	if err := stream.close(); err != nil {
-		return copyAddStats{}, err
-	}
-	if err := output.Close(); err != nil {
-		return copyAddStats{}, err
-	}
-	committed = true
-	stats.expandedSize = stream.expandedSize
-	return stats, nil
+	stats, _, err := createCopyAddStreamOptimized(ctx, sourcePath, targetPath, outputPath, uint64(info.Size()))
+	return stats, err
 }
 
 func forEachContentChunk(ctx context.Context, file *os.File, callback func(contentChunk) error) error {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	reader := bufio.NewReaderSize(file, sparseIOBufferSize)
+	readBuffer := make([]byte, sparseIOBufferSize)
 	chunk := make([]byte, 0, copyAddChunkMax)
 	var offset uint64
 	var gearHash uint64
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		value, err := reader.ReadByte()
-		if err == io.EOF {
-			if len(chunk) > 0 {
-				if err := callback(contentChunk{offset: offset, data: chunk}); err != nil {
-					return err
-				}
-			}
+	emit := func() error {
+		if len(chunk) == 0 {
 			return nil
-		}
-		if err != nil {
-			return err
-		}
-		chunk = append(chunk, value)
-		gearHash = (gearHash << 1) + copyAddGear(value)
-		if len(chunk) < copyAddChunkMin {
-			continue
-		}
-		if len(chunk) < copyAddChunkMax && gearHash&(copyAddChunkAvg-1) != 0 {
-			continue
 		}
 		if err := callback(contentChunk{offset: offset, data: chunk}); err != nil {
 			return err
 		}
 		offset += uint64(len(chunk))
-		chunk = make([]byte, 0, copyAddChunkMax)
+		chunk = chunk[:0]
 		gearHash = 0
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		count, readError := file.Read(readBuffer)
+		for _, value := range readBuffer[:count] {
+			chunk = append(chunk, value)
+			gearHash = (gearHash << 1) + copyAddGear(value)
+			if len(chunk) < copyAddChunkMin {
+				continue
+			}
+			if len(chunk) < copyAddChunkMax && gearHash&(copyAddChunkAvg-1) != 0 {
+				continue
+			}
+			if err := emit(); err != nil {
+				return err
+			}
+		}
+		if readError == io.EOF {
+			return emit()
+		}
+		if readError != nil {
+			return readError
+		}
 	}
 }
 
@@ -171,18 +111,6 @@ func copyAddGear(value byte) uint64 {
 	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
 	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
 	return x ^ (x >> 31)
-}
-
-func equalBytes(left, right []byte) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func (stream *copyAddStreamWriter) add(data []byte) error {
@@ -290,115 +218,5 @@ func applyCopyAddStream(source, operations, output *os.File, expectedSourceSize,
 	if _, err := operations.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	reader := bufio.NewReaderSize(operations, sparseIOBufferSize)
-	var magic [8]byte
-	if _, err := io.ReadFull(reader, magic[:]); err != nil {
-		return fmt.Errorf("read copy-add stream magic: %w", err)
-	}
-	if magic != copyAddMagic {
-		return fmt.Errorf("invalid copy-add stream magic")
-	}
-
-	outputHash := sha256.New()
-	buffer := make([]byte, sparseIOBufferSize)
-	var produced uint64
-	lastReported := uint64(0)
-	report := func(force bool) {
-		if callback == nil {
-			return
-		}
-		if !force && produced-lastReported < 8<<20 {
-			return
-		}
-		lastReported = produced
-		event.ProcessedBytes = produced
-		event.TotalBytes = expectedTargetSize
-		progress.Report(callback, event)
-	}
-	writeBlock := func(block []byte) error {
-		if produced > expectedTargetSize || uint64(len(block)) > expectedTargetSize-produced {
-			return fmt.Errorf("copy-add output exceeds declared size")
-		}
-		if _, err := output.Write(block); err != nil {
-			return err
-		}
-		if _, err := outputHash.Write(block); err != nil {
-			return err
-		}
-		produced += uint64(len(block))
-		report(false)
-		return nil
-	}
-
-	for {
-		opcode, err := reader.ReadByte()
-		if err != nil {
-			return fmt.Errorf("read copy-add opcode: %w", err)
-		}
-		switch opcode {
-		case copyAddOpcodeEnd:
-			if produced != expectedTargetSize {
-				return fmt.Errorf("copy-add output size is %d, expected %d", produced, expectedTargetSize)
-			}
-			if _, err := reader.ReadByte(); err != io.EOF {
-				if err == nil {
-					return fmt.Errorf("copy-add stream contains trailing data")
-				}
-				return fmt.Errorf("inspect copy-add stream tail: %w", err)
-			}
-			report(true)
-			if hex.EncodeToString(outputHash.Sum(nil)) != expectedTargetHash {
-				return fmt.Errorf("generated output failed SHA-256 verification")
-			}
-			return nil
-		case copyAddOpcodeCopy:
-			offset, err := binary.ReadUvarint(reader)
-			if err != nil {
-				return fmt.Errorf("read copy offset: %w", err)
-			}
-			length, err := binary.ReadUvarint(reader)
-			if err != nil {
-				return fmt.Errorf("read copy length: %w", err)
-			}
-			if length == 0 || offset > expectedSourceSize || length > expectedSourceSize-offset {
-				return fmt.Errorf("copy-add COPY range exceeds source size")
-			}
-			for copied := uint64(0); copied < length; {
-				chunk := uint64(len(buffer))
-				if length-copied < chunk {
-					chunk = length - copied
-				}
-				if _, err := source.ReadAt(buffer[:chunk], int64(offset+copied)); err != nil {
-					return fmt.Errorf("read COPY source range: %w", err)
-				}
-				if err := writeBlock(buffer[:chunk]); err != nil {
-					return fmt.Errorf("write COPY output: %w", err)
-				}
-				copied += chunk
-			}
-		case copyAddOpcodeAdd:
-			length, err := binary.ReadUvarint(reader)
-			if err != nil {
-				return fmt.Errorf("read ADD length: %w", err)
-			}
-			if length == 0 || length > expectedTargetSize-produced {
-				return fmt.Errorf("copy-add ADD range exceeds target size")
-			}
-			for added := uint64(0); added < length; {
-				chunk := uint64(len(buffer))
-				if length-added < chunk {
-					chunk = length - added
-				}
-				if _, err := io.ReadFull(reader, buffer[:chunk]); err != nil {
-					return fmt.Errorf("read ADD payload: %w", err)
-				}
-				if err := writeBlock(buffer[:chunk]); err != nil {
-					return fmt.Errorf("write ADD output: %w", err)
-				}
-				added += chunk
-			}
-		default:
-			return fmt.Errorf("unsupported copy-add opcode %d", opcode)
-		}
-	}
+	return applyCopyAddStreamContext(context.Background(), source, operations, output, expectedSourceSize, expectedTargetSize, expectedTargetHash, callback, event)
 }

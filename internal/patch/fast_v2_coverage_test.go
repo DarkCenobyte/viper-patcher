@@ -406,10 +406,6 @@ func TestApplySparseStreamRejectsMalformedInput(t *testing.T) {
 }
 
 func TestFastV2CreationCleanupAndUtilityBranches(t *testing.T) {
-	if equalBytes([]byte{1}, []byte{1, 2}) || equalBytes([]byte{1}, []byte{2}) || !equalBytes([]byte{1, 2}, []byte{1, 2}) {
-		t.Fatal("equalBytes returned an unexpected result")
-	}
-
 	directory := t.TempDir()
 	chunkPath := filepath.Join(directory, "chunks.bin")
 	if err := os.WriteFile(chunkPath, []byte("chunk"), 0o600); err != nil {

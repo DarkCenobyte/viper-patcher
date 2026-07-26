@@ -1,17 +1,28 @@
 package patch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 
-	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 )
 
 // Inspect validates files in root against both source and target states.
-func Inspect(rootPath string, parsed patchformat.Patch) (result ValidationResult, resultError error) {
+func Inspect(rootPath string, parsed patchformat.Patch) (ValidationResult, error) {
+	return InspectContext(context.Background(), rootPath, parsed)
+}
+
+// InspectContext validates files in root and stops promptly when ctx is canceled.
+func InspectContext(ctx context.Context, rootPath string, parsed patchformat.Patch) (result ValidationResult, resultError error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return ValidationResult{}, err
+	}
 	root, err := openInstallationRoot(rootPath)
 	if err != nil {
 		return ValidationResult{}, err
@@ -32,6 +43,9 @@ func Inspect(rootPath string, parsed patchformat.Patch) (result ValidationResult
 	matchedTarget := false
 
 	for _, entry := range parsed.Header.Files {
+		if err := ctx.Err(); err != nil {
+			return ValidationResult{}, err
+		}
 		file, info, localized, err := root.openStableRegularFile(entry.Path)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -53,7 +67,7 @@ func Inspect(rootPath string, parsed patchformat.Patch) (result ValidationResult
 			}
 			return ValidationResult{}, fmt.Errorf("inspect %q: %w", entry.Path, err)
 		}
-		digest, size, hashErr := hashutil.Reader(file)
+		digest, size, hashErr := hashReaderContext(ctx, file, nil)
 		currentInfo, statErr := file.Stat()
 		pathInfo, pathErr := root.root.Lstat(localized)
 		closeErr := file.Close()
