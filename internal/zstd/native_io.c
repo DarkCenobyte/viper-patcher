@@ -145,8 +145,8 @@ int vipr_read_at(uintptr_t handle_value, uint64_t offset, void *buffer, size_t s
         OVERLAPPED overlapped;
         DWORD requested;
         DWORD completed = 0;
-        if (size > (size_t)DWORD_MAX) {
-            requested = DWORD_MAX;
+        if (size > (size_t)MAXDWORD) {
+            requested = MAXDWORD;
         } else {
             requested = (DWORD)size;
         }

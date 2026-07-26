@@ -1,47 +1,123 @@
 # Changelog
 
-All notable changes are documented in this file. The project follows Semantic
-Versioning once the `.vipr` format is declared stable.
+All notable changes to Viper Patcher are documented in this file. The project
+uses Semantic Versioning. Release sections from `0.2.0` onward follow the Git
+tags currently present in the repository; `0.1.0` records the initial project
+version before the first retained tag.
 
 ## [Unreleased]
 
-## [0.3.4] - 2026-07-26
+## [0.4.1] - 2026-07-26
+
+### Fixed
+
+- Restored Windows x64 and x86 release builds with MinGW by using the Win32
+  `MAXDWORD` constant when bounding positional `ReadFile` requests.
+
+### Changed
+
+- Rebuilt the changelog around the repository's actual release tags and aligned
+  application, packaging, documentation, and issue-template version references
+  with `0.4.1`.
+
+## [0.4.0] - 2026-07-26
 
 ### Added
 
 - VIPR format version 2 with automatic `zstd-sparse`, `zstd-copy-add`, and
-  `zstd-replace` payload selection.
-- Content-defined chunking and compressed COPY/ADD streams for fast application
-  across insertions, deletions, and moved unchanged regions.
-- Handle-based reusable native zstd decoders and positional patch reads safe for
-  parallel workers.
-- Automatic parallel output preparation in the patcher, with an optional CLI
-  `--parallel` limit.
-- Version 1 read compatibility and dedicated v2 method-selection, reverse, and
-  parallel-application tests.
+  `zstd-replace` payload selection while retaining version 1 read compatibility.
+- Content-defined chunking and compressed COPY/ADD instruction streams for
+  insertions, deletions, and moved unchanged regions.
+- Handle-based reusable native zstd decoders and positional patch reads that are
+  safe for parallel workers.
+- Parallel output preparation in the patcher with an optional CLI `--parallel`
+  limit, followed by sequential transactional commits.
+- Graduated Creator warnings for compression levels 10-19 and stronger warnings
+  for ultra levels 20-22.
+- Visible installed-file verification progress and asynchronous GUI validation.
+- Core coverage enforcement at 80%, plus expanded format-v2, native zstd,
+  cancellation, method-selection, reverse, and parallel-application tests.
 
 ### Changed
 
-- Patch files are parsed and SHA-256 hashed in one sequential pass.
-- Installed source files are opened directly instead of copied to application
-  snapshots.
-- Generated output is SHA-256 hashed during decompression or sparse
-  reconstruction instead of being reread afterward.
-- Patch application prepares independent files in parallel and commits them
-  sequentially through the existing rollback transaction.
-- Temporary application files no longer use redundant `fsync` calls.
-- Creator snapshots no longer rehash their source after copying or synchronize
-  disposable snapshot files.
-- Files with little reusable source content use standalone replacement frames
-  instead of paying patch-from reference-search overhead.
-- Creator disk-space estimates account for sparse and COPY/ADD instruction candidates.
+- Structural patch decoding errors now return immediately instead of hashing the
+  remaining payload first; valid patches are still decoded and SHA-256 hashed in
+  a single sequential pass.
+- COPY/ADD analysis now reads blocks instead of individual bytes and reuses chunk
+  storage.
+- Sparse and COPY/ADD candidates use exact monotonic bounds to stop work early
+  when they can no longer satisfy the current selection policy.
+- Small instruction streams are decoded once in memory, while large streams use
+  a bounded pipe; temporary instruction files and rereads are no longer needed.
+- Installed source files are opened directly, and generated output is hashed
+  during decompression or reconstruction instead of being reread afterward.
+- Hashing, sparse parsing, COPY/ADD parsing, and native instruction decoding now
+  propagate cancellation more consistently.
+- GUI validation cancels stale work, ignores superseded results, and keeps the UI
+  responsive while installed files are hashed.
+- Verification occupies the first 20% of each file's displayed progress and
+  application occupies the remaining 80%.
+- Creator estimates account for sparse and COPY/ADD candidates, and low-reuse
+  files use standalone replacement frames instead of patch-from search overhead.
+
+### Fixed
+
+- Updated CI expectations for staged verification progress and immediate
+  rejection of structurally invalid patch headers.
+- Corrected build and test regressions found during the format-v2 and fast-path
+  migration.
+- Set the race-test locale to `C.UTF-8` so Fyne does not attempt to parse the
+  non-language locale tag `C` on Ubuntu runners.
 
 ### Removed
 
-- Application patch snapshots, installed-file snapshots, redundant full-file
-  hash passes, and the dead helpers used only by those paths.
-- The slow/paranoid application path; the handle-based fast path is now the only
-  implementation.
+- Application patch snapshots, installed-file snapshots, obsolete snapshot
+  identity fields, and redundant full-file hash passes.
+- The slow/paranoid application implementation; the handle-based fast path is
+  now the sole application path.
+- Temporary instruction-stream files, redundant `fsync` calls, obsolete native
+  path wrappers, scalar byte-comparison helpers, and other confirmed dead code.
+
+## [0.3.3] - 2026-07-26
+
+### Removed
+
+- Confirmed dead code across CLI, GUI model, hashing, patch application,
+  transaction, path validation, patch-format, and native zstd helpers.
+- Tests that only exercised removed helpers; shared patch test setup was
+  consolidated into dedicated support code.
+
+## [0.3.2] - 2026-07-26
+
+### Added
+
+- Release-time checks that reject Windows, Linux, or macOS binaries with a
+  dynamic libzstd dependency.
+- Distribution of libzstd's BSD 3-Clause license and a notice documenting the
+  selected upstream licensing option.
+
+### Changed
+
+- Release builds make the intended static libzstd linkage explicit for every
+  supported target.
+
+## [0.3.1] - 2026-07-26
+
+### Added
+
+- Shared screen-aware window sizing for the Creator and Patcher interfaces.
+- Creator layout helpers for collapsible settings, fixed-size content, and an
+  adaptive file-pair table.
+
+### Changed
+
+- Both GUI windows now fit their content while remaining within the available
+  display height.
+
+### Fixed
+
+- Follow-up Creator sizing constants and controller formatting required by the
+  adaptive-window changes.
 
 ## [0.3.0] - 2026-07-26
 
@@ -52,53 +128,50 @@ Versioning once the `.vipr` format is declared stable.
 - Conservative creator disk-space estimates displayed before GUI operations.
 - Optional creator work-directory selection without changing the VIPR format or
   patcher behavior.
-- Bounded per-file creator parallelism, limited to the available logical CPUs
-  and disabled by default through a default value of one worker.
+- Bounded per-file creator parallelism, limited to available logical CPUs and
+  defaulting to one worker.
 - Unicode-normalized, case-insensitive collision detection for portable patch
   paths.
-- Explicit committed-with-warning results for cleanup failures that occur after
-  successful file replacement.
+- Explicit committed-with-warning results for cleanup failures after successful
+  file replacement.
 
 ### Changed
 
-- Stored permission metadata is advisory. Unix application preserves the
-  installed file mode and Windows ignores Unix mode bits, keeping patches
-  portable across Windows, Linux, and macOS.
+- Stored permission metadata is advisory: Unix preserves the installed file mode
+  and Windows ignores Unix mode bits.
 - Native decompression writes through an already-open output handle instead of
   closing and reopening a temporary path.
 - Private patch snapshots are parsed without redundant full-file rehashes, and
   application no longer repeats the complete installed-file preflight after
   snapshot validation.
-- File completion progress is emitted only after the transaction commits;
-  generated but uncommitted files use a separate prepared stage.
-- Release actions are pinned to immutable commits while retaining readable
-  version comments.
+- File completion progress is emitted only after transaction commit; generated
+  but uncommitted files use a separate prepared stage.
+- Release actions are pinned to immutable commits with readable version comments.
 - Dependabot updates are grouped by Fyne, `golang.org/x`, tests, official GitHub
   actions, and third-party actions.
 - `make check` builds libzstd only once.
 
 ### Fixed
 
-- Bind CLI application to the exact patch digest that was inspected.
-- Reject output paths that collide with a source or target file, including hard
+- Bound CLI application to the exact patch digest that was inspected.
+- Rejected output paths colliding with source or target files, including hard
   links and case/Unicode-equivalent paths.
-- Reject empty creator output filenames.
-- Preserve a parent terminal window when a Windows GUI process detaches from a
+- Rejected empty creator output filenames.
+- Preserved a parent terminal window when a Windows GUI process detaches from a
   shared console.
-- Reject external patcher logos with excessive width, height, or pixel count.
-- Report successful commits with cleanup warnings as success instead of a false
-  operation failure.
+- Rejected external patcher logos with excessive dimensions or pixel counts.
+- Reported successful commits with cleanup warnings as success rather than a
+  false operation failure.
 
 ### Removed
 
-- New patches no longer write the unused `targetHint` metadata field. The
-  version 1 reader retains compatibility with existing patches that contain it.
+- New patches no longer write the unused `targetHint` metadata field; the
+  version 1 reader remains compatible with patches that contain it.
 
 ## [0.2.1] - 2026-07-25
 
-### Fixed
+### Changed
 
-- Corrected the creator file-pair table layout.
 - Updated Go image, networking, and system dependencies to patched releases.
 
 ## [0.2.0] - 2026-07-25
@@ -106,21 +179,26 @@ Versioning once the `.vipr` format is declared stable.
 ### Added
 
 - Native file and directory dialogs with a Fyne fallback.
-- Embedded application branding, optional adjacent patcher logo override, and
-  automatic selection of one adjacent `.vipr` file.
+- Embedded application branding, an optional adjacent patcher-logo override, and
+  automatic selection of a single adjacent `.vipr` file.
 - Creator file-pair table, dedicated comment card, and collapsed settings.
 - Fyne single-goroutine migration and GUI-only Windows console detachment.
 
 ### Changed
 
-- Increased the creator window size and improved GUI progress presentation.
+- Increased the Creator window size and improved GUI progress presentation.
 - Packaged macOS applications without duplicate standalone executables.
 
-## [0.1.0] - 2026-07-25
+### Fixed
+
+- Corrected the creator file-pair table's `NewGridWrap` construction before the
+  `v0.2.0` tag was created.
+
+## 0.1.0 - 2026-07-25
 
 ### Added
 
-- Creator and patcher applications with automatic GUI/CLI selection.
+- Creator and Patcher applications with automatic GUI/CLI selection.
 - Versioned `.vipr` multi-file patch container.
 - Forward and optional reverse differentials using libzstd 1.5.7 patch-from
   semantics.
@@ -128,3 +206,13 @@ Versioning once the `.vipr` format is declared stable.
 - Transactional patch application with rollback.
 - Fyne desktop interfaces and progress reporting.
 - Cross-platform release workflows for Windows, Linux, and macOS targets.
+
+[Unreleased]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.3.3...v0.4.0
+[0.3.3]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/DarkCenobyte/viper-patcher/releases/tag/v0.2.0

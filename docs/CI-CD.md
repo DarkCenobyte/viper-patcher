@@ -55,8 +55,8 @@ All build jobs remain read-only. Only the final publication job receives
 4. Create and push a release tag:
 
 ```sh
-git tag -a v0.3.0 -m "v0.3.0"
-git push origin v0.3.0
+git tag -a v0.4.1 -m "v0.4.1"
+git push origin v0.4.1
 ```
 
 ## Future signing
