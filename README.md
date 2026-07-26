@@ -2,8 +2,13 @@
 
 ![Viper-Patcher logo](assets/logo.png)
 
-[![CI](https://github.com/DarkCenobyte/viper-patcher/actions/workflows/ci.yml/badge.svg)](https://github.com/DarkCenobyte/viper-patcher/actions/workflows/ci.yml)
+[![CI](https://github.com/DarkCenobyte/viper-patcher/actions/workflows/ci.yml/badge.svg?branch=master&event=push)](https://github.com/DarkCenobyte/viper-patcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-informational)](#platform-targets)
+[![Latest release](https://img.shields.io/github/v/release/DarkCenobyte/viper-patcher?sort=semver)](https://github.com/DarkCenobyte/viper-patcher/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/DarkCenobyte/viper-patcher/total)](https://github.com/DarkCenobyte/viper-patcher/releases)
+[![GitHub stars](https://img.shields.io/github/stars/DarkCenobyte/viper-patcher)](https://github.com/DarkCenobyte/viper-patcher/stargazers)
+[![Open issues](https://img.shields.io/github/issues/DarkCenobyte/viper-patcher)](https://github.com/DarkCenobyte/viper-patcher/issues)
 
 Viper Patcher is a cross-platform differential patch creator and applicator for
 binary files. It provides two executables:
