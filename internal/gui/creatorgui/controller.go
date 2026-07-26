@@ -16,6 +16,7 @@ import (
 	"github.com/DarkCenobyte/viper-patcher/assets"
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/branding"
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/nativedialog"
+	"github.com/DarkCenobyte/viper-patcher/internal/gui/windowsizing"
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
@@ -129,10 +130,10 @@ func (controller *creatorController) buildContent() fyne.CanvasObject {
 }
 
 func (controller *creatorController) fitInitialWindow() {
-	maximumHeight := maximumCreatorContentHeight(controller.window)
+	maximumHeight := windowsizing.MaximumContentHeight(controller.window, creatorWindowFallbackHeight)
 	controller.pairs.SetTableHeight(filePairTablePreferredHeight)
 
-	desiredHeight := preferredCreatorContentHeight(controller.header, controller.body, controller.footer)
+	desiredHeight := windowsizing.PreferredBorderContentHeight(controller.header, controller.body, controller.footer)
 	tableHeight := fittedFilePairTableHeight(
 		filePairTablePreferredHeight,
 		filePairTableMinimumHeight,
@@ -140,7 +141,7 @@ func (controller *creatorController) fitInitialWindow() {
 		maximumHeight,
 	)
 	controller.pairs.SetTableHeight(tableHeight)
-	desiredHeight = preferredCreatorContentHeight(controller.header, controller.body, controller.footer)
+	desiredHeight = windowsizing.PreferredBorderContentHeight(controller.header, controller.body, controller.footer)
 	if desiredHeight > maximumHeight {
 		desiredHeight = maximumHeight
 	}
@@ -150,8 +151,8 @@ func (controller *creatorController) fitInitialWindow() {
 }
 
 func (controller *creatorController) growWindowToFitContent() {
-	desiredHeight := preferredCreatorContentHeight(controller.header, controller.body, controller.footer)
-	maximumHeight := maximumCreatorContentHeight(controller.window)
+	desiredHeight := windowsizing.PreferredBorderContentHeight(controller.header, controller.body, controller.footer)
+	maximumHeight := windowsizing.MaximumContentHeight(controller.window, creatorWindowFallbackHeight)
 	if desiredHeight > maximumHeight {
 		desiredHeight = maximumHeight
 	}

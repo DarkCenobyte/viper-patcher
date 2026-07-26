@@ -11,5 +11,7 @@ func Run() {
 	application := app.NewWithID("io.github.darkcenobyte.viperpatcher.patcher")
 	application.SetIcon(assets.AppIcon)
 	controller := newPatcherController(application)
-	controller.window.ShowAndRun()
+	controller.window.Show()
+	controller.fitInitialWindow()
+	application.Run()
 }

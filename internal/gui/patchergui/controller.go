@@ -13,19 +13,22 @@ import (
 	"github.com/DarkCenobyte/viper-patcher/assets"
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/branding"
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/nativedialog"
+	"github.com/DarkCenobyte/viper-patcher/internal/gui/windowsizing"
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
 
 const (
-	patcherWindowWidth  = 860
-	patcherWindowHeight = 760
-	patcherLogoWidth    = 320
-	patcherLogoHeight   = 148
+	patcherWindowWidth          = 860
+	patcherWindowFallbackHeight = 760
+	patcherLogoWidth            = 320
+	patcherLogoHeight           = 148
 )
 
 type patcherController struct {
 	window          fyne.Window
+	header          fyne.CanvasObject
+	body            fyne.CanvasObject
 	state           *patcherState
 	patchLabel      *widget.Label
 	directoryLabel  *widget.Label
@@ -47,8 +50,6 @@ func newPatcherController(application fyne.App) *patcherController {
 	}
 	controller.window = application.NewWindow("Viper Patcher")
 	controller.window.SetIcon(assets.AppIcon)
-	controller.window.Resize(fyne.NewSize(patcherWindowWidth, patcherWindowHeight))
-
 	controller.patchLabel = widget.NewLabel("No patch selected")
 	controller.patchLabel.Wrapping = fyne.TextWrapWord
 	controller.directoryLabel = widget.NewLabel("No target directory selected")
@@ -92,18 +93,51 @@ func (controller *patcherController) buildContent() fyne.CanvasObject {
 		"Actions are enabled only when every file matches the required hash and size.",
 		container.NewVBox(controller.status, controller.progressBar, container.NewGridWithColumns(2, controller.patchButton, controller.reverseButton)),
 	)
-	header := container.NewVBox(
+	controller.header = container.NewVBox(
 		branding.NewLogo(controller.logo, fyne.NewSize(patcherLogoWidth, patcherLogoHeight)),
 		widget.NewLabelWithStyle("Apply a VIPR differential patch", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		widget.NewLabelWithStyle("The patch and installed files are snapshotted before native processing.", fyne.TextAlignCenter, fyne.TextStyle{}),
 	)
+	controller.body = container.NewVBox(selectionCard, commentCard, operationCard)
 	return container.NewBorder(
-		header,
+		controller.header,
 		nil,
 		nil,
 		nil,
-		container.NewVScroll(container.NewVBox(selectionCard, commentCard, operationCard)),
+		container.NewVScroll(controller.body),
 	)
+}
+
+func (controller *patcherController) fitInitialWindow() {
+	maximumHeight := windowsizing.MaximumContentHeight(controller.window, patcherWindowFallbackHeight)
+	desiredHeight := windowsizing.PreferredBorderContentHeight(controller.header, controller.body, nil)
+	if desiredHeight < patcherWindowFallbackHeight {
+		desiredHeight = patcherWindowFallbackHeight
+	}
+	if desiredHeight > maximumHeight {
+		desiredHeight = maximumHeight
+	}
+
+	controller.window.Resize(fyne.NewSize(patcherWindowWidth, desiredHeight))
+	controller.window.CenterOnScreen()
+}
+
+func (controller *patcherController) growWindowToFitContent() {
+	desiredHeight := windowsizing.PreferredBorderContentHeight(controller.header, controller.body, nil)
+	maximumHeight := windowsizing.MaximumContentHeight(controller.window, patcherWindowFallbackHeight)
+	if desiredHeight > maximumHeight {
+		desiredHeight = maximumHeight
+	}
+
+	currentSize := controller.window.Canvas().Size()
+	if desiredHeight <= currentSize.Height {
+		return
+	}
+	width := currentSize.Width
+	if width < patcherWindowWidth {
+		width = patcherWindowWidth
+	}
+	controller.window.Resize(fyne.NewSize(width, desiredHeight))
 }
 
 func (controller *patcherController) choosePatch() {
@@ -183,6 +217,7 @@ func (controller *patcherController) validate() {
 	if controller.state.Active() {
 		return
 	}
+	defer controller.growWindowToFitContent()
 	selection := controller.state.Snapshot()
 	controller.patchButton.Disable()
 	controller.reverseButton.Disable()
@@ -215,6 +250,7 @@ func (controller *patcherController) runDirection(direction patch.Direction) {
 	controller.progressBar.SetValue(0)
 	controller.progressBar.Show()
 	controller.status.SetText(fmt.Sprintf("Preparing %s patch...", direction))
+	controller.growWindowToFitContent()
 
 	go func(snapshot patcherSelection) {
 		err := patch.ApplyWithOptions(context.Background(), patch.ApplyOptions{
@@ -226,6 +262,7 @@ func (controller *patcherController) runDirection(direction patch.Direction) {
 			fyne.Do(func() {
 				controller.status.SetText(patcherProgressText(event, direction))
 				controller.progressBar.SetValue(patcherOverallProgress(event))
+				controller.growWindowToFitContent()
 			})
 		})
 		fyne.Do(func() {
