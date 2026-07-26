@@ -53,7 +53,39 @@ func TestLegacyTargetHintCompatibility(t *testing.T) {
 		t.Fatal("current headers must not write targetHint")
 	}
 
-	payload = bytes.Replace(payload, []byte(`"path":"bin/game.exe"`), []byte(`"path":"bin/game.exe","targetHint":"renamed.exe"`), 1)
+	payload = bytes.Replace(payload, []byte(`"path":"bin/game.exe"`), []byte(`"path":"bin/game.exe","targetHint":{"legacy":"renamed.exe"}`), 1)
+	parsed := decodePayload(t, payload)
+	if parsed.Header.Files[0] != header.Files[0] {
+		t.Fatalf("ignored legacy field changed the parsed entry: %#v", parsed.Header.Files[0])
+	}
+	reencoded, err := json.Marshal(parsed.Header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(reencoded, []byte(`"targetHint"`)) {
+		t.Fatal("ignored targetHint must not be retained or re-encoded")
+	}
+}
+
+func TestFileEntryStillRejectsUnknownFields(t *testing.T) {
+	payload, err := json.Marshal(validHeader())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = bytes.Replace(payload, []byte(`"path":"bin/game.exe"`), []byte(`"path":"bin/game.exe","unexpected":true`), 1)
+	var buffer bytes.Buffer
+	buffer.Write(Magic[:])
+	if err := binary.Write(&buffer, binary.LittleEndian, uint64(len(payload))); err != nil {
+		t.Fatal(err)
+	}
+	buffer.Write(payload)
+	if _, err := Decode(&buffer); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("expected unknown file-entry field rejection, got %v", err)
+	}
+}
+
+func decodePayload(t *testing.T, payload []byte) Patch {
+	t.Helper()
 	var buffer bytes.Buffer
 	buffer.Write(Magic[:])
 	if err := binary.Write(&buffer, binary.LittleEndian, uint64(len(payload))); err != nil {
@@ -64,9 +96,7 @@ func TestLegacyTargetHintCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Header.Files[0].LegacyTargetHint != "renamed.exe" {
-		t.Fatalf("legacy target hint = %q", parsed.Header.Files[0].LegacyTargetHint)
-	}
+	return parsed
 }
 
 func TestDecodeRejectsMagic(t *testing.T) {

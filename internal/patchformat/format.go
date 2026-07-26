@@ -50,21 +50,32 @@ type Compression struct {
 }
 
 type FileEntry struct {
-	Path string `json:"path"`
-	// LegacyTargetHint accepts the unused targetHint field written by older
-	// version 1 creators. New patches never populate it.
-	LegacyTargetHint string `json:"targetHint,omitempty"`
-	SourceHash       string `json:"sourceHash"`
-	TargetHash       string `json:"targetHash"`
-	SourceSize       uint64 `json:"sourceSize"`
-	TargetSize       uint64 `json:"targetSize"`
-	SourceMode       uint32 `json:"sourceMode"`
-	TargetMode       uint32 `json:"targetMode"`
-	ForwardOffset    uint64 `json:"forwardOffset"`
-	ForwardLength    uint64 `json:"forwardLength"`
-	ReverseOffset    uint64 `json:"reverseOffset,omitempty"`
-	ReverseLength    uint64 `json:"reverseLength,omitempty"`
+	Path          string `json:"path"`
+	SourceHash    string `json:"sourceHash"`
+	TargetHash    string `json:"targetHash"`
+	SourceSize    uint64 `json:"sourceSize"`
+	TargetSize    uint64 `json:"targetSize"`
+	SourceMode    uint32 `json:"sourceMode"`
+	TargetMode    uint32 `json:"targetMode"`
+	ForwardOffset uint64 `json:"forwardOffset"`
+	ForwardLength uint64 `json:"forwardLength"`
+	ReverseOffset uint64 `json:"reverseOffset,omitempty"`
+	ReverseLength uint64 `json:"reverseLength,omitempty"`
 }
+
+// ignoredFields lists legacy JSON fields that remain accepted for backward
+// compatibility but are intentionally discarded instead of being retained in
+// the parsed patch model.
+type ignoredFields struct {
+	TargetHint ignoredJSONValue `json:"targetHint"`
+}
+
+type ignoredJSONValue struct{}
+
+// UnmarshalJSON consumes a legacy JSON value without retaining a decoded
+// representation in the patch model. The complete header payload is already
+// bounded and held by Decode.
+func (*ignoredJSONValue) UnmarshalJSON([]byte) error { return nil }
 
 // Patch provides parsed metadata and the absolute offset of the data section.
 type Patch struct {
@@ -126,23 +137,44 @@ func Decode(reader io.Reader) (Patch, error) {
 	if _, err := io.ReadFull(reader, payload); err != nil {
 		return Patch{}, fmt.Errorf("read patch header: %w", err)
 	}
-	var header Header
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&header); err != nil {
-		return Patch{}, fmt.Errorf("decode patch header: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return Patch{}, fmt.Errorf("patch header contains trailing JSON values")
-		}
-		return Patch{}, fmt.Errorf("decode trailing patch header data: %w", err)
+	header, err := decodeHeader(payload)
+	if err != nil {
+		return Patch{}, err
 	}
 	if err := ValidateHeader(header); err != nil {
 		return Patch{}, err
 	}
 	return Patch{Header: header, DataOffset: uint64(len(Magic)) + 8 + headerLength}, nil
+}
+
+func decodeHeader(payload []byte) (Header, error) {
+	type headerAlias Header
+	type fileEntryJSON struct {
+		FileEntry
+		ignoredFields
+	}
+	decoded := struct {
+		headerAlias
+		Files []fileEntryJSON `json:"files"`
+	}{}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return Header{}, fmt.Errorf("decode patch header: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return Header{}, fmt.Errorf("patch header contains trailing JSON values")
+		}
+		return Header{}, fmt.Errorf("decode trailing patch header data: %w", err)
+	}
+	header := Header(decoded.headerAlias)
+	header.Files = make([]FileEntry, len(decoded.Files))
+	for index, entry := range decoded.Files {
+		header.Files[index] = entry.FileEntry
+	}
+	return header, nil
 }
 
 // ValidateHeader validates format-level invariants and blob metadata.
