@@ -49,29 +49,25 @@ func openPatchForApply(path, expectedDigest string) (*openedPatch, error) {
 
 	hash := sha256.New()
 	reader := io.TeeReader(file, hash)
-	parsed, err := patchformat.Decode(reader)
-	if err != nil {
-		return closeWithError(err)
-	}
-	remaining, err := io.Copy(hash, reader)
-	if err != nil {
+	parsed, decodeError := patchformat.Decode(reader)
+	if _, err := io.Copy(io.Discard, reader); err != nil {
 		return closeWithError(fmt.Errorf("hash patch payload: %w", err))
 	}
 	if identity.Size() < 0 {
 		return closeWithError(fmt.Errorf("patch file has an invalid size"))
 	}
-	size := parsed.DataOffset + uint64(remaining)
-	if size != uint64(identity.Size()) {
-		return closeWithError(fmt.Errorf("patch file changed while it was being read"))
-	}
-	if err := validateDifferentialRanges(parsed, size); err != nil {
-		return closeWithError(err)
-	}
+	size := uint64(identity.Size())
 	digest := hex.EncodeToString(hash.Sum(nil))
 	if expectedDigest != "" && digest != expectedDigest {
 		return closeWithError(fmt.Errorf("selected patch changed after it was inspected"))
 	}
 	if err := verifyOpenPatchMetadata(file, path, identity, size); err != nil {
+		return closeWithError(err)
+	}
+	if decodeError != nil {
+		return closeWithError(decodeError)
+	}
+	if err := validateDifferentialRanges(parsed, size); err != nil {
 		return closeWithError(err)
 	}
 	return &openedPatch{file: file, parsed: parsed, digest: digest}, nil

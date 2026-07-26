@@ -3,6 +3,7 @@ package patch
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -178,4 +179,50 @@ func TestFormatV2ParallelApplyUsesIndependentPatchOffsets(t *testing.T) {
 	for name, data := range expected {
 		assertFile(t, filepath.Join(installRoot, name), data)
 	}
+}
+
+func TestOpenWithDigestReturnsPhysicalFileSHA256(t *testing.T) {
+	fixture := newSingleFileFixture(t, false)
+	contents, err := os.ReadFile(fixture.patchPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := sha256.Sum256(contents)
+	_, digest, err := OpenWithDigest(fixture.patchPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != fmt.Sprintf("%x", expected) {
+		t.Fatalf("digest = %s, want %x", digest, expected)
+	}
+}
+
+func TestApplyRejectsHeaderChangedAfterInspection(t *testing.T) {
+	fixture := newSingleFileFixture(t, false)
+	_, digest, err := OpenWithDigest(fixture.patchPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(fixture.patchPath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteAt([]byte{'X'}, 0); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = ApplyWithOptions(context.Background(), ApplyOptions{
+		PatchPath:         fixture.patchPath,
+		Root:              fixture.installRoot,
+		Direction:         Forward,
+		ExpectedPatchHash: digest,
+	}, nil)
+	if err == nil || err.Error() != "selected patch changed after it was inspected" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertFile(t, fixture.installedPath, fixture.sourceData)
 }
