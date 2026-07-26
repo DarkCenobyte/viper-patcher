@@ -12,8 +12,8 @@ All integer fields outside JSON use little-endian byte order.
 Blob offsets in the JSON header are relative to the first byte after the JSON
 header. Readers reject unknown JSON fields, unsupported format versions,
 invalid hashes, missing frames, out-of-bounds ranges, overlaps, gaps, trailing
-unreferenced data, duplicate or case-colliding paths, and inconsistent reverse
-metadata.
+unreferenced data, duplicate, Unicode-equivalent, or case-colliding paths, and
+inconsistent reverse metadata.
 
 ## Header fields
 
@@ -23,14 +23,20 @@ metadata.
 - Hash algorithm (`sha256`).
 - Compression algorithm (`zstd`), linked library version, patch mode, and level.
 - Reverse availability.
-- Ordered file entries containing source-relative path, optional target filename
-  hint, source/target hashes, sizes, portable permissions, and forward/reverse
-  frame ranges.
+- Ordered file entries containing source-relative path, source/target hashes,
+  sizes, legacy mode metadata, and forward/reverse frame ranges.
 
-`sourceMode` and `targetMode` contain only the portable Unix permission bits
-`0000` through `0777`. Readers reject set-user-ID, set-group-ID, sticky, file
-type, and every other unknown bit. Application masks the value to `0777` again
-immediately before changing permissions as a second defensive boundary.
+`sourceMode` and `targetMode` retain the portable Unix permission bits recorded
+by version 1 creators. Readers still reject set-user-ID, set-group-ID, sticky,
+file-type, and every other unknown bit as a defensive format boundary. Current
+application logic treats both fields as advisory: readiness depends only on
+content identity, Unix replacements preserve the installed file's local mode,
+and Windows ignores Unix permission metadata. This policy keeps one VIPR patch
+portable across supported operating systems and filesystems.
+
+Version 1 readers still accept the legacy optional `targetHint` field for
+backward compatibility, but current creators do not write it because
+installation paths are defined exclusively by the source-relative `path` field.
 
 ## Compatibility rules
 

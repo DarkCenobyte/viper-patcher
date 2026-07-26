@@ -2,29 +2,28 @@
 
 ## Requirements
 
-- Go 1.26.5. Go has a rolling support policy rather than a separate LTS channel.
+- Go 1.26.5.
 - A C compiler supported by Go cgo.
 - `make`, `curl`, and `tar` on Linux/macOS.
 - MSYS2 MinGW toolchains on Windows.
 - Linux desktop development headers required by Fyne.
 
-The release build statically links the exact libzstd 1.5.7 source downloaded by
-`scripts/fetch-zstd.*`. The resulting executables do not require libzstd to be
-installed on the user's system. GUI builds include the `migrated_fynedo` tag;
-this marks the completed Fyne single-goroutine migration and disables the legacy
-threading compatibility warning.
+The release build statically links the exact libzstd 1.5.7 source downloaded and
+SHA-256 verified by `scripts/fetch-zstd.*`. The resulting executables do not
+require libzstd to be installed on the user's system. GUI builds include the
+`migrated_fynedo` tag, which marks the completed Fyne threading migration.
 
 ## Linux
 
 ```sh
-sudo apt-get install build-essential curl pkg-config libgl1-mesa-dev xorg-dev
+sudo apt-get install build-essential curl pkg-config libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
 go mod download
 make build
 ```
 
 ## macOS arm64
 
-Install Xcode command-line tools, then:
+Install Xcode command-line tools, then run:
 
 ```sh
 go mod download
@@ -33,14 +32,15 @@ make build
 
 ## Windows x64 or x86
 
-Install Go and MSYS2. Install the required compiler in an MSYS2 terminal:
+Install Go and MSYS2. Install the required compiler and make packages in an
+MSYS2 terminal:
 
 ```sh
 pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-make
 pacman -S --needed mingw-w64-i686-gcc mingw-w64-i686-make
 ```
 
-Then use PowerShell:
+Then use PowerShell for x64:
 
 ```powershell
 ./scripts/fetch-zstd.ps1
@@ -52,24 +52,39 @@ go build -tags vipr_static_zstd,migrated_fynedo -o dist/creator.exe ./cmd/creato
 go build -tags vipr_static_zstd,migrated_fynedo -o dist/patcher.exe ./cmd/patcher
 ```
 
-Use `-Architecture x86`, `GOARCH=386`, and the `mingw32` compiler directory for
-32-bit Windows.
+For x86, use `-Architecture x86`, `GOARCH=386`, and the `mingw32` compiler
+directory. The Go host toolchain may remain x64; cgo targets x86 through the
+i686 MinGW compiler.
 
-The PowerShell build script detects a standard `C:\msys64` installation. If
-MSYS2 is installed elsewhere, pass its root explicitly:
+The PowerShell build script detects a standard `C:\msys64` installation. For a
+different location, pass the root explicitly or set `MSYS2_ROOT`:
 
 ```powershell
 ./scripts/build-zstd.ps1 -Architecture x64 -MSYS2Root "D:\path\to\msys64"
 ```
 
-The same value can be provided through the `MSYS2_ROOT` environment variable.
+## Creator temporary data
+
+The creator stores immutable source and target snapshots plus generated
+partials in a temporary work directory. The GUI estimates peak disk usage before
+starting and lets the user select a work-directory parent in the collapsed
+Settings section. The CLI exposes the same creator-only behavior through:
+
+```text
+--work-directory <directory>
+```
+
+This setting does not alter the patch format and has no effect on the patcher.
+
+Creator file processing is sequential by default. `--parallel <count>` may be
+used to process independent file pairs concurrently, up to the logical CPU
+count. Parallelism increases CPU, memory, and disk-I/O pressure.
 
 ## Native file dialogs
 
-Windows uses the system PowerShell and .NET dialog APIs, while macOS uses
-`osascript`. Linux uses `zenity` when it is installed and automatically falls
-back to Fyne's built-in file dialog otherwise. No additional Go module or cgo
-dependency is required for these integrations.
+Windows uses PowerShell and .NET dialog APIs, while macOS uses `osascript`.
+Linux uses `zenity` when installed and otherwise falls back to Fyne's built-in
+file dialog. No additional Go module or cgo dependency is required.
 
 ## System libzstd development mode
 
@@ -77,17 +92,9 @@ Without the `vipr_static_zstd` build tag, cgo uses `pkg-config libzstd`. Runtime
 operations still require the linked version to be exactly 1.5.7. This mode is
 convenient for Linux development but is not used for releases.
 
-## Module path
-
-Before publishing, replace `github.com/yourusername/viper-patcher` in `go.mod`
-and Go source imports with the final repository path. The neutral GUI
-application IDs may remain unchanged. Then run `go mod tidy` and commit the
-updated `go.sum`.
-
 ## Architecture notes
 
-The same Go and C sources are compiled natively for each architecture. Upstream
-libzstd's build system selects architecture-specific compiler optimizations.
-Reference files are memory-mapped; 32-bit builds are therefore constrained by
-available virtual address space and are unsuitable for very large reference
-files even though the streaming target and output paths are bounded-memory.
+The same Go and C sources are compiled for each architecture. Reference files
+are memory-mapped; 32-bit builds are constrained by available virtual address
+space and are unsuitable for very large reference files even though target,
+patch, and output streams use bounded buffers.

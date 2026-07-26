@@ -48,17 +48,15 @@ All build jobs remain read-only. Only the final publication job receives
 
 ## Initial repository setup
 
-1. Replace the placeholder module path and commit `go.sum` after `go mod tidy`.
-2. Push the repository to GitHub.
-3. Open **Settings → Actions → General** and allow GitHub Actions.
-4. Keep the default workflow token permissions read-only. The publication job
+1. Open **Settings → Actions → General** and allow GitHub Actions.
+2. Keep the default workflow token permissions read-only. The publication job
    declares its narrower `contents: write` requirement directly.
-5. Push normally to run CI.
-6. Create and push a release tag:
+3. Push normally to run CI.
+4. Create and push a release tag:
 
 ```sh
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git tag -a v0.3.0 -m "v0.3.0"
+git push origin v0.3.0
 ```
 
 ## Future signing
