@@ -82,10 +82,19 @@ jobs:
           mkdir -p "dist/${package}"
           go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "dist/${package}/creator" ./cmd/creator
           go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "dist/${package}/patcher" ./cmd/patcher
+          for binary in "dist/${package}/creator" "dist/${package}/patcher"; do
+            if readelf -d "$binary" 2>/dev/null | grep -Eiq 'NEEDED.*zstd'; then
+              echo "Dynamic zstd dependency detected in ${binary}; libzstd must remain statically linked." >&2
+              readelf -d "$binary" >&2
+              exit 1
+            fi
+          done
           cp README.md LICENSE "dist/${package}/"
-          mkdir -p "dist/${package}/third-party-licenses"
-          cp third_party/zstd/LICENSE third_party/zstd/COPYING "dist/${package}/third-party-licenses/"
-          ./scripts/collect-go-licenses.sh "dist/${package}/third-party-licenses/go-modules"
+          license_dir="dist/${package}/third-party-licenses"
+          mkdir -p "$license_dir"
+          cp third_party/zstd/LICENSE "$license_dir/zstd-BSD-3-Clause.txt"
+          cp third_party/zstd-NOTICE.txt "$license_dir/zstd-NOTICE.txt"
+          ./scripts/collect-go-licenses.sh "$license_dir/go-modules"
           tar -C dist -czf "dist/${package}.tar.gz" "$package"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -141,10 +150,19 @@ jobs:
           mkdir -p "dist/${package}"
           go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "dist/${package}/creator" ./cmd/creator
           go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "dist/${package}/patcher" ./cmd/patcher
+          for binary in "dist/${package}/creator" "dist/${package}/patcher"; do
+            if readelf -d "$binary" 2>/dev/null | grep -Eiq 'NEEDED.*zstd'; then
+              echo "Dynamic zstd dependency detected in ${binary}; libzstd must remain statically linked." >&2
+              readelf -d "$binary" >&2
+              exit 1
+            fi
+          done
           cp README.md LICENSE "dist/${package}/"
-          mkdir -p "dist/${package}/third-party-licenses"
-          cp third_party/zstd/LICENSE third_party/zstd/COPYING "dist/${package}/third-party-licenses/"
-          ./scripts/collect-go-licenses.sh "dist/${package}/third-party-licenses/go-modules"
+          license_dir="dist/${package}/third-party-licenses"
+          mkdir -p "$license_dir"
+          cp third_party/zstd/LICENSE "$license_dir/zstd-BSD-3-Clause.txt"
+          cp third_party/zstd-NOTICE.txt "$license_dir/zstd-NOTICE.txt"
+          ./scripts/collect-go-licenses.sh "$license_dir/go-modules"
           tar -C dist -czf "dist/${package}.tar.gz" "$package"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -188,6 +206,13 @@ jobs:
           mkdir -p "$build_dir" "$package_dir"
           go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "$build_dir/creator" ./cmd/creator
           go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "$build_dir/patcher" ./cmd/patcher
+          for binary in "$build_dir/creator" "$build_dir/patcher"; do
+            if otool -L "$binary" | tail -n +2 | grep -Eiq 'zstd.*\.dylib'; then
+              echo "Dynamic zstd dependency detected in ${binary}; libzstd must remain statically linked." >&2
+              otool -L "$binary" >&2
+              exit 1
+            fi
+          done
           root="$PWD"
           fyne_tool="$(go env GOPATH)/bin/fyne"
           icon="$root/assets/icon.png"
@@ -215,9 +240,11 @@ jobs:
           mv "Viper-Patcher.app" "$package_dir/"
           rm -rf "$build_dir"
           cp README.md LICENSE "$package_dir/"
-          mkdir -p "$package_dir/third-party-licenses"
-          cp third_party/zstd/LICENSE third_party/zstd/COPYING "$package_dir/third-party-licenses/"
-          ./scripts/collect-go-licenses.sh "$package_dir/third-party-licenses/go-modules"
+          license_dir="$package_dir/third-party-licenses"
+          mkdir -p "$license_dir"
+          cp third_party/zstd/LICENSE "$license_dir/zstd-BSD-3-Clause.txt"
+          cp third_party/zstd-NOTICE.txt "$license_dir/zstd-NOTICE.txt"
+          ./scripts/collect-go-licenses.sh "$license_dir/go-modules"
           tar -C dist -czf "dist/${package}.tar.gz" "$package"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -285,8 +312,9 @@ jobs:
           $archiver = Join-Path $binDirectory "ar.exe"
           $ranlib = Join-Path $binDirectory "ranlib.exe"
           $windres = Join-Path $binDirectory "windres.exe"
+          $objdump = Join-Path $binDirectory "objdump.exe"
 
-          foreach ($tool in @($compiler, $cxxCompiler, $archiver, $ranlib, $windres)) {
+          foreach ($tool in @($compiler, $cxxCompiler, $archiver, $ranlib, $windres, $objdump)) {
             if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
               throw "Required MinGW tool was not found: $tool"
             }
@@ -298,6 +326,7 @@ jobs:
           "AR=$archiver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RANLIB=$ranlib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "WINDRES=$windres" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OBJDUMP=$objdump" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Verify MinGW and cgo
         shell: pwsh
         env:
@@ -402,8 +431,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags $ldflags -o "dist/$package/patcher.exe" ./cmd/patcher
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          foreach ($binary in @("dist/$package/creator.exe", "dist/$package/patcher.exe")) {
+            $imports = & $env:OBJDUMP -p $binary
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not inspect dynamic dependencies for $binary."
+            }
+            if ($imports | Select-String -Pattern 'DLL Name:\s*.*zstd.*\.dll') {
+              $imports | Out-String | Write-Error
+              throw "Dynamic zstd dependency detected in $binary; libzstd must remain statically linked."
+            }
+          }
+
           Copy-Item README.md, LICENSE "dist/$package/"
-          Copy-Item third_party/zstd/LICENSE, third_party/zstd/COPYING "dist/$package/third-party-licenses/"
+          Copy-Item third_party/zstd/LICENSE "dist/$package/third-party-licenses/zstd-BSD-3-Clause.txt"
+          Copy-Item third_party/zstd-NOTICE.txt "dist/$package/third-party-licenses/zstd-NOTICE.txt"
           ./scripts/collect-go-licenses.ps1 -Destination "dist/$package/third-party-licenses/go-modules"
           Compress-Archive -Path "dist/$package" -DestinationPath "dist/$package.zip"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

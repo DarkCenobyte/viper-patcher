@@ -1,0 +1,8 @@
+Zstandard 1.5.7
+
+Zstandard is distributed upstream under a choice of the BSD 3-Clause License
+or the GNU General Public License version 2.
+
+Viper-Patcher selects and redistributes Zstandard under the BSD 3-Clause
+License. The GPLv2 alternative is not selected for this distribution. The
+applicable license text is distributed as zstd-BSD-3-Clause.txt.
