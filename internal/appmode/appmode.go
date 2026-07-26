@@ -32,3 +32,7 @@ func HeadlessRequested(arguments []string) bool {
 func CLIRequested(arguments []string) bool {
 	return len(arguments) > 0
 }
+
+func shouldHideConsole(processCount uint32) bool {
+	return processCount == 1
+}

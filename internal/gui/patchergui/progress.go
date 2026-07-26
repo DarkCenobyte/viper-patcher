@@ -40,8 +40,10 @@ func patcherProgressText(event progress.Event, direction patch.Direction) string
 		return fmt.Sprintf("[%d/%d] Applying %s patch: %s", event.FileIndex, event.FileCount, direction, event.Path)
 	case progress.StageVerifying:
 		return fmt.Sprintf("[%d/%d] Verifying generated file: %s", event.FileIndex, event.FileCount, event.Path)
-	case progress.StageFileCompleted:
+	case progress.StageFilePrepared:
 		return fmt.Sprintf("[%d/%d] Prepared replacement: %s", event.FileIndex, event.FileCount, event.Path)
+	case progress.StageFileCompleted:
+		return fmt.Sprintf("[%d/%d] Committed replacement: %s", event.FileIndex, event.FileCount, event.Path)
 	case progress.StageCompleted:
 		return fmt.Sprintf("Finalizing %s patch...", direction)
 	default:
@@ -63,7 +65,7 @@ func patcherOverallProgress(event progress.Event) float64 {
 	if event.Stage == progress.StageVerifying {
 		fileFraction = 0.95
 	}
-	if event.Stage == progress.StageFileCompleted {
+	if event.Stage == progress.StageFilePrepared || event.Stage == progress.StageFileCompleted {
 		fileFraction = 1
 	}
 	value := (float64(event.FileIndex-1) + fileFraction) / float64(event.FileCount)

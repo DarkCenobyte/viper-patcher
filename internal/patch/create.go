@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
@@ -16,10 +17,12 @@ type CreateOptions struct {
 	CompressionLevel int
 	Comment          string
 	CreateReverse    bool
+	WorkDirectory    string
+	Parallelism      int
 }
 
 // Create generates a VIPR patch atomically from immutable input snapshots.
-func Create(ctx context.Context, options CreateOptions, callback progress.Callback) (resultError error) {
+func Create(ctx context.Context, options CreateOptions, callback progress.Callback) error {
 	plan, err := createPlanFromOptions(options)
 	if err != nil {
 		return err
@@ -28,31 +31,40 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 		return err
 	}
 
-	workDirectory, err := os.MkdirTemp("", "viper-patcher-create-*")
+	workParent := ""
+	if strings.TrimSpace(options.WorkDirectory) != "" {
+		workParent, err = resolveWorkDirectory(options.WorkDirectory)
+		if err != nil {
+			return err
+		}
+	}
+	workDirectory, err := os.MkdirTemp(workParent, "viper-patcher-create-*")
 	if err != nil {
 		return fmt.Errorf("create temporary directory: %w", err)
 	}
-	defer func() {
-		if cleanupError := os.RemoveAll(workDirectory); cleanupError != nil {
-			resultError = errors.Join(resultError, fmt.Errorf("remove creation work directory: %w", cleanupError))
-		}
-	}()
+	callback = synchronizedProgress(callback)
+	parallelism := effectiveParallelism(options.Parallelism)
 
-	snapshots, err := snapshotCreationInputs(ctx, plan, workDirectory, callback)
-	if err != nil {
-		return err
+	snapshots, operationError := snapshotCreationInputs(ctx, plan, workDirectory, parallelism, callback)
+	if operationError == nil {
+		patchHeader, blobs, compressError := compressCreationInputs(ctx, options, snapshots, workDirectory, parallelism, callback)
+		if compressError == nil {
+			operationError = assemblePatch(plan.outputPath, patchHeader, blobs)
+		} else {
+			operationError = compressError
+		}
 	}
-	header, blobs, err := compressCreationInputs(ctx, options, snapshots, workDirectory, callback)
-	if err != nil {
-		return err
+
+	committed := operationError == nil || IsCommittedWarning(operationError)
+	cleanupError := os.RemoveAll(workDirectory)
+	if !committed {
+		return errors.Join(operationError, wrapJoinedError("remove creation work directory", cleanupError))
 	}
-	if err := assemblePatch(options.OutputPath, header, blobs); err != nil {
-		return err
-	}
+	result := committedWarning("patch creation", operationError, wrapJoinedError("remove creation work directory", cleanupError))
 	progress.Report(callback, progress.Event{
 		FileIndex: len(options.Files),
 		FileCount: len(options.Files),
 		Stage:     progress.StageCompleted,
 	})
-	return nil
+	return result
 }

@@ -10,6 +10,7 @@ const (
 	StageCompressingReverse Stage = "compressing-reverse"
 	StageApplying           Stage = "applying"
 	StageVerifying          Stage = "verifying"
+	StageFilePrepared       Stage = "file-prepared"
 	StageFileCompleted      Stage = "file-completed"
 	StageCompleted          Stage = "completed"
 )

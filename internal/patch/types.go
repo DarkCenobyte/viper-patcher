@@ -1,6 +1,9 @@
 package patch
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Direction identifies which differential direction to apply.
 type Direction string
@@ -14,6 +17,58 @@ const (
 type FilePair struct {
 	SourcePath string
 	TargetPath string
+}
+
+// CommittedWarning reports a non-fatal cleanup problem after the requested
+// file replacements have already been committed successfully.
+type CommittedWarning struct {
+	Operation string
+	Err       error
+}
+
+func (warning *CommittedWarning) Error() string {
+	if warning == nil {
+		return ""
+	}
+	if warning.Operation == "" {
+		return fmt.Sprintf("operation committed with a cleanup warning: %v", warning.Err)
+	}
+	return fmt.Sprintf("%s committed with a cleanup warning: %v", warning.Operation, warning.Err)
+}
+
+func (warning *CommittedWarning) Unwrap() error {
+	if warning == nil {
+		return nil
+	}
+	return warning.Err
+}
+
+// IsCommittedWarning reports whether err means the requested replacements were
+// committed and only a later cleanup step failed.
+func IsCommittedWarning(err error) bool {
+	var warning *CommittedWarning
+	return errors.As(err, &warning)
+}
+
+func committedWarning(operation string, errorsToJoin ...error) error {
+	causes := make([]error, 0, len(errorsToJoin))
+	for _, err := range errorsToJoin {
+		if err == nil {
+			continue
+		}
+		var warning *CommittedWarning
+		if errors.As(err, &warning) {
+			if warning.Err != nil {
+				causes = append(causes, warning.Err)
+			}
+			continue
+		}
+		causes = append(causes, err)
+	}
+	if len(causes) == 0 {
+		return nil
+	}
+	return &CommittedWarning{Operation: operation, Err: errors.Join(causes...)}
 }
 
 // ValidationState describes the files currently present in a target directory.
@@ -33,7 +88,6 @@ type IssueReason string
 
 const (
 	IssueHashMismatch IssueReason = "hash-mismatch"
-	IssueModeMismatch IssueReason = "mode-mismatch"
 	IssueNotRegular   IssueReason = "not-regular"
 )
 
@@ -42,7 +96,6 @@ type FileIssue struct {
 	Path       string
 	Reason     IssueReason
 	ActualHash string
-	ActualMode uint32
 }
 
 // ValidationResult describes which patch directions can be applied safely.

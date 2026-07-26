@@ -7,7 +7,9 @@ package zstd
 import "C"
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"runtime/cgo"
 	"unsafe"
 )
@@ -78,17 +80,38 @@ func CompressFile(referencePath, targetPath, outputPath string, level int, callb
 }
 
 // DecompressSegment applies one patch-from frame stored inside a VIPR container.
-func DecompressSegment(referencePath, patchPath string, offset, length uint64, outputPath string, expectedOutputSize uint64, callback ProgressFunc) error {
+func DecompressSegment(referencePath, patchPath string, offset, length uint64, outputPath string, expectedOutputSize uint64, callback ProgressFunc) (resultError error) {
+	output, err := os.OpenFile(outputPath, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open patched output: %w", err)
+	}
+	defer func() {
+		resultError = errors.Join(resultError, wrapFileError("close patched output", output.Close()))
+	}()
+	if err := DecompressSegmentToFile(referencePath, patchPath, offset, length, output, expectedOutputSize, callback); err != nil {
+		return err
+	}
+	if err := output.Sync(); err != nil {
+		return fmt.Errorf("sync patched output: %w", err)
+	}
+	return nil
+}
+
+// DecompressSegmentToFile applies one patch-from frame to an already-open file.
+// Keeping the handle open prevents another process from replacing the output
+// path between secure creation and native decompression.
+func DecompressSegmentToFile(referencePath, patchPath string, offset, length uint64, output *os.File, expectedOutputSize uint64, callback ProgressFunc) error {
+	if output == nil {
+		return fmt.Errorf("patched output file is required")
+	}
 	if err := RequireExpectedVersion(); err != nil {
 		return err
 	}
 	referenceCString := C.CString(referencePath)
 	patchCString := C.CString(patchPath)
-	outputCString := C.CString(outputPath)
 	errorBuffer := C.calloc(1, C.size_t(errorBufferSize))
 	defer C.free(unsafe.Pointer(referenceCString))
 	defer C.free(unsafe.Pointer(patchCString))
-	defer C.free(unsafe.Pointer(outputCString))
 	if errorBuffer == nil {
 		return fmt.Errorf("allocate native error buffer")
 	}
@@ -101,7 +124,7 @@ func DecompressSegment(referencePath, patchPath string, offset, length uint64, o
 		patchCString,
 		C.uint64_t(offset),
 		C.uint64_t(length),
-		outputCString,
+		C.uintptr_t(output.Fd()),
 		C.uint64_t(expectedOutputSize),
 		C.uintptr_t(handle),
 		(*C.char)(errorBuffer),
@@ -111,6 +134,13 @@ func DecompressSegment(referencePath, patchPath string, offset, length uint64, o
 		return fmt.Errorf("zstd patch application failed: %s", C.GoString((*C.char)(errorBuffer)))
 	}
 	return nil
+}
+
+func wrapFileError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 func newProgressHandle(callback ProgressFunc) cgo.Handle {

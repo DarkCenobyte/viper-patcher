@@ -43,3 +43,15 @@ func TestGUIAvailable(t *testing.T) {
 		}
 	}
 }
+
+func TestShouldHideConsole(t *testing.T) {
+	if shouldHideConsole(0) {
+		t.Fatal("an unknown process count must not hide a possibly shared console")
+	}
+	if !shouldHideConsole(1) {
+		t.Fatal("a console owned only by the GUI process should be hidden")
+	}
+	if shouldHideConsole(2) {
+		t.Fatal("a console shared with a parent shell must not be hidden")
+	}
+}

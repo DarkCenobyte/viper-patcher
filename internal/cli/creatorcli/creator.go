@@ -41,6 +41,8 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	var level int
 	var comment string
 	var reverse bool
+	var workDirectory string
+	var parallelism int
 	var headless bool
 	var help bool
 	var version bool
@@ -48,6 +50,8 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.IntVar(&level, "compression-level", 3, "zstd compression level")
 	flags.StringVar(&comment, "comment", "Created with Viper-Patcher", "comment stored in the patch")
 	flags.BoolVar(&reverse, "create-reverse", false, "include reverse differentials")
+	flags.StringVar(&workDirectory, "work-directory", "", "parent directory for temporary creator data")
+	flags.IntVar(&parallelism, "parallel", 1, "number of files processed in parallel")
 	flags.BoolVar(&headless, "headless", false, "force command-line mode")
 	flags.BoolVar(&help, "help", false, "show help")
 	flags.BoolVar(&version, "version", false, "show version")
@@ -102,13 +106,18 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		CompressionLevel: level,
 		Comment:          comment,
 		CreateReverse:    reverse,
+		WorkDirectory:    workDirectory,
+		Parallelism:      parallelism,
 	}, reporter.Report)
 	reporter.Finish()
-	if err != nil {
+	if err != nil && !patch.IsCommittedWarning(err) {
 		fmt.Fprintf(stderr, "Patch creation failed: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Patch created: %s\n", output)
+	if err != nil {
+		fmt.Fprintf(stderr, "Warning: %v\n", err)
+	}
 	return 0
 }
 
@@ -121,6 +130,8 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  [--compression-level <level>]  Default: 3.")
 	fmt.Fprintln(writer, "  [--comment <text>]             Default: Created with Viper-Patcher.")
 	fmt.Fprintln(writer, "  [--create-reverse]             Default: false.")
+	fmt.Fprintln(writer, "  [--work-directory <directory>] Optional creator temporary-data parent.")
+	fmt.Fprintln(writer, "  [--parallel <count>]           Parallel file operations. Default: 1.")
 	fmt.Fprintln(writer, "  [--headless]                   Force CLI mode.")
 	fmt.Fprintln(writer, "  [--version]                    Show version information.")
 	fmt.Fprintln(writer, "  [--help]                       Show this help.")

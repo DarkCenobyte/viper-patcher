@@ -25,8 +25,10 @@ func creatorProgressText(event progress.Event) string {
 		return fmt.Sprintf("[%d/%d] Creating forward differential: %s", event.FileIndex, event.FileCount, event.Path)
 	case progress.StageCompressingReverse:
 		return fmt.Sprintf("[%d/%d] Creating reverse differential: %s", event.FileIndex, event.FileCount, event.Path)
+	case progress.StageFilePrepared:
+		return fmt.Sprintf("[%d/%d] Differential prepared: %s", event.FileIndex, event.FileCount, event.Path)
 	case progress.StageFileCompleted:
-		return fmt.Sprintf("[%d/%d] Completed: %s", event.FileIndex, event.FileCount, event.Path)
+		return fmt.Sprintf("[%d/%d] Committed: %s", event.FileIndex, event.FileCount, event.Path)
 	case progress.StageCompleted:
 		return "Finalizing patch..."
 	default:
@@ -52,11 +54,11 @@ func creatorOverallProgress(event progress.Event, includeReverse bool) float64 {
 		completedUnits++
 	case progress.StageCompressingReverse:
 		completedUnits += 2
-	case progress.StageFileCompleted:
+	case progress.StageFilePrepared, progress.StageFileCompleted:
 		completedUnits += unitsPerFile
 	}
 	fraction := 0.0
-	if event.Stage != progress.StageFileCompleted && event.TotalBytes > 0 {
+	if event.Stage != progress.StageFilePrepared && event.Stage != progress.StageFileCompleted && event.TotalBytes > 0 {
 		fraction = float64(event.ProcessedBytes) / float64(event.TotalBytes)
 	}
 	value := (float64(completedUnits) + fraction) / float64(event.FileCount*unitsPerFile)
@@ -67,4 +69,18 @@ func creatorOverallProgress(event progress.Event, includeReverse bool) float64 {
 		return 1
 	}
 	return value
+}
+
+func formatByteSize(value uint64) string {
+	const unit = 1024
+	if value < unit {
+		return fmt.Sprintf("%d B", value)
+	}
+	divisor := uint64(unit)
+	exponent := 0
+	for quotient := value / unit; quotient >= unit && exponent < 5; quotient /= unit {
+		divisor *= unit
+		exponent++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(value)/float64(divisor), "KMGTPE"[exponent])
 }

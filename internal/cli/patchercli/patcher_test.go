@@ -76,7 +76,7 @@ func TestRunAppliesForwardAndReversePatch(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 			}
-			if !strings.Contains(stdout.String(), test.message) || !strings.Contains(stderr.String(), "Before:") || !strings.Contains(stderr.String(), "After:") {
+			if !strings.Contains(stdout.String(), test.message) || !strings.Contains(stderr.String(), "Before:") || !strings.Contains(stderr.String(), "Committed:") {
 				t.Fatalf("stdout = %s, stderr = %s", stdout.String(), stderr.String())
 			}
 			actual, err := os.ReadFile(installed)

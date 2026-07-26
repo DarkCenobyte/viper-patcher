@@ -22,6 +22,7 @@ typedef struct {
 
 FILE *vipr_open_read(const char *path);
 FILE *vipr_open_write(const char *path);
+FILE *vipr_open_write_handle(uintptr_t handle);
 int vipr_seek(FILE *file, uint64_t offset);
 uint64_t vipr_file_size(const char *path, int *ok);
 int vipr_map_file(const char *path, vipr_mapped_file *mapped, char *error_buffer, uint64_t error_buffer_size);

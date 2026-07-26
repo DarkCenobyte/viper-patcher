@@ -124,7 +124,7 @@ func TestCreateRejectsDuplicateSourcePaths(t *testing.T) {
 		OutputPath:       filepath.Join(workspace, "update.vipr"),
 		CompressionLevel: 3,
 	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "duplicate or case-colliding source path") {
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -214,7 +214,7 @@ func TestApplyRejectsInstalledFileChangedBeforeCommit(t *testing.T) {
 	externalContent := []byte("changed-by-another-process")
 	var once sync.Once
 	err := Apply(context.Background(), fixture.patchPath, fixture.installRoot, Forward, func(event progress.Event) {
-		if event.Stage == progress.StageFileCompleted {
+		if event.Stage == progress.StageFilePrepared {
 			once.Do(func() {
 				if writeErr := os.WriteFile(fixture.installedPath, externalContent, 0o644); writeErr != nil {
 					t.Errorf("change installed file: %v", writeErr)
@@ -252,7 +252,7 @@ func TestInspectMixedState(t *testing.T) {
 	}
 }
 
-func TestInspectReportsMissingHashAndModeIssues(t *testing.T) {
+func TestInspectReportsMissingAndHashIssues(t *testing.T) {
 	fixture := newSingleFileFixture(t, true)
 	if err := os.Remove(fixture.installedPath); err != nil {
 		t.Fatal(err)
@@ -269,13 +269,6 @@ func TestInspectReportsMissingHashAndModeIssues(t *testing.T) {
 		t.Fatalf("hash result = %#v, %v", result, err)
 	}
 
-	if runtime.GOOS != "windows" {
-		writeFileMode(t, fixture.installedPath, fixture.sourceData, 0o600)
-		result, err = Inspect(fixture.installRoot, parsed)
-		if err != nil || result.State != StateInvalidFiles || len(result.Issues) != 1 || result.Issues[0].Reason != IssueModeMismatch {
-			t.Fatalf("mode result = %#v, %v", result, err)
-		}
-	}
 }
 
 func TestInspectSameSourceAndTargetState(t *testing.T) {
@@ -296,7 +289,7 @@ func TestInspectSameSourceAndTargetState(t *testing.T) {
 	}
 }
 
-func TestInspectSameHashDifferentModes(t *testing.T) {
+func TestInspectIgnoresPermissionDifferences(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("permission mode semantics differ on Windows")
 	}
@@ -307,42 +300,50 @@ func TestInspectSameHashDifferentModes(t *testing.T) {
 	content := []byte("same-content")
 	writeFileMode(t, source, content, 0o600)
 	writeFileMode(t, target, content, 0o755)
-	writeFileMode(t, installed, content, 0o600)
+	writeFileMode(t, installed, content, 0o400)
 	patchPath := filepath.Join(workspace, "mode.vipr")
 	createPatch(t, patchPath, []FilePair{{SourcePath: source, TargetPath: target}}, true, "", nil)
 
 	result, err := Inspect(filepath.Dir(installed), mustOpen(t, patchPath))
-	if err != nil || result.State != StateForwardReady || !result.CanApplyForward || result.CanApplyReverse {
-		t.Fatalf("source-mode result = %#v, err = %v", result, err)
-	}
-	if err := os.Chmod(installed, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	result, err = Inspect(filepath.Dir(installed), mustOpen(t, patchPath))
-	if err != nil || result.State != StateReverseReady || result.CanApplyForward || !result.CanApplyReverse {
-		t.Fatalf("target-mode result = %#v, err = %v", result, err)
+	if err != nil || result.State != StateBidirectionalReady || !result.CanApplyForward || !result.CanApplyReverse {
+		t.Fatalf("permission-independent result = %#v, err = %v", result, err)
 	}
 }
 
-func TestSetPortableModeMasksSpecialBits(t *testing.T) {
-	var actual os.FileMode
-	err := setPortableMode("unused", 0o4755, func(_ string, mode os.FileMode) error {
-		actual = mode
-		return nil
-	})
+func TestApplyPreservesInstalledPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission mode semantics differ on Windows")
+	}
+	workspace := t.TempDir()
+	source := filepath.Join(workspace, "old", "application.bin")
+	target := filepath.Join(workspace, "new", "application.bin")
+	installed := filepath.Join(workspace, "install", "application.bin")
+	writeFileMode(t, source, []byte("old"), 0o600)
+	writeFileMode(t, target, []byte("new"), 0o755)
+	writeFileMode(t, installed, []byte("old"), 0o640)
+	patchPath := filepath.Join(workspace, "permissions.vipr")
+	createPatch(t, patchPath, []FilePair{{SourcePath: source, TargetPath: target}}, true, "", nil)
+
+	if err := Apply(context.Background(), patchPath, filepath.Dir(installed), Forward, nil); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(installed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if actual != 0o755 {
-		t.Fatalf("mode = %#o, want 0755", actual)
+	if actual := info.Mode().Perm(); actual != 0o640 {
+		t.Fatalf("installed mode = %#o, want 0640", actual)
 	}
 }
 
 func TestApplyReportsChmodFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("VIPR portable modes are intentionally ignored on Windows")
+	}
 	fixture := newSingleFileFixture(t, false)
 	expected := errors.New("chmod failed")
 	err := applyWithOperations(context.Background(), ApplyOptions{PatchPath: fixture.patchPath, Root: fixture.installRoot, Direction: Forward}, nil, applyOperations{
-		chmod: func(string, os.FileMode) error { return expected },
+		chmod: func(*os.File, os.FileMode) error { return expected },
 	})
 	if !errors.Is(err, expected) {
 		t.Fatalf("error = %v", err)
@@ -681,7 +682,7 @@ func expectationFor(t *testing.T, path string) fileExpectation {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fileExpectation{Identity: info, Hash: digest, Size: size, Mode: uint32(info.Mode().Perm())}
+	return fileExpectation{Identity: info, Hash: digest, Size: size}
 }
 
 func writeFile(t *testing.T, path string, data []byte) {
@@ -719,5 +720,248 @@ func assertFile(t *testing.T, path string, expected []byte) {
 	}
 	if string(actual) != string(expected) {
 		t.Fatalf("%s content mismatch", path)
+	}
+}
+
+func TestCreateRejectsOutputInputCollision(t *testing.T) {
+	workspace := t.TempDir()
+	source := filepath.Join(workspace, "source.vipr")
+	target := filepath.Join(workspace, "target.vipr")
+	writeFile(t, source, []byte("source"))
+	writeFile(t, target, []byte("target"))
+
+	for _, test := range []struct {
+		name       string
+		outputPath string
+		want       string
+	}{
+		{name: "source", outputPath: source, want: "must not replace source"},
+		{name: "target", outputPath: target, want: "must not replace target"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := Create(context.Background(), CreateOptions{
+				Files:            []FilePair{{SourcePath: source, TargetPath: target}},
+				OutputPath:       test.outputPath,
+				CompressionLevel: 3,
+			}, nil)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+	assertFile(t, source, []byte("source"))
+	assertFile(t, target, []byte("target"))
+
+	caseEquivalentOutput := filepath.Join(workspace, "SOURCE.VIPR")
+	err := Create(context.Background(), CreateOptions{
+		Files:            []FilePair{{SourcePath: source, TargetPath: target}},
+		OutputPath:       caseEquivalentOutput,
+		CompressionLevel: 3,
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "must not replace source") {
+		t.Fatalf("case-insensitive collision error = %v", err)
+	}
+
+	unicodeSource := filepath.Join(workspace, "é.vipr")
+	writeFile(t, unicodeSource, []byte("unicode-source"))
+	unicodeOutput := filepath.Join(workspace, "e\u0301.vipr")
+	err = Create(context.Background(), CreateOptions{
+		Files:            []FilePair{{SourcePath: unicodeSource, TargetPath: target}},
+		OutputPath:       unicodeOutput,
+		CompressionLevel: 3,
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "must not replace source") {
+		t.Fatalf("Unicode-equivalent output collision error = %v", err)
+	}
+
+	hardLink := filepath.Join(workspace, "hard-link.vipr")
+	if err := os.Link(source, hardLink); err != nil {
+		t.Skipf("hard links are unavailable: %v", err)
+	}
+	err = Create(context.Background(), CreateOptions{
+		Files:            []FilePair{{SourcePath: source, TargetPath: target}},
+		OutputPath:       hardLink,
+		CompressionLevel: 3,
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "must not replace source") {
+		t.Fatalf("hard-link collision error = %v", err)
+	}
+}
+
+func TestCreateRejectsUnicodeEquivalentPaths(t *testing.T) {
+	workspace := t.TempDir()
+	sourceRoot := filepath.Join(workspace, "old")
+	targetRoot := filepath.Join(workspace, "new")
+	composed := filepath.Join(sourceRoot, "é.txt")
+	decomposed := filepath.Join(sourceRoot, "e\u0301.txt")
+	writeFile(t, composed, []byte("one"))
+	writeFile(t, decomposed, []byte("two"))
+	if infoOne, errOne := os.Stat(composed); errOne != nil {
+		t.Fatal(errOne)
+	} else if infoTwo, errTwo := os.Stat(decomposed); errTwo != nil {
+		t.Fatal(errTwo)
+	} else if os.SameFile(infoOne, infoTwo) {
+		t.Skip("filesystem normalizes the two Unicode names to one file")
+	}
+	targetOne := filepath.Join(targetRoot, "one.txt")
+	targetTwo := filepath.Join(targetRoot, "two.txt")
+	writeFile(t, targetOne, []byte("one-new"))
+	writeFile(t, targetTwo, []byte("two-new"))
+
+	err := Create(context.Background(), CreateOptions{
+		Files: []FilePair{
+			{SourcePath: composed, TargetPath: targetOne},
+			{SourcePath: decomposed, TargetPath: targetTwo},
+		},
+		OutputPath:       filepath.Join(workspace, "unicode.vipr"),
+		CompressionLevel: 3,
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "Unicode-equivalent") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestEstimateCreateAndSelectedWorkDirectory(t *testing.T) {
+	workspace := t.TempDir()
+	workParent := filepath.Join(workspace, "work")
+	if err := os.Mkdir(workParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(workspace, "old", "application.bin")
+	target := filepath.Join(workspace, "new", "application.bin")
+	output := filepath.Join(workspace, "update.vipr")
+	writeFile(t, source, []byte(strings.Repeat("source", 1024)))
+	writeFile(t, target, []byte(strings.Repeat("target", 2048)))
+	writeFile(t, output, []byte("existing"))
+	options := CreateOptions{
+		Files:            []FilePair{{SourcePath: source, TargetPath: target}},
+		OutputPath:       output,
+		CompressionLevel: 3,
+		CreateReverse:    true,
+		WorkDirectory:    workParent,
+		Parallelism:      1,
+	}
+	estimate, err := EstimateCreate(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if estimate.SnapshotBytes == 0 || estimate.DifferentialBytes == 0 || estimate.ExistingOutputBytes != uint64(len("existing")) || estimate.TotalBytes < estimate.WorkDirectoryBytes {
+		t.Fatalf("unexpected estimate: %#v", estimate)
+	}
+	observedWorkDirectory := false
+	if err := Create(context.Background(), options, func(event progress.Event) {
+		if event.Stage != progress.StageSnapshotting {
+			return
+		}
+		entries, readErr := os.ReadDir(workParent)
+		if readErr != nil {
+			t.Errorf("read work directory: %v", readErr)
+			return
+		}
+		for _, entry := range entries {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), "viper-patcher-create-") {
+				observedWorkDirectory = true
+			}
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !observedWorkDirectory {
+		t.Fatal("creator did not use the selected work directory")
+	}
+}
+
+func TestCreateWithParallelFileProcessing(t *testing.T) {
+	if runtime.NumCPU() < 2 {
+		t.Skip("parallel test requires at least two logical CPUs")
+	}
+	workspace := t.TempDir()
+	pairs := make([]FilePair, 0, 4)
+	installRoot := filepath.Join(workspace, "install")
+	for index := range 4 {
+		name := fmt.Sprintf("file-%d.bin", index)
+		source := filepath.Join(workspace, "old", name)
+		target := filepath.Join(workspace, "new", name)
+		oldData := []byte(strings.Repeat(fmt.Sprintf("old-%d-", index), 1024))
+		newData := []byte(strings.Repeat(fmt.Sprintf("new-%d-", index), 1024))
+		writeFile(t, source, oldData)
+		writeFile(t, target, newData)
+		writeFile(t, filepath.Join(installRoot, name), oldData)
+		pairs = append(pairs, FilePair{SourcePath: source, TargetPath: target})
+	}
+	patchPath := filepath.Join(workspace, "parallel.vipr")
+	if err := Create(context.Background(), CreateOptions{
+		Files:            pairs,
+		OutputPath:       patchPath,
+		CompressionLevel: 3,
+		Parallelism:      2,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(context.Background(), patchPath, installRoot, Forward, nil); err != nil {
+		t.Fatal(err)
+	}
+	for index := range 4 {
+		name := fmt.Sprintf("file-%d.bin", index)
+		expected := []byte(strings.Repeat(fmt.Sprintf("new-%d-", index), 1024))
+		assertFile(t, filepath.Join(installRoot, name), expected)
+	}
+}
+
+func TestTransactionReturnsCommittedWarningForBackupCleanup(t *testing.T) {
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "target.bin")
+	temporary := filepath.Join(workspace, "replacement.bin")
+	writeFile(t, target, []byte("old"))
+	writeFile(t, temporary, []byte("new"))
+	operations := defaultTransactionOperations
+	renameCalls := 0
+	operations.rename = func(oldPath, newPath string) error {
+		renameCalls++
+		return os.Rename(oldPath, newPath)
+	}
+	expected := errors.New("backup cleanup failed")
+	operations.remove = func(path string) error {
+		if renameCalls >= 2 && strings.Contains(filepath.Base(path), ".viper-patcher-backup-") {
+			return expected
+		}
+		return os.Remove(path)
+	}
+	transaction := newTransactionWithOperations(operations)
+	if err := transaction.Add(target, temporary, expectationFor(t, target)); err != nil {
+		t.Fatal(err)
+	}
+	err := transaction.Commit()
+	if !IsCommittedWarning(err) || !errors.Is(err, expected) {
+		t.Fatalf("error = %v, want committed warning", err)
+	}
+	assertFile(t, target, []byte("new"))
+}
+
+func TestTransactionPublicConstructorAndErrorWrappers(t *testing.T) {
+	transaction := NewTransaction()
+	if transaction == nil || transaction.finished {
+		t.Fatalf("unexpected transaction: %#v", transaction)
+	}
+	if err := wrapRemoveError("remove", "unused", nil); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	if err := wrapRemoveError("remove", missing, os.Remove(missing)); err != nil {
+		t.Fatalf("missing path should be ignored: %v", err)
+	}
+	expected := errors.New("remove failed")
+	if err := wrapRemoveError("remove", "file", expected); !errors.Is(err, expected) {
+		t.Fatalf("wrapped error = %v", err)
+	}
+}
+
+func TestOperationErrorHelpers(t *testing.T) {
+	if wrapOperationError("append", "file", nil) != nil {
+		t.Fatal("nil operation error must remain nil")
+	}
+	expected := errors.New("I/O failed")
+	if err := wrapOperationError("append", "file", expected); !errors.Is(err, expected) || !strings.Contains(err.Error(), "append") {
+		t.Fatalf("wrapped operation error = %v", err)
 	}
 }

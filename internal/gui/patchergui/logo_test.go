@@ -66,3 +66,23 @@ func TestLoadPatcherLogoIgnoresLogoOutsideAssetsDirectory(t *testing.T) {
 		t.Fatal("expected only assets/logo.png to override the embedded logo")
 	}
 }
+
+func TestExternalLogoDimensionLimits(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		width, height int
+		valid         bool
+	}{
+		{name: "normal", width: 1024, height: 1024, valid: true},
+		{name: "too wide", width: maximumExternalLogoWidth + 1, height: 1},
+		{name: "too high", width: 1, height: maximumExternalLogoHeight + 1},
+		{name: "too many pixels", width: 4001, height: 4001},
+		{name: "empty", width: 0, height: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if actual := validExternalLogoDimensions(test.width, test.height); actual != test.valid {
+				t.Fatalf("validExternalLogoDimensions(%d, %d) = %v, want %v", test.width, test.height, actual, test.valid)
+			}
+		})
+	}
+}

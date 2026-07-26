@@ -107,3 +107,14 @@ func FuzzSecureJoin(f *testing.F) {
 		}
 	})
 }
+
+func TestCaseInsensitiveKeyNormalizesUnicodeAndCase(t *testing.T) {
+	composed := CaseInsensitiveKey("Data/É.TXT")
+	decomposed := CaseInsensitiveKey("data/e\u0301.txt")
+	if composed != decomposed {
+		t.Fatalf("keys differ: %q != %q", composed, decomposed)
+	}
+	if composed == CaseInsensitiveKey("data/other.txt") {
+		t.Fatal("different paths must not share a collision key")
+	}
+}

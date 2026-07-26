@@ -11,10 +11,10 @@ import (
 func TestPatcherValidationPresentation(t *testing.T) {
 	result := patch.ValidationResult{
 		State:  patch.StateInvalidFiles,
-		Issues: []patch.FileIssue{{Path: "bin/game.exe", Reason: patch.IssueModeMismatch}},
+		Issues: []patch.FileIssue{{Path: "bin/game.exe", Reason: patch.IssueHashMismatch}},
 	}
 	text := patcherValidationText(result)
-	if !strings.Contains(text, "bin/game.exe") || !strings.Contains(text, string(patch.IssueModeMismatch)) {
+	if !strings.Contains(text, "bin/game.exe") || !strings.Contains(text, string(patch.IssueHashMismatch)) {
 		t.Fatalf("unexpected validation text: %s", text)
 	}
 }

@@ -8,27 +8,31 @@ import (
 
 	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
-	"github.com/DarkCenobyte/viper-patcher/internal/pathutil"
 )
 
 // Inspect validates files in root against both source and target states.
-func Inspect(root string, parsed patchformat.Patch) (ValidationResult, error) {
-	result := ValidationResult{
+func Inspect(rootPath string, parsed patchformat.Patch) (result ValidationResult, resultError error) {
+	root, err := openInstallationRoot(rootPath)
+	if err != nil {
+		return ValidationResult{}, err
+	}
+	defer func() {
+		if closeError := root.Close(); closeError != nil {
+			resultError = errors.Join(resultError, fmt.Errorf("close target root: %w", closeError))
+		}
+	}()
+
+	result = ValidationResult{
 		CanApplyForward: true,
 		CanApplyReverse: parsed.Header.Reverse,
 		Missing:         make([]string, 0),
 		Issues:          make([]FileIssue, 0),
 	}
-	mixedState := false
 	matchedSource := false
 	matchedTarget := false
 
 	for _, entry := range parsed.Header.Files {
-		path, err := pathutil.SecureJoinExisting(root, entry.Path)
-		if err != nil {
-			return ValidationResult{}, err
-		}
-		file, info, err := openStableRegularFile(path)
+		file, info, localized, err := root.openStableRegularFile(entry.Path)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				result.Missing = append(result.Missing, entry.Path)
@@ -36,27 +40,42 @@ func Inspect(root string, parsed patchformat.Patch) (ValidationResult, error) {
 				result.CanApplyReverse = false
 				continue
 			}
-			if lstatInfo, lstatErr := os.Lstat(path); lstatErr == nil && !lstatInfo.Mode().IsRegular() {
-				result.Issues = append(result.Issues, FileIssue{Path: entry.Path, Reason: IssueNotRegular})
-				result.CanApplyForward = false
-				result.CanApplyReverse = false
-				continue
+			if localized == "" {
+				localized, _ = localPatchPath(entry.Path)
+			}
+			if localized != "" {
+				if lstatInfo, lstatErr := root.root.Lstat(localized); lstatErr == nil && !lstatInfo.Mode().IsRegular() {
+					result.Issues = append(result.Issues, FileIssue{Path: entry.Path, Reason: IssueNotRegular})
+					result.CanApplyForward = false
+					result.CanApplyReverse = false
+					continue
+				}
 			}
 			return ValidationResult{}, fmt.Errorf("inspect %q: %w", entry.Path, err)
 		}
 		digest, size, hashErr := hashutil.Reader(file)
+		currentInfo, statErr := file.Stat()
+		pathInfo, pathErr := root.root.Lstat(localized)
 		closeErr := file.Close()
 		if hashErr != nil {
 			return ValidationResult{}, fmt.Errorf("hash %q: %w", entry.Path, hashErr)
 		}
+		if statErr != nil {
+			return ValidationResult{}, fmt.Errorf("inspect %q after hashing: %w", entry.Path, statErr)
+		}
+		if pathErr != nil {
+			return ValidationResult{}, fmt.Errorf("inspect %q after hashing: %w", entry.Path, pathErr)
+		}
 		if closeErr != nil {
 			return ValidationResult{}, fmt.Errorf("close %q after inspection: %w", entry.Path, closeErr)
 		}
-		mode := uint32(info.Mode().Perm())
-		sourceHashMatches := digest == entry.SourceHash && size == entry.SourceSize
-		targetHashMatches := digest == entry.TargetHash && size == entry.TargetSize
-		sourceMatches := sourceHashMatches && mode == entry.SourceMode
-		targetMatches := targetHashMatches && mode == entry.TargetMode
+		if !currentInfo.Mode().IsRegular() || !pathInfo.Mode().IsRegular() || !osSameFile(info, currentInfo, pathInfo) ||
+			currentInfo.Size() < 0 || uint64(currentInfo.Size()) != size || !currentInfo.ModTime().Equal(info.ModTime()) {
+			return ValidationResult{}, fmt.Errorf("file %q changed while it was being inspected", entry.Path)
+		}
+
+		sourceMatches := digest == entry.SourceHash && size == entry.SourceSize
+		targetMatches := digest == entry.TargetHash && size == entry.TargetSize
 
 		if !sourceMatches {
 			result.CanApplyForward = false
@@ -70,15 +89,10 @@ func Inspect(root string, parsed patchformat.Patch) (ValidationResult, error) {
 		if sourceMatches || targetMatches {
 			continue
 		}
-		reason := IssueHashMismatch
-		if sourceHashMatches || targetHashMatches {
-			reason = IssueModeMismatch
-		}
 		result.Issues = append(result.Issues, FileIssue{
 			Path:       entry.Path,
-			Reason:     reason,
+			Reason:     IssueHashMismatch,
 			ActualHash: digest,
-			ActualMode: mode,
 		})
 	}
 
@@ -101,11 +115,22 @@ func Inspect(root string, parsed patchformat.Patch) (ValidationResult, error) {
 		result.State = StateReverseReady
 		return result, nil
 	}
-	mixedState = len(result.Issues) == 0 && matchedSource && matchedTarget
-	if mixedState {
+	if len(result.Issues) == 0 && matchedSource && matchedTarget {
 		result.State = StateMixedFiles
 		return result, nil
 	}
 	result.State = StateInvalidFiles
 	return result, nil
+}
+
+func osSameFile(infos ...fs.FileInfo) bool {
+	if len(infos) < 2 {
+		return true
+	}
+	for _, info := range infos[1:] {
+		if !os.SameFile(infos[0], info) {
+			return false
+		}
+	}
+	return true
 }
