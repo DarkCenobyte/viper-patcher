@@ -1,81 +1,89 @@
 package patch
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"sort"
 
-	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 )
 
-// OpenWithDigest reads one stable patch file and returns its verified SHA-256 digest.
-func OpenWithDigest(path string) (patchformat.Patch, string, error) {
-	file, identity, err := openStableRegularFile(path)
-	if err != nil {
-		return patchformat.Patch{}, "", err
-	}
-	defer file.Close()
-
-	digest, size, err := hashutil.Reader(file)
-	if err != nil {
-		return patchformat.Patch{}, "", fmt.Errorf("hash patch file: %w", err)
-	}
-	if identity.Size() < 0 || size != uint64(identity.Size()) {
-		return patchformat.Patch{}, "", fmt.Errorf("patch file changed while it was being read")
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return patchformat.Patch{}, "", fmt.Errorf("rewind patch file: %w", err)
-	}
-	parsed, err := patchformat.Decode(file)
-	if err != nil {
-		return patchformat.Patch{}, "", err
-	}
-	if err := validateDifferentialRanges(parsed, size); err != nil {
-		return patchformat.Patch{}, "", err
-	}
-	if err := verifyOpenPatch(file, path, identity, digest, size); err != nil {
-		return patchformat.Patch{}, "", err
-	}
-	return parsed, digest, nil
+type openedPatch struct {
+	file   *os.File
+	parsed patchformat.Patch
+	digest string
 }
 
-func openPrivatePatchSnapshot(snapshot fileSnapshot) (patchformat.Patch, error) {
-	if snapshot.SnapshotIdentity == nil {
-		return patchformat.Patch{}, fmt.Errorf("private patch snapshot identity is unavailable")
-	}
-	file, err := os.Open(snapshot.SnapshotPath)
+// Open parses and validates one stable patch file.
+func Open(path string) (patchformat.Patch, error) {
+	parsed, _, err := OpenWithDigest(path)
+	return parsed, err
+}
+
+// OpenWithDigest reads one stable patch file and returns its verified SHA-256
+// digest. The patch bytes are hashed exactly once.
+func OpenWithDigest(path string) (patchformat.Patch, string, error) {
+	opened, err := openPatchForApply(path, "")
 	if err != nil {
-		return patchformat.Patch{}, fmt.Errorf("open private patch snapshot: %w", err)
+		return patchformat.Patch{}, "", err
 	}
-	defer file.Close()
-	identity, err := file.Stat()
+	defer opened.Close()
+	return opened.parsed, opened.digest, nil
+}
+
+func openPatchForApply(path, expectedDigest string) (*openedPatch, error) {
+	file, identity, err := openStableRegularFile(path)
 	if err != nil {
-		return patchformat.Patch{}, fmt.Errorf("inspect private patch snapshot: %w", err)
+		return nil, err
 	}
-	if !os.SameFile(snapshot.SnapshotIdentity, identity) || identity.Size() < 0 || uint64(identity.Size()) != snapshot.Size {
-		return patchformat.Patch{}, fmt.Errorf("private patch snapshot changed before parsing")
+	closeWithError := func(operationError error) (*openedPatch, error) {
+		closeError := file.Close()
+		if closeError != nil {
+			return nil, fmt.Errorf("%v; close patch file: %w", operationError, closeError)
+		}
+		return nil, operationError
 	}
-	parsed, err := patchformat.Decode(file)
+
+	hash := sha256.New()
+	reader := io.TeeReader(file, hash)
+	parsed, err := patchformat.Decode(reader)
 	if err != nil {
-		return patchformat.Patch{}, err
+		return closeWithError(err)
 	}
-	if err := validateDifferentialRanges(parsed, snapshot.Size); err != nil {
-		return patchformat.Patch{}, err
-	}
-	current, err := file.Stat()
+	remaining, err := io.Copy(hash, reader)
 	if err != nil {
-		return patchformat.Patch{}, fmt.Errorf("inspect private patch snapshot after parsing: %w", err)
+		return closeWithError(fmt.Errorf("hash patch payload: %w", err))
 	}
-	pathInfo, err := os.Lstat(snapshot.SnapshotPath)
-	if err != nil {
-		return patchformat.Patch{}, fmt.Errorf("inspect private patch snapshot path after parsing: %w", err)
+	if identity.Size() < 0 {
+		return closeWithError(fmt.Errorf("patch file has an invalid size"))
 	}
-	if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(identity, current) || !os.SameFile(identity, pathInfo) || current.Size() != identity.Size() {
-		return patchformat.Patch{}, fmt.Errorf("private patch snapshot changed while it was being parsed")
+	size := parsed.DataOffset + uint64(remaining)
+	if size != uint64(identity.Size()) {
+		return closeWithError(fmt.Errorf("patch file changed while it was being read"))
 	}
-	return parsed, nil
+	if err := validateDifferentialRanges(parsed, size); err != nil {
+		return closeWithError(err)
+	}
+	digest := hex.EncodeToString(hash.Sum(nil))
+	if expectedDigest != "" && digest != expectedDigest {
+		return closeWithError(fmt.Errorf("selected patch changed after it was inspected"))
+	}
+	if err := verifyOpenPatchMetadata(file, path, identity, size); err != nil {
+		return closeWithError(err)
+	}
+	return &openedPatch{file: file, parsed: parsed, digest: digest}, nil
+}
+
+func (opened *openedPatch) Close() error {
+	if opened == nil || opened.file == nil {
+		return nil
+	}
+	err := opened.file.Close()
+	opened.file = nil
+	return err
 }
 
 func validateDifferentialRanges(parsed patchformat.Patch, containerSize uint64) error {
@@ -121,22 +129,12 @@ func validateDifferentialRanges(parsed patchformat.Patch, containerSize uint64) 
 	return nil
 }
 
-func verifyOpenPatch(file *os.File, path string, identity os.FileInfo, expectedDigest string, expectedSize uint64) error {
+func verifyOpenPatchMetadata(file *os.File, path string, identity os.FileInfo, expectedSize uint64) error {
 	currentInfo, err := file.Stat()
 	if err != nil {
 		return fmt.Errorf("inspect patch after parsing: %w", err)
 	}
 	if !os.SameFile(identity, currentInfo) || currentInfo.Size() < 0 || uint64(currentInfo.Size()) != expectedSize || !currentInfo.ModTime().Equal(identity.ModTime()) {
-		return fmt.Errorf("patch file changed while it was being parsed")
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind patch after parsing: %w", err)
-	}
-	actualDigest, actualSize, err := hashutil.Reader(file)
-	if err != nil {
-		return fmt.Errorf("verify patch after parsing: %w", err)
-	}
-	if actualDigest != expectedDigest || actualSize != expectedSize {
 		return fmt.Errorf("patch file changed while it was being parsed")
 	}
 	pathInfo, err := os.Lstat(path)

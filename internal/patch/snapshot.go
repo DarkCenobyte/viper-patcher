@@ -31,14 +31,6 @@ type stableFileSource struct {
 	lstat   func() (os.FileInfo, error)
 }
 
-var errSnapshotContentMismatch = errors.New("snapshot content does not match expectation")
-
-type snapshotContentExpectation struct {
-	hash    string
-	size    uint64
-	hasSize bool
-}
-
 func snapshotRegularFile(sourcePath, destinationPath string) (fileSnapshot, error) {
 	source := stableFileSource{
 		display: sourcePath,
@@ -49,32 +41,10 @@ func snapshotRegularFile(sourcePath, destinationPath string) (fileSnapshot, erro
 			return os.Lstat(sourcePath)
 		},
 	}
-	return snapshotStableFile(source, destinationPath, nil)
+	return snapshotStableFile(source, destinationPath)
 }
 
-func snapshotInstallationFile(root *installationRoot, patchPath, destinationPath string, expected snapshotContentExpectation) (fileSnapshot, string, error) {
-	var localized string
-	source := stableFileSource{
-		display: patchPath,
-		open: func() (*os.File, os.FileInfo, error) {
-			file, info, name, err := root.openStableRegularFile(patchPath)
-			if err == nil {
-				localized = name
-			}
-			return file, info, err
-		},
-		lstat: func() (os.FileInfo, error) {
-			if localized == "" {
-				return nil, fmt.Errorf("localized path is unavailable")
-			}
-			return root.root.Lstat(localized)
-		},
-	}
-	snapshot, err := snapshotStableFile(source, destinationPath, &expected)
-	return snapshot, localized, err
-}
-
-func snapshotStableFile(source stableFileSource, destinationPath string, expected *snapshotContentExpectation) (snapshot fileSnapshot, resultError error) {
+func snapshotStableFile(source stableFileSource, destinationPath string) (snapshot fileSnapshot, resultError error) {
 	file, identity, err := source.open()
 	if err != nil {
 		return fileSnapshot{}, err
@@ -82,9 +52,7 @@ func snapshotStableFile(source stableFileSource, destinationPath string, expecte
 	sourceClosed := false
 	defer func() {
 		if !sourceClosed {
-			if closeError := file.Close(); closeError != nil {
-				resultError = errors.Join(resultError, fmt.Errorf("close snapshot source %q: %w", source.display, closeError))
-			}
+			resultError = errors.Join(resultError, wrapOperationError("close snapshot source", source.display, file.Close()))
 		}
 	}()
 
@@ -96,9 +64,7 @@ func snapshotStableFile(source stableFileSource, destinationPath string, expecte
 	committed := false
 	defer func() {
 		if !outputClosed {
-			if closeError := output.Close(); closeError != nil {
-				resultError = errors.Join(resultError, fmt.Errorf("close incomplete snapshot for %q: %w", source.display, closeError))
-			}
+			resultError = errors.Join(resultError, wrapOperationError("close incomplete snapshot", source.display, output.Close()))
 		}
 		if !committed {
 			if removeError := os.Remove(destinationPath); removeError != nil && !os.IsNotExist(removeError) {
@@ -115,19 +81,8 @@ func snapshotStableFile(source stableFileSource, destinationPath string, expecte
 	if written < 0 || identity.Size() < 0 || uint64(written) != uint64(identity.Size()) {
 		return fileSnapshot{}, fmt.Errorf("file %q changed size while it was being snapshotted", source.display)
 	}
-	snapshotHash := hex.EncodeToString(hash.Sum(nil))
-	if expected != nil {
-		if snapshotHash != expected.hash || (expected.hasSize && uint64(written) != expected.size) {
-			return fileSnapshot{}, fmt.Errorf("%w: file %q", errSnapshotContentMismatch, source.display)
-		}
-		if err := verifySnapshotSourceMetadata(file, source, identity, uint64(written)); err != nil {
-			return fileSnapshot{}, err
-		}
-	} else if err := verifySnapshotSource(file, source, identity, snapshotHash, uint64(written)); err != nil {
+	if err := verifySnapshotSourceMetadata(file, source, identity, uint64(written)); err != nil {
 		return fileSnapshot{}, err
-	}
-	if err := output.Sync(); err != nil {
-		return fileSnapshot{}, fmt.Errorf("sync snapshot for %q: %w", source.display, err)
 	}
 	if err := output.Close(); err != nil {
 		return fileSnapshot{}, fmt.Errorf("close snapshot for %q: %w", source.display, err)
@@ -148,33 +103,11 @@ func snapshotStableFile(source stableFileSource, destinationPath string, expecte
 	return fileSnapshot{
 		SnapshotPath:     destinationPath,
 		SnapshotIdentity: snapshotIdentity,
-		Hash:             snapshotHash,
+		Hash:             hex.EncodeToString(hash.Sum(nil)),
 		Size:             uint64(written),
 		Mode:             uint32(identity.Mode().Perm()),
 		Identity:         identity,
 	}, nil
-}
-
-func copyPatchSnapshot(sourcePath, workDirectory, expectedHash string) (fileSnapshot, error) {
-	destination := filepath.Join(workDirectory, "patch.vipr")
-	var expected *snapshotContentExpectation
-	if expectedHash != "" {
-		expected = &snapshotContentExpectation{hash: expectedHash}
-	}
-	source := stableFileSource{
-		display: sourcePath,
-		open: func() (*os.File, os.FileInfo, error) {
-			return openStableRegularFile(sourcePath)
-		},
-		lstat: func() (os.FileInfo, error) {
-			return os.Lstat(sourcePath)
-		},
-	}
-	snapshot, err := snapshotStableFile(source, destination, expected)
-	if err != nil {
-		return fileSnapshot{}, fmt.Errorf("snapshot patch file: %w", err)
-	}
-	return snapshot, nil
 }
 
 func openStableRegularFile(path string) (*os.File, os.FileInfo, error) {
@@ -194,11 +127,7 @@ func openStableRegularFile(path string) (*os.File, os.FileInfo, error) {
 		return nil, nil, fmt.Errorf("open %q: %w", path, err)
 	}
 	closeWithError := func(operationError error) error {
-		closeError := file.Close()
-		if closeError == nil {
-			return operationError
-		}
-		return errors.Join(operationError, fmt.Errorf("close %q: %w", path, closeError))
+		return errors.Join(operationError, wrapOperationError("close", path, file.Close()))
 	}
 	info, err := file.Stat()
 	if err != nil {
@@ -238,43 +167,23 @@ func verifyRootFileExpectation(root *os.Root, path string, expected fileExpectat
 	default:
 		verificationError = verifyOpenedFileExpectation(file, identity, path, expected)
 	}
-	closeError := file.Close()
-	return errors.Join(
-		verificationError,
-		wrapOperationError("close verified file", path, closeError),
-	)
+	return errors.Join(verificationError, wrapOperationError("close verified file", path, file.Close()))
 }
 
 func verifyOpenedFileExpectation(file *os.File, identity os.FileInfo, displayPath string, expected fileExpectation) error {
-	if !os.SameFile(identity, expected.Identity) {
-		return fmt.Errorf("%q was replaced after validation", displayPath)
+	if !os.SameFile(identity, expected.Identity) || identity.Size() < 0 || uint64(identity.Size()) != expected.Size || !identity.ModTime().Equal(expected.Identity.ModTime()) {
+		return fmt.Errorf("%q changed after validation", displayPath)
+	}
+	if expected.Hash == "" {
+		return nil
 	}
 	hash := sha256.New()
 	size, err := io.Copy(hash, file)
 	if err != nil {
 		return fmt.Errorf("verify content of %q: %w", displayPath, err)
 	}
-	actualHash := hex.EncodeToString(hash.Sum(nil))
-	if size < 0 || uint64(size) != expected.Size || actualHash != expected.Hash {
+	if size < 0 || uint64(size) != expected.Size || hex.EncodeToString(hash.Sum(nil)) != expected.Hash {
 		return fmt.Errorf("%q changed after validation", displayPath)
-	}
-	return nil
-}
-
-func verifySnapshotSource(file *os.File, source stableFileSource, identity os.FileInfo, expectedHash string, expectedSize uint64) error {
-	if err := verifySnapshotSourceMetadata(file, source, identity, expectedSize); err != nil {
-		return err
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind %q after snapshot: %w", source.display, err)
-	}
-	hash := sha256.New()
-	verifiedSize, err := io.Copy(hash, file)
-	if err != nil {
-		return fmt.Errorf("verify %q after snapshot: %w", source.display, err)
-	}
-	if verifiedSize < 0 || uint64(verifiedSize) != expectedSize || hex.EncodeToString(hash.Sum(nil)) != expectedHash {
-		return fmt.Errorf("file %q changed while it was being snapshotted", source.display)
 	}
 	return nil
 }
@@ -284,8 +193,7 @@ func verifySnapshotSourceMetadata(file *os.File, source stableFileSource, identi
 	if err != nil {
 		return fmt.Errorf("inspect %q after snapshot: %w", source.display, err)
 	}
-	if !os.SameFile(identity, currentInfo) || currentInfo.Size() < 0 || uint64(currentInfo.Size()) != expectedSize ||
-		!currentInfo.ModTime().Equal(identity.ModTime()) {
+	if !os.SameFile(identity, currentInfo) || currentInfo.Size() < 0 || uint64(currentInfo.Size()) != expectedSize || !currentInfo.ModTime().Equal(identity.ModTime()) {
 		return fmt.Errorf("file %q changed while it was being snapshotted", source.display)
 	}
 	pathInfo, err := source.lstat()

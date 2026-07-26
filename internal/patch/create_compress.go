@@ -24,14 +24,26 @@ type compressedCreationFile struct {
 	blobs differentialBlobs
 }
 
+type createdDifferential struct {
+	method         string
+	path           string
+	compressedSize uint64
+	expandedSize   uint64
+}
+
 func compressCreationInputs(ctx context.Context, options CreateOptions, snapshots []creationSnapshot, workDirectory string, parallelism int, callback progress.Callback) (patchformat.Header, []differentialBlobs, error) {
+	emptyReference := filepath.Join(workDirectory, "empty-reference")
+	if err := os.WriteFile(emptyReference, nil, 0o600); err != nil {
+		return patchformat.Header{}, nil, fmt.Errorf("create empty compression reference: %w", err)
+	}
+
 	compressed := make([]compressedCreationFile, len(snapshots))
 	err := parallelFor(ctx, len(snapshots), parallelism, func(ctx context.Context, index int) error {
 		snapshot := snapshots[index]
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		forwardPath := filepath.Join(workDirectory, fmt.Sprintf("%06d.forward.zst", index))
+
 		progress.Report(callback, progress.Event{
 			FileIndex:  index + 1,
 			FileCount:  len(snapshots),
@@ -39,46 +51,32 @@ func compressCreationInputs(ctx context.Context, options CreateOptions, snapshot
 			Stage:      progress.StageCompressingForward,
 			TotalBytes: snapshot.target.Size,
 		})
-		if err := zstd.CompressFile(snapshot.source.SnapshotPath, snapshot.target.SnapshotPath, forwardPath, options.CompressionLevel, compressionProgress(callback, index, len(snapshots), snapshot.pair.relativePath, progress.StageCompressingForward)); err != nil {
-			return fmt.Errorf("create forward differential for %q: %w", snapshot.pair.relativePath, err)
-		}
-		forwardLength, err := regularFileSize(forwardPath)
+
+		forward, reverse, err := createBestDifferentials(ctx, options, snapshot, workDirectory, emptyReference, index, callback, len(snapshots))
 		if err != nil {
-			return err
+			return fmt.Errorf("create differential for %q: %w", snapshot.pair.relativePath, err)
 		}
 
 		result := compressedCreationFile{
 			entry: patchformat.FileEntry{
-				Path:          snapshot.pair.relativePath,
-				SourceHash:    snapshot.source.Hash,
-				TargetHash:    snapshot.target.Hash,
-				SourceSize:    snapshot.source.Size,
-				TargetSize:    snapshot.target.Size,
-				SourceMode:    snapshot.source.Mode,
-				TargetMode:    snapshot.target.Mode,
-				ForwardLength: forwardLength,
+				Path:                  snapshot.pair.relativePath,
+				SourceHash:            snapshot.source.Hash,
+				TargetHash:            snapshot.target.Hash,
+				SourceSize:            snapshot.source.Size,
+				TargetSize:            snapshot.target.Size,
+				SourceMode:            snapshot.source.Mode,
+				TargetMode:            snapshot.target.Mode,
+				ForwardMethod:         forward.method,
+				ForwardLength:         forward.compressedSize,
+				ForwardExpandedLength: forward.expandedSize,
 			},
-			blobs: differentialBlobs{forward: forwardPath},
+			blobs: differentialBlobs{forward: forward.path},
 		}
-
 		if options.CreateReverse {
-			reversePath := filepath.Join(workDirectory, fmt.Sprintf("%06d.reverse.zst", index))
-			progress.Report(callback, progress.Event{
-				FileIndex:  index + 1,
-				FileCount:  len(snapshots),
-				Path:       snapshot.pair.relativePath,
-				Stage:      progress.StageCompressingReverse,
-				TotalBytes: snapshot.source.Size,
-			})
-			if err := zstd.CompressFile(snapshot.target.SnapshotPath, snapshot.source.SnapshotPath, reversePath, options.CompressionLevel, compressionProgress(callback, index, len(snapshots), snapshot.pair.relativePath, progress.StageCompressingReverse)); err != nil {
-				return fmt.Errorf("create reverse differential for %q: %w", snapshot.pair.relativePath, err)
-			}
-			reverseLength, err := regularFileSize(reversePath)
-			if err != nil {
-				return err
-			}
-			result.entry.ReverseLength = reverseLength
-			result.blobs.reverse = reversePath
+			result.entry.ReverseMethod = reverse.method
+			result.entry.ReverseLength = reverse.compressedSize
+			result.entry.ReverseExpandedLength = reverse.expandedSize
+			result.blobs.reverse = reverse.path
 		}
 		compressed[index] = result
 		progress.Report(callback, progress.Event{
@@ -119,6 +117,103 @@ func compressCreationInputs(ctx context.Context, options CreateOptions, snapshot
 	return header, blobs, nil
 }
 
+func createBestDifferentials(ctx context.Context, options CreateOptions, snapshot creationSnapshot, workDirectory, emptyReference string, index int, callback progress.Callback, fileCount int) (createdDifferential, createdDifferential, error) {
+	if snapshot.source.Size == snapshot.target.Size {
+		forwardRaw := filepath.Join(workDirectory, fmt.Sprintf("%06d.forward.sparse", index))
+		reverseRaw := ""
+		if options.CreateReverse {
+			reverseRaw = filepath.Join(workDirectory, fmt.Sprintf("%06d.reverse.sparse", index))
+		}
+		stats, err := createSparseStreams(snapshot.source.SnapshotPath, snapshot.target.SnapshotPath, forwardRaw, reverseRaw)
+		if err != nil {
+			return createdDifferential{}, createdDifferential{}, err
+		}
+		if sparseWorthUsing(stats, snapshot.target.Size) {
+			forward, err := compressPreparedPayload(ctx, emptyReference, forwardRaw, filepath.Join(workDirectory, fmt.Sprintf("%06d.forward.sparse.zst", index)), patchformat.MethodSparse, stats.expandedSize, options.CompressionLevel, compressionProgress(callback, index, fileCount, snapshot.pair.relativePath, progress.StageCompressingForward))
+			if err != nil {
+				return createdDifferential{}, createdDifferential{}, err
+			}
+			var reverse createdDifferential
+			if options.CreateReverse {
+				progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: fileCount, Path: snapshot.pair.relativePath, Stage: progress.StageCompressingReverse, TotalBytes: snapshot.source.Size})
+				reverse, err = compressPreparedPayload(ctx, emptyReference, reverseRaw, filepath.Join(workDirectory, fmt.Sprintf("%06d.reverse.sparse.zst", index)), patchformat.MethodSparse, stats.expandedSize, options.CompressionLevel, compressionProgress(callback, index, fileCount, snapshot.pair.relativePath, progress.StageCompressingReverse))
+				if err != nil {
+					return createdDifferential{}, createdDifferential{}, err
+				}
+			}
+			_ = os.Remove(forwardRaw)
+			if reverseRaw != "" {
+				_ = os.Remove(reverseRaw)
+			}
+			return forward, reverse, nil
+		}
+		_ = os.Remove(forwardRaw)
+		if reverseRaw != "" {
+			_ = os.Remove(reverseRaw)
+		}
+	}
+
+	forward, err := createCopyAddOrReplace(ctx, snapshot.source.SnapshotPath, snapshot.target.SnapshotPath, snapshot.target.Size, workDirectory, emptyReference, index, "forward", options.CompressionLevel, compressionProgress(callback, index, fileCount, snapshot.pair.relativePath, progress.StageCompressingForward))
+	if err != nil {
+		return createdDifferential{}, createdDifferential{}, err
+	}
+	var reverse createdDifferential
+	if options.CreateReverse {
+		progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: fileCount, Path: snapshot.pair.relativePath, Stage: progress.StageCompressingReverse, TotalBytes: snapshot.source.Size})
+		reverse, err = createCopyAddOrReplace(ctx, snapshot.target.SnapshotPath, snapshot.source.SnapshotPath, snapshot.source.Size, workDirectory, emptyReference, index, "reverse", options.CompressionLevel, compressionProgress(callback, index, fileCount, snapshot.pair.relativePath, progress.StageCompressingReverse))
+		if err != nil {
+			return createdDifferential{}, createdDifferential{}, err
+		}
+	}
+	return forward, reverse, nil
+}
+
+func createCopyAddOrReplace(ctx context.Context, sourcePath, targetPath string, targetSize uint64, workDirectory, emptyReference string, index int, direction string, level int, callback zstd.ProgressFunc) (createdDifferential, error) {
+	copyAddRaw := filepath.Join(workDirectory, fmt.Sprintf("%06d.%s.copy-add", index, direction))
+	stats, err := createCopyAddStream(ctx, sourcePath, targetPath, copyAddRaw)
+	if err != nil {
+		return createdDifferential{}, err
+	}
+	if copyAddWorthUsing(stats, targetSize) {
+		result, err := compressPreparedPayload(ctx, emptyReference, copyAddRaw, filepath.Join(workDirectory, fmt.Sprintf("%06d.%s.copy-add.zst", index, direction)), patchformat.MethodCopyAdd, stats.expandedSize, level, callback)
+		_ = os.Remove(copyAddRaw)
+		return result, err
+	}
+	_ = os.Remove(copyAddRaw)
+	return compressPreparedPayload(ctx, emptyReference, targetPath, filepath.Join(workDirectory, fmt.Sprintf("%06d.%s.replace.zst", index, direction)), patchformat.MethodReplace, 0, level, callback)
+}
+
+func sparseWorthUsing(stats sparseStats, size uint64) bool {
+	if size == 0 {
+		return true
+	}
+	return stats.changedBytes <= size/8 && stats.expandedSize <= size/4
+}
+
+func copyAddWorthUsing(stats copyAddStats, targetSize uint64) bool {
+	if targetSize == 0 || stats.copiedBytes < targetSize/8 {
+		return false
+	}
+	limit := targetSize - targetSize/4
+	var ok bool
+	limit, ok = checkedAdd(limit, 1<<20)
+	return ok && stats.expandedSize <= limit
+}
+
+func compressPreparedPayload(ctx context.Context, referencePath, inputPath, outputPath, method string, expandedSize uint64, level int, callback zstd.ProgressFunc) (createdDifferential, error) {
+	if err := ctx.Err(); err != nil {
+		return createdDifferential{}, err
+	}
+	if err := zstd.CompressFile(referencePath, inputPath, outputPath, level, callback); err != nil {
+		return createdDifferential{}, err
+	}
+	compressedSize, err := regularFileSize(outputPath)
+	if err != nil {
+		return createdDifferential{}, err
+	}
+	return createdDifferential{method: method, path: outputPath, compressedSize: compressedSize, expandedSize: expandedSize}, nil
+}
+
 func newPatchHeader(options CreateOptions, capacity int) patchformat.Header {
 	return patchformat.Header{
 		FormatVersion: patchformat.FormatVersion,
@@ -132,9 +227,9 @@ func newPatchHeader(options CreateOptions, capacity int) patchformat.Header {
 		Comment:       options.Comment,
 		HashAlgorithm: hashutil.Algorithm,
 		Compression: patchformat.Compression{
-			Algorithm: "zstd",
+			Algorithm: patchformat.AlgorithmHybrid,
 			Library:   zstd.Version(),
-			Mode:      "patch-from",
+			Mode:      patchformat.CompressionHybridV2,
 			Level:     options.CompressionLevel,
 		},
 		Reverse: options.CreateReverse,

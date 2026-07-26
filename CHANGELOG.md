@@ -5,6 +5,44 @@ Versioning once the `.vipr` format is declared stable.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-26
+
+### Added
+
+- VIPR format version 2 with automatic `zstd-sparse`, `zstd-copy-add`, and
+  `zstd-replace` payload selection.
+- Content-defined chunking and compressed COPY/ADD streams for fast application
+  across insertions, deletions, and moved unchanged regions.
+- Handle-based reusable native zstd decoders and positional patch reads safe for
+  parallel workers.
+- Automatic parallel output preparation in the patcher, with an optional CLI
+  `--parallel` limit.
+- Version 1 read compatibility and dedicated v2 method-selection, reverse, and
+  parallel-application tests.
+
+### Changed
+
+- Patch files are parsed and SHA-256 hashed in one sequential pass.
+- Installed source files are opened directly instead of copied to application
+  snapshots.
+- Generated output is SHA-256 hashed during decompression or sparse
+  reconstruction instead of being reread afterward.
+- Patch application prepares independent files in parallel and commits them
+  sequentially through the existing rollback transaction.
+- Temporary application files no longer use redundant `fsync` calls.
+- Creator snapshots no longer rehash their source after copying or synchronize
+  disposable snapshot files.
+- Files with little reusable source content use standalone replacement frames
+  instead of paying patch-from reference-search overhead.
+- Creator disk-space estimates account for sparse and COPY/ADD instruction candidates.
+
+### Removed
+
+- Application patch snapshots, installed-file snapshots, redundant full-file
+  hash passes, and the dead helpers used only by those paths.
+- The slow/paranoid application path; the handle-based fast path is now the only
+  implementation.
+
 ## [0.3.0] - 2026-07-26
 
 ### Added

@@ -2,108 +2,95 @@
 
 ## Executables
 
-`cmd/creator` and `cmd/patcher` are intentionally thin. They select GUI or CLI
-mode and delegate all business logic to internal packages.
+`cmd/creator` and `cmd/patcher` are thin entry points. CLI and GUI layers delegate
+all patch logic to `internal/patch`; `internal/patchformat` owns the container and
+`internal/zstd` is the only cgo boundary.
 
-- `internal/cli`: deterministic command-line parsing and terminal progress.
-- `internal/gui`: Fyne desktop interfaces, native-dialog adapters, shared
-  branding, and small synchronized state models.
-- `internal/patch`: creation, inspection, immutable snapshots, and transactional
-  application.
-- `internal/patchformat`: versioned `.vipr` container serialization.
-- `internal/zstd`: the only cgo boundary and native streaming implementation.
-- `internal/pathutil`: common-root calculation and traversal-safe path joining.
-- `internal/hashutil`: SHA-256 file integrity.
-- `internal/progress`: typed operation stages and progress events.
-
-The creator CLI accepts repeatable `--file-pair <source>::<target>` options. A
-single `patch.FilePair` value carries each association from CLI or GUI parsing to
-the creation core. The output `.vipr` path is the single final positional
-argument, so every option must precede that path. The patcher CLI keeps its
-target directory as its final positional argument. GUI file selection prefers
-native operating-system dialogs and falls back to Fyne when no native provider
-is available.
+The patcher CLI applies directly through one application session instead of
+performing a complete inspection pass followed by a second validation pass. The
+GUI may still call `Inspect` to present readiness before the user starts an
+operation.
 
 ## Patch creation
 
-`patch.Create` is a short orchestration function. Its implementation is split
-into explicit phases:
+`patch.Create` uses these phases:
 
-1. `createPlanFromOptions` validates every `FilePair`, resolves source paths, and
-   derives the source-relative installation paths.
-2. `snapshotCreationInputs` copies source and target files into immutable
-   snapshots while checking identity, content, size, and replacement races.
-   Independent file pairs may use a bounded worker pool; one worker remains the
-   default.
-3. `compressCreationInputs` hashes metadata from those snapshots and produces
-   forward and optional reverse zstd frames, preserving deterministic archive
-   order even when independent files are processed concurrently.
-4. `assemblePatch` writes the strict header and frame blobs into a same-directory
-   temporary output.
-5. `Transaction` replaces an existing regular output only after verifying that
-   it has not changed since validation.
+1. validate file pairs and derive source-relative installation paths;
+2. copy source and target files into immutable creator snapshots while hashing
+   them during the copy;
+3. for equal-size files, try the cheap sequential sparse representation;
+4. otherwise build a deterministic content-defined COPY/ADD candidate and use
+   it when enough target bytes can be reused, falling back to `zstd-replace`;
+5. compress independent file payloads through a bounded worker pool while
+   preserving deterministic archive order;
+6. assemble a version 2 container in a same-directory temporary file and commit
+   it atomically.
 
-Target names and locations do not define installation paths. Source-relative
-paths are authoritative, as required by the format. Changes made to original
-files after snapshot creation cannot change the patch being assembled.
-
-## Patch inspection
-
-Inspection evaluates source and target states independently. `ValidationResult`
-contains `CanApplyForward` and `CanApplyReverse`, plus typed missing-file and
-file-issue details. A file may validly match both sides when source and target
-content is identical. Mixed source/target directories, non-regular files, and
-unknown content are reported separately. Permission metadata is deliberately
-excluded from readiness decisions so one patch remains portable across filesystems.
+Creator snapshots no longer perform a redundant second full content hash or an
+`fsync` on disposable temporary files. Identity, size, modification time, and
+path identity are checked after each copy.
 
 ## Patch application
 
-The patcher parses the selected patch through one stable file handle and records
-its SHA-256 digest. Application copies the patch into an immutable work snapshot
-and rejects a digest that differs from the inspected selection when the caller
-provides one, as both the GUI and CLI do. It then validates the private snapshot and opens the installation through
-`os.Root`, so all existing-file opens, temporary-file creation, verification,
-and transactional renames remain traversal-resistant and relative to one stable
-root handle.
+Application is optimized for one useful read and one useful write wherever the
+selected method permits it:
 
-For the selected direction, every installed reference file is copied into an
-immutable snapshot and compared directly with the required state. This replaces
-a redundant second full preflight while retaining the user-visible GUI/CLI
-preflight and the final transaction verification. Generated outputs are written
-through already-open same-directory handles, constrained to the declared
-decompressed size, and checked against expected size and SHA-256 hash. On Unix,
-the generated file retains the installed file's local permission bits; Windows
-does not attempt to reproduce Unix permission metadata.
+1. open the patch once, parse its header, and calculate its SHA-256 in the same
+   sequential pass;
+2. open each installed source through `os.Root` and keep the handle alive until
+   commit;
+3. prepare independent output files in parallel, with one reusable native zstd
+   decoder per worker;
+4. calculate output SHA-256 while bytes are produced instead of rereading the
+   generated file;
+5. commit prepared files sequentially through the rollback-capable transaction.
 
-A dedicated `Transaction` verifies each installed file again immediately before
-replacement. Original files are renamed to backups, prepared outputs are moved
-into place, and a later failure triggers a best-effort rollback. Replacement, rollback, cleanup, close, rename, remove, and local permission-
-preservation errors are preserved with `errors.Join` rather than silently discarded. A process crash or power loss
-can still interrupt the best-effort rollback because the transaction does not
-use a persistent recovery journal.
+Patch payload reads are positional (`pread` on POSIX and overlapped `ReadFile` on
+Windows), so parallel workers never share a file cursor. Source references are
+mapped directly from already-open handles; neither the patch nor installed files
+are copied into application snapshots.
 
-`os.Root` removes traversal and symlink-escape races from installation access,
-while path snapshots and repeated identity checks substantially reduce file-
-replacement time-of-check/time-of-use windows. A hostile process with write
-access to the same installation directory can still race individual filesystem
-entries between verification and rename; Viper-Patcher therefore continues to
-run with the invoking user's privileges and never treats the target directory as
-a privilege boundary.
+### Method-specific behavior
+
+- `zstd-sparse` reconstructs equal-size targets sequentially. Unchanged ranges
+  are copied from the source, replacement ranges come from the bounded operation
+  stream, and source plus target SHA-256 values are calculated in that pass.
+- `zstd-copy-add` validates the source once, then executes bounds-checked COPY
+  ranges and literal ADD data from a compressed operation stream. Content-defined
+  chunks keep matches stable across insertions and deletions.
+- `zstd-replace` validates the source once, then decodes a standalone frame while
+  hashing output blocks in the native-to-Go callback.
+- `zstd-patch-from` validates the source once, maps its open handle as the zstd
+  prefix, and hashes generated blocks during decompression.
+
+The fast path intentionally avoids disposable-file `fsync` calls and content
+rehashing immediately before rename. The transaction still verifies source
+identity, size, and modification time before replacement, renames originals to
+backups, commits prepared files, and performs best-effort rollback if a later
+rename fails. This is the only application mode; there is no slower paranoid
+snapshot mode.
 
 ## Native boundary
 
-Native code is divided by responsibility:
+Native code is split by responsibility:
 
-- `native_internal.h`: shared declarations and platform abstractions.
-- `native_common.c`: version checks, parameters, and error helpers.
-- `native_io.c`: mapping, seek, read, write, and platform-specific file handling.
-- `native_compress.c`: patch-from compression.
-- `native_decompress.c`: bounded segment decompression.
+- `native_internal.h`: shared declarations and platform abstractions;
+- `native_common.c`: version checks, parameters, and error helpers;
+- `native_io.c`: path access, handle duplication, mapping, and positional reads;
+- `native_compress.c`: patch-from and standalone compression;
+- `native_decompress.c`: reusable decoder contexts and bounded segment decoding.
 
-The reference file is memory-mapped while target and patch streams use bounded
-buffers. This mirrors zstd's patch-from approach without loading target files or
-patch frames completely into Go memory. The wrapper pins libzstd to exactly
-1.5.7 and fails fast when a system-linked development build uses another
-version. Differential intervals must be contiguous from the data offset to the
-physical end of the container, preventing hidden or unreferenced payload data.
-The decompressor checks the declared output boundary before every write.
+Each decoder owns one `ZSTD_DCtx` and reusable 1 MiB input/output buffers. Output
+blocks are synchronously exposed to Go for hashing and throttled progress. The
+wrapper remains pinned to libzstd 1.5.7.
+
+## Integrity and security boundary
+
+All patch and file hashes remain SHA-256. Format ranges, decompressed sizes,
+sparse and COPY/ADD instructions, portable paths, and symbolic-link traversal are validated.
+`os.Root` keeps installation operations relative to one stable root handle.
+
+The target directory is not treated as a privilege boundary. A hostile process
+with write access can still race file contents between preparation and commit;
+the fast design detects replacement, size, and modification-time changes but no
+longer performs another full content hash at commit.

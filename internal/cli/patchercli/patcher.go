@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"runtime"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/buildinfo"
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
@@ -17,10 +18,12 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.SetOutput(io.Discard)
 	var patchFile string
 	var reverse bool
+	var parallelism int
 	var help bool
 	var version bool
 	flags.StringVar(&patchFile, "patch-file", "", "input .vipr patch")
 	flags.BoolVar(&reverse, "reverse", false, "apply reverse differentials")
+	flags.IntVar(&parallelism, "parallel", runtime.NumCPU(), "number of files prepared in parallel")
 	flags.Bool("headless", false, "force command-line mode")
 	flags.BoolVar(&help, "help", false, "show help")
 	flags.BoolVar(&version, "version", false, "show version")
@@ -48,36 +51,25 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		printUsage(stderr)
 		return 2
 	}
-
-	parsed, patchDigest, err := patch.OpenWithDigest(patchFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "Patch validation failed: %v\n", err)
-		return 1
+	if parallelism < 1 || parallelism > runtime.NumCPU() {
+		fmt.Fprintf(stderr, "Error: --parallel must be between 1 and %d.\n", runtime.NumCPU())
+		return 2
 	}
+
 	direction := patch.Forward
 	if reverse {
 		direction = patch.Reverse
 	}
-	validation, err := patch.Inspect(flags.Arg(0), parsed)
-	if err != nil {
-		fmt.Fprintf(stderr, "File validation failed: %v\n", err)
-		return 1
-	}
-	if !validation.Ready(direction) {
-		fmt.Fprintf(stderr, "Cannot apply %s patch: %v\n", direction, validation.ErrorFor(direction))
-		return 1
-	}
-
 	reporter := newTerminalProgress(stderr)
 	applyError := patch.ApplyWithOptions(ctx, patch.ApplyOptions{
-		PatchPath:         patchFile,
-		Root:              flags.Arg(0),
-		Direction:         direction,
-		ExpectedPatchHash: patchDigest,
+		PatchPath:   patchFile,
+		Root:        flags.Arg(0),
+		Direction:   direction,
+		Parallelism: parallelism,
 	}, reporter.Report)
 	reporter.Finish()
 	if applyError != nil && !patch.IsCommittedWarning(applyError) {
-		fmt.Fprintf(stderr, "Patch operation failed: %v\n", applyError)
+		fmt.Fprintf(stderr, "Patch validation failed: %v\n", applyError)
 		return 1
 	}
 	fmt.Fprintf(stdout, "%s patch applied successfully.\n", direction)
@@ -96,6 +88,7 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  --patch-file <file.vipr>       Required.")
 	fmt.Fprintln(writer, "  <target-directory>            Required positional argument.")
 	fmt.Fprintln(writer, "  [--reverse]                   Default: false.")
+	fmt.Fprintln(writer, "  [--parallel <count>]          Parallel file preparation. Default: logical CPU count.")
 	fmt.Fprintln(writer, "  [--headless]                  Force CLI mode.")
 	fmt.Fprintln(writer, "  [--version]                   Show version information.")
 	fmt.Fprintln(writer, "  [--help]                      Show this help.")

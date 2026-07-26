@@ -37,7 +37,7 @@ func EstimateCreate(options CreateOptions) (CreateEstimate, error) {
 		if estimate.SnapshotBytes, err = addEstimate(estimate.SnapshotBytes, sourceSize, targetSize); err != nil {
 			return CreateEstimate{}, err
 		}
-		forwardBound, err := compressionBoundEstimate(targetSize)
+		forwardBound, err := differentialWorkBound(sourceSize, targetSize)
 		if err != nil {
 			return CreateEstimate{}, err
 		}
@@ -45,7 +45,7 @@ func EstimateCreate(options CreateOptions) (CreateEstimate, error) {
 			return CreateEstimate{}, err
 		}
 		if options.CreateReverse {
-			reverseBound, err := compressionBoundEstimate(sourceSize)
+			reverseBound, err := differentialWorkBound(targetSize, sourceSize)
 			if err != nil {
 				return CreateEstimate{}, err
 			}
@@ -53,7 +53,7 @@ func EstimateCreate(options CreateOptions) (CreateEstimate, error) {
 				return CreateEstimate{}, err
 			}
 		}
-		if headerBytes, err = addEstimate(headerBytes, uint64(len(pair.relativePath)), 1024); err != nil {
+		if headerBytes, err = addEstimate(headerBytes, uint64(len(pair.relativePath)), 1280); err != nil {
 			return CreateEstimate{}, err
 		}
 	}
@@ -85,9 +85,22 @@ func EstimateCreate(options CreateOptions) (CreateEstimate, error) {
 	return estimate, nil
 }
 
+func differentialWorkBound(_ uint64, targetSize uint64) (uint64, error) {
+	compressed, err := compressionBoundEstimate(targetSize)
+	if err != nil {
+		return 0, err
+	}
+	// Version 2 may temporarily hold one uncompressed sparse or COPY/ADD stream
+	// while its compressed payload is produced. Twice the target size plus one
+	// MiB safely covers operation metadata even for adversarial tiny records.
+	instructionRaw, err := addEstimate(targetSize, targetSize, 1<<20)
+	if err != nil {
+		return 0, err
+	}
+	return addEstimate(instructionRaw, compressed)
+}
+
 func compressionBoundEstimate(size uint64) (uint64, error) {
-	// This deliberately exceeds zstd's documented compression bound and leaves
-	// one MiB for frame metadata and future format overhead.
 	return addEstimate(size, size/128, 1<<20)
 }
 

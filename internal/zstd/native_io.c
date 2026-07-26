@@ -1,3 +1,7 @@
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "native_internal.h"
 
 #include <errno.h>
@@ -55,18 +59,8 @@ static FILE *vipr_fopen_utf8(const char *path, const wchar_t *mode) {
     return file;
 }
 
-FILE *vipr_open_read(const char *path) {
-    return vipr_fopen_utf8(path, L"rb");
-}
-
-FILE *vipr_open_write(const char *path) {
-    return vipr_fopen_utf8(path, L"wb");
-}
-
-FILE *vipr_open_write_handle(uintptr_t handle_value) {
+static HANDLE vipr_duplicate_handle(uintptr_t handle_value) {
     HANDLE duplicate = NULL;
-    int descriptor;
-    FILE *file;
     if (!DuplicateHandle(
             GetCurrentProcess(),
             (HANDLE)handle_value,
@@ -78,17 +72,39 @@ FILE *vipr_open_write_handle(uintptr_t handle_value) {
         errno = EIO;
         return NULL;
     }
-    descriptor = _open_osfhandle((intptr_t)duplicate, _O_BINARY | _O_WRONLY);
+    return duplicate;
+}
+
+static FILE *vipr_open_handle(uintptr_t handle_value, int flags, const char *mode) {
+    HANDLE duplicate = vipr_duplicate_handle(handle_value);
+    int descriptor;
+    FILE *file;
+    if (duplicate == NULL) {
+        return NULL;
+    }
+    descriptor = _open_osfhandle((intptr_t)duplicate, _O_BINARY | flags);
     if (descriptor < 0) {
         CloseHandle(duplicate);
         return NULL;
     }
-    file = _fdopen(descriptor, "wb");
+    file = _fdopen(descriptor, mode);
     if (file == NULL) {
         _close(descriptor);
         return NULL;
     }
     return file;
+}
+
+FILE *vipr_open_read(const char *path) {
+    return vipr_fopen_utf8(path, L"rb");
+}
+
+FILE *vipr_open_write(const char *path) {
+    return vipr_fopen_utf8(path, L"wb");
+}
+
+FILE *vipr_open_write_handle(uintptr_t handle_value) {
+    return vipr_open_handle(handle_value, _O_WRONLY, "wb");
 }
 #else
 FILE *vipr_open_read(const char *path) {
@@ -99,32 +115,63 @@ FILE *vipr_open_write(const char *path) {
     return fopen(path, "wb");
 }
 
-FILE *vipr_open_write_handle(uintptr_t handle_value) {
+static FILE *vipr_open_handle(uintptr_t handle_value, const char *mode) {
     int descriptor = dup((int)handle_value);
     FILE *file;
     if (descriptor < 0) {
         return NULL;
     }
-    file = fdopen(descriptor, "wb");
+    file = fdopen(descriptor, mode);
     if (file == NULL) {
         close(descriptor);
         return NULL;
     }
     return file;
 }
+
+FILE *vipr_open_write_handle(uintptr_t handle_value) {
+    return vipr_open_handle(handle_value, "wb");
+}
 #endif
 
-int vipr_seek(FILE *file, uint64_t offset) {
+int vipr_read_at(uintptr_t handle_value, uint64_t offset, void *buffer, size_t size, size_t *read_size) {
+    if (read_size == NULL || (size > 0 && buffer == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    *read_size = 0;
 #if defined(_WIN32)
-    if (offset > (uint64_t)LLONG_MAX) {
-        return -1;
+    {
+        OVERLAPPED overlapped;
+        DWORD requested;
+        DWORD completed = 0;
+        if (size > (size_t)DWORD_MAX) {
+            requested = DWORD_MAX;
+        } else {
+            requested = (DWORD)size;
+        }
+        memset(&overlapped, 0, sizeof(overlapped));
+        overlapped.Offset = (DWORD)(offset & 0xffffffffU);
+        overlapped.OffsetHigh = (DWORD)(offset >> 32);
+        if (!ReadFile((HANDLE)handle_value, buffer, requested, &completed, &overlapped)) {
+            errno = EIO;
+            return -1;
+        }
+        *read_size = (size_t)completed;
+        return 0;
     }
-    return _fseeki64(file, (__int64)offset, SEEK_SET);
 #else
-    if (offset > (uint64_t)LLONG_MAX) {
-        return -1;
+    {
+        ssize_t result;
+        do {
+            result = pread((int)handle_value, buffer, size, (off_t)offset);
+        } while (result < 0 && errno == EINTR);
+        if (result < 0) {
+            return -1;
+        }
+        *read_size = (size_t)result;
+        return 0;
     }
-    return fseeko(file, (off_t)offset, SEEK_SET);
 #endif
 }
 
@@ -228,8 +275,99 @@ int vipr_map_file(const char *path, vipr_mapped_file *mapped, char *error_buffer
     return 0;
 }
 
+int vipr_map_handle(uintptr_t handle_value, vipr_mapped_file *mapped, char *error_buffer, uint64_t error_buffer_size) {
+    memset(mapped, 0, sizeof(*mapped));
+#if defined(_WIN32)
+    {
+        LARGE_INTEGER size;
+        HANDLE file = vipr_duplicate_handle(handle_value);
+        if (file == NULL) {
+            vipr_set_errno_error(error_buffer, error_buffer_size, "duplicate reference handle");
+            return -1;
+        }
+        if (!GetFileSizeEx(file, &size) || size.QuadPart < 0) {
+            CloseHandle(file);
+            vipr_set_error(error_buffer, error_buffer_size, "inspect reference handle failed");
+            return -1;
+        }
+        mapped->file = file;
+        mapped->size = (uint64_t)size.QuadPart;
+        if (mapped->size == 0) {
+            return 0;
+        }
+        if (mapped->size > (uint64_t)SIZE_MAX) {
+            CloseHandle(file);
+            mapped->file = NULL;
+            vipr_set_error(error_buffer, error_buffer_size, "reference file is too large for this architecture's address space");
+            return -1;
+        }
+        mapped->mapping = CreateFileMappingA(file, NULL, PAGE_READONLY, 0, 0, NULL);
+        if (mapped->mapping == NULL) {
+            CloseHandle(file);
+            mapped->file = NULL;
+            vipr_set_error(error_buffer, error_buffer_size, "create reference handle mapping failed");
+            return -1;
+        }
+        mapped->data = MapViewOfFile((HANDLE)mapped->mapping, FILE_MAP_READ, 0, 0, 0);
+        if (mapped->data == NULL) {
+            CloseHandle((HANDLE)mapped->mapping);
+            CloseHandle(file);
+            mapped->mapping = NULL;
+            mapped->file = NULL;
+            vipr_set_error(error_buffer, error_buffer_size, "map reference handle failed");
+            return -1;
+        }
+    }
+#else
+    {
+        struct stat info;
+        int file = dup((int)handle_value);
+        if (file < 0) {
+            vipr_set_errno_error(error_buffer, error_buffer_size, "duplicate reference descriptor");
+            return -1;
+        }
+        mapped->file = file;
+        if (fstat(file, &info) != 0 || info.st_size < 0) {
+            close(file);
+            mapped->file = -1;
+            vipr_set_errno_error(error_buffer, error_buffer_size, "inspect reference descriptor");
+            return -1;
+        }
+        mapped->size = (uint64_t)info.st_size;
+        if (mapped->size == 0) {
+            return 0;
+        }
+        if (mapped->size > (uint64_t)SIZE_MAX) {
+            close(file);
+            mapped->file = -1;
+            vipr_set_error(error_buffer, error_buffer_size, "reference file is too large for this architecture's address space");
+            return -1;
+        }
+        mapped->data = mmap(NULL, (size_t)mapped->size, PROT_READ, MAP_PRIVATE, file, 0);
+        if (mapped->data == MAP_FAILED) {
+            mapped->data = NULL;
+            close(file);
+            mapped->file = -1;
+            vipr_set_errno_error(error_buffer, error_buffer_size, "map reference descriptor");
+            return -1;
+        }
+    }
+#endif
+    return 0;
+}
+
 void vipr_unmap_file(vipr_mapped_file *mapped) {
     if (mapped->size == 0) {
+#if defined(_WIN32)
+        if (mapped->file != NULL) {
+            CloseHandle((HANDLE)mapped->file);
+        }
+#else
+        if (mapped->file >= 0) {
+            close(mapped->file);
+        }
+#endif
+        memset(mapped, 0, sizeof(*mapped));
         return;
     }
 #if defined(_WIN32)
@@ -251,4 +389,7 @@ void vipr_unmap_file(vipr_mapped_file *mapped) {
     }
 #endif
     memset(mapped, 0, sizeof(*mapped));
+#if !defined(_WIN32)
+    mapped->file = -1;
+#endif
 }

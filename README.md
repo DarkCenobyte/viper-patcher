@@ -24,13 +24,14 @@ available, the application prints a warning and falls back to CLI mode.
 ## Key properties
 
 - Exact libzstd **1.5.7** dependency, statically linked in release builds.
-- Patch-from behavior implemented directly through libzstd's advanced API.
-- Dynamic per-file compression parameters based on reference and target size.
+- VIPR format version 2 with automatic sparse, general COPY/ADD, and replacement methods.
+- Content-defined chunking keeps COPY/ADD patches effective across insertions and deletions.
 - Ordered multi-file patches with explicit source/target file pairs.
-- SHA-256 source and target integrity metadata.
+- SHA-256 source, target, and patch integrity validation.
 - Optional reverse differential for every file.
-- Strict, versioned, and bounds-checked `.vipr` container.
-- Immutable creation and application snapshots.
+- Strict, versioned, bounds-checked `.vipr` container with version 1 read compatibility.
+- Immutable creator snapshots and handle-based fast application.
+- Automatic parallel output preparation with positional patch reads.
 - Traversal-resistant installation access with `os.Root`.
 - Transactional file replacement with best-effort rollback and explicit post-commit warnings.
 - File-level and byte-level progress reporting.
@@ -143,9 +144,9 @@ Selecting a target directory triggers a complete preflight:
   patch remains usable across supported operating systems.
 
 Patch and directory selections are locked while an operation is running. The
-operation uses captured selections rather than mutable GUI state and rejects a
-patch whose SHA-256 digest changed after the displayed preflight inspection. The
-CLI binds inspection and application to the same digest as well.
+operation uses captured selections and rejects a patch whose SHA-256 digest
+changed after the displayed GUI preflight. The application core then prepares
+files through the same handle-based fast path used by the CLI.
 
 ## Patcher CLI
 
@@ -167,32 +168,36 @@ Supported parameters:
 --patch-file <file.vipr>      Required.
 <target-directory>            Required positional argument.
 [--reverse]                   Default: false.
+[--parallel <count>]          Parallel file preparation. Default: logical CPU count.
 [--headless]                  Force CLI mode.
 [--version]                   Show version information.
 [--help]                      Show help.
 ```
 
-## Patch-from implementation
+The CLI opens and hashes the patch once and does not run a separate full-file
+inspection pass before application.
 
-Viper Patcher does not invoke an external `zstd` executable. Its small cgo
-wrapper applies the same core configuration used by zstd 1.5.7 patch-from mode:
+## Hybrid version 2 implementation
 
-- Compression parameters are derived from target and reference sizes.
-- Window size is adjusted dynamically per file.
-- Long-distance matching is enabled when required by the effective window.
-- Dedicated dictionary search is enabled.
-- The source file is attached with `ZSTD_CCtx_refPrefix`.
-- Application attaches the current file with `ZSTD_DCtx_refPrefix`.
-- Target content size and checksum are stored in each zstd frame.
-- Decompression stops before writing beyond the size declared by the VIPR
-  header.
+Viper Patcher does not invoke an external `zstd` executable. Version 2 selects a
+method independently for each file and direction:
 
-Reference files are memory-mapped. Target, patch, and output data are streamed
-through bounded buffers, allowing detailed progress for large files. Patched
-outputs are written through handles created beneath one traversal-resistant
-installation root, avoiding a close-and-reopen race on temporary paths. Native
-platform I/O, compression, decompression, and common error handling are kept in
-separate C translation units.
+- `zstd-sparse` stores a compressed COPY/ADD instruction stream for equal-size
+  files with relatively few changes.
+- `zstd-replace` stores a standalone frame for equal-size files with little
+  useful similarity.
+- `zstd-patch-from` keeps libzstd patch-from behavior as the general fallback
+  when file sizes differ.
+
+Application opens the patch and installed source files once. Native workers use
+positional reads, reusable zstd contexts, and bounded 1 MiB buffers. Output
+SHA-256 is calculated while decompressed blocks are written. Sparse application
+calculates source and target SHA-256 values while it copies unchanged ranges and
+writes replacements. Generated files are committed atomically only after all
+workers finish successfully.
+
+Version 1 patches remain readable and normalize missing method fields to
+`zstd-patch-from`. Version 2 is documented in [VIPR format](docs/FORMAT.md).
 
 ## Building
 
@@ -237,11 +242,12 @@ make check
 
 The repository includes unit, integration, race, fuzz, native sanitizer, and
 vulnerability-reachability checks for path normalization, container parsing,
-malformed metadata, CLI validation, zstd streaming, immutable snapshots,
-transaction rollback, GUI state models, patch creation, forward application,
-reverse application, preflight states, output replacement, and integrity
-checks. CI enforces at least 80% statement coverage across the non-GUI core and
-compiles the complete GUI executables. See [Testing strategy](docs/TESTING.md).
+version 1 compatibility, version 2 method selection, malformed sparse and COPY/ADD streams,
+CLI validation, zstd streaming, parallel positional reads, transaction rollback,
+GUI state models, patch creation, forward application, reverse application,
+preflight states, output replacement, and SHA-256 integrity. CI enforces at
+least 80% statement coverage across the non-GUI core and compiles the complete
+GUI executables. See [Testing strategy](docs/TESTING.md).
 
 ## GitHub Actions
 
@@ -266,9 +272,9 @@ release tags, and future code-signing insertion points.
 | Linux | arm64 | Yes |
 | macOS | arm64 | Yes |
 
-A 32-bit process has a much smaller virtual address space. Because the reference
-file is memory-mapped for patch-from matching, x86 builds should not be used for
-very large reference files.
+A 32-bit process has a much smaller virtual address space. Patch-from reference
+files are memory-mapped, so x86 builds should not be used for very large
+references. Sparse, COPY/ADD, and replacement methods do not map a reference file.
 
 ## Documentation
 
