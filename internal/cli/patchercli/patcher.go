@@ -17,12 +17,11 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.SetOutput(io.Discard)
 	var patchFile string
 	var reverse bool
-	var headless bool
 	var help bool
 	var version bool
 	flags.StringVar(&patchFile, "patch-file", "", "input .vipr patch")
 	flags.BoolVar(&reverse, "reverse", false, "apply reverse differentials")
-	flags.BoolVar(&headless, "headless", false, "force command-line mode")
+	flags.Bool("headless", false, "force command-line mode")
 	flags.BoolVar(&help, "help", false, "show help")
 	flags.BoolVar(&version, "version", false, "show version")
 

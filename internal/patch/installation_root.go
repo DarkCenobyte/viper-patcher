@@ -12,7 +12,6 @@ import (
 )
 
 type installationRoot struct {
-	path string
 	root *os.Root
 }
 
@@ -50,7 +49,7 @@ func openInstallationRoot(path string) (*installationRoot, error) {
 			wrapOperationError("close", absolute, closeError),
 		)
 	}
-	return &installationRoot{path: absolute, root: root}, nil
+	return &installationRoot{root: root}, nil
 }
 
 func (root *installationRoot) Close() error {

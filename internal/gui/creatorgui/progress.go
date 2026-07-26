@@ -17,8 +17,6 @@ func integerOptions(minimum, maximum int) []string {
 
 func creatorProgressText(event progress.Event) string {
 	switch event.Stage {
-	case progress.StagePreparing:
-		return "Preparing patch..."
 	case progress.StageSnapshotting:
 		return fmt.Sprintf("[%d/%d] Snapshotting inputs: %s", event.FileIndex, event.FileCount, event.Path)
 	case progress.StageCompressingForward:
@@ -27,8 +25,6 @@ func creatorProgressText(event progress.Event) string {
 		return fmt.Sprintf("[%d/%d] Creating reverse differential: %s", event.FileIndex, event.FileCount, event.Path)
 	case progress.StageFilePrepared:
 		return fmt.Sprintf("[%d/%d] Differential prepared: %s", event.FileIndex, event.FileCount, event.Path)
-	case progress.StageFileCompleted:
-		return fmt.Sprintf("[%d/%d] Committed: %s", event.FileIndex, event.FileCount, event.Path)
 	case progress.StageCompleted:
 		return "Finalizing patch..."
 	default:
@@ -54,11 +50,11 @@ func creatorOverallProgress(event progress.Event, includeReverse bool) float64 {
 		completedUnits++
 	case progress.StageCompressingReverse:
 		completedUnits += 2
-	case progress.StageFilePrepared, progress.StageFileCompleted:
+	case progress.StageFilePrepared:
 		completedUnits += unitsPerFile
 	}
 	fraction := 0.0
-	if event.Stage != progress.StageFilePrepared && event.Stage != progress.StageFileCompleted && event.TotalBytes > 0 {
+	if event.Stage != progress.StageFilePrepared && event.TotalBytes > 0 {
 		fraction = float64(event.ProcessedBytes) / float64(event.TotalBytes)
 	}
 	value := (float64(completedUnits) + fraction) / float64(event.FileCount*unitsPerFile)

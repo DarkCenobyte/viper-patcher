@@ -43,7 +43,6 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	var reverse bool
 	var workDirectory string
 	var parallelism int
-	var headless bool
 	var help bool
 	var version bool
 	flags.Var(&pairs, "file-pair", "source and target pair; repeat for each file")
@@ -52,7 +51,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.BoolVar(&reverse, "create-reverse", false, "include reverse differentials")
 	flags.StringVar(&workDirectory, "work-directory", "", "parent directory for temporary creator data")
 	flags.IntVar(&parallelism, "parallel", 1, "number of files processed in parallel")
-	flags.BoolVar(&headless, "headless", false, "force command-line mode")
+	flags.Bool("headless", false, "force command-line mode")
 	flags.BoolVar(&help, "help", false, "show help")
 	flags.BoolVar(&version, "version", false, "show version")
 

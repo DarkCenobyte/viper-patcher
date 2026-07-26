@@ -90,9 +90,8 @@ func Inspect(rootPath string, parsed patchformat.Patch) (result ValidationResult
 			continue
 		}
 		result.Issues = append(result.Issues, FileIssue{
-			Path:       entry.Path,
-			Reason:     IssueHashMismatch,
-			ActualHash: digest,
+			Path:   entry.Path,
+			Reason: IssueHashMismatch,
 		})
 	}
 

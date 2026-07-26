@@ -93,9 +93,8 @@ const (
 
 // FileIssue records one existing file that does not match an expected state.
 type FileIssue struct {
-	Path       string
-	Reason     IssueReason
-	ActualHash string
+	Path   string
+	Reason IssueReason
 }
 
 // ValidationResult describes which patch directions can be applied safely.
