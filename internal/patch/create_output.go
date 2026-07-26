@@ -98,6 +98,17 @@ func wrapOperationError(operation, path string, err error) error {
 	return fmt.Errorf("%s %q: %w", operation, path, err)
 }
 
+func wrapRootRemoveError(root *os.Root, path string) error {
+	if path == "" {
+		return nil
+	}
+	err := root.Remove(path)
+	if err == nil || os.IsNotExist(err) {
+		return nil
+	}
+	return fmt.Errorf("remove temporary output %q: %w", path, err)
+}
+
 func replaceRootOutput(root *os.Root, source, destination string) error {
 	info, err := root.Lstat(destination)
 	if os.IsNotExist(err) {
