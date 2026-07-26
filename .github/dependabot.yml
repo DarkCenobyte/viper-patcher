@@ -4,15 +4,58 @@ updates:
     directory: /
     schedule:
       interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      prefix: deps(go)
     groups:
-      go-dependencies:
+      fyne-stack:
+        patterns:
+          - "fyne.io/*"
+          - "github.com/fyne-io/*"
+          - "github.com/go-gl/*"
+          - "github.com/go-text/*"
+      golang-x:
+        patterns:
+          - "golang.org/x/*"
+      go-test-tooling:
+        patterns:
+          - "github.com/stretchr/testify"
+          - "github.com/davecgh/go-spew"
+          - "github.com/pmezard/go-difflib"
+      other-go-dependencies:
         patterns:
           - "*"
+        exclude-patterns:
+          - "fyne.io/*"
+          - "github.com/fyne-io/*"
+          - "github.com/go-gl/*"
+          - "github.com/go-text/*"
+          - "golang.org/x/*"
+          - "github.com/stretchr/testify"
+          - "github.com/davecgh/go-spew"
+          - "github.com/pmezard/go-difflib"
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: deps(actions)
     groups:
-      github-actions:
+      official-actions:
+        patterns:
+          - "actions/*"
+      third-party-actions:
         patterns:
           - "*"
+        exclude-patterns:
+          - "actions/*"
