@@ -6,7 +6,7 @@ toolchain go1.26.5
 
 require (
 	fyne.io/fyne/v2 v2.8.0
-	golang.org/x/text v0.38.0
+	golang.org/x/text v0.40.0
 )
 
 require (
