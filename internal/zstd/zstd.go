@@ -10,14 +10,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"runtime/cgo"
 	"unsafe"
+
+	"github.com/DarkCenobyte/viper-patcher/internal/zstdversion"
 )
 
 const (
 	errorBufferSize = 1024
-	ExpectedVersion = "1.5.7"
+	ExpectedVersion = zstdversion.Version
 )
 
 // ProgressFunc reports processed and total bytes for one native operation.
@@ -45,9 +48,7 @@ func CompressionLevelRange() (int, int) {
 	return int(C.vipr_zstd_min_level()), int(C.vipr_zstd_max_level())
 }
 
-// CompressFile creates a zstd patch-from frame from reference to target. An
-// empty reference file produces a regular standalone zstd frame.
-func CompressFile(referencePath, targetPath, outputPath string, level int, callback ProgressFunc) error {
+func validateCompressionLevel(level int) error {
 	if err := RequireExpectedVersion(); err != nil {
 		return err
 	}
@@ -55,24 +56,37 @@ func CompressFile(referencePath, targetPath, outputPath string, level int, callb
 	if level < minimum || level > maximum {
 		return fmt.Errorf("compression level %d is outside supported range %d..%d", level, minimum, maximum)
 	}
+	return nil
+}
 
-	referenceCString := C.CString(referencePath)
-	targetCString := C.CString(targetPath)
+func nativeErrorBuffer() (unsafe.Pointer, error) {
+	buffer := C.calloc(1, C.size_t(errorBufferSize))
+	if buffer == nil {
+		return nil, fmt.Errorf("allocate native error buffer")
+	}
+	return buffer, nil
+}
+
+// CompressFile creates one standalone zstd frame from inputPath.
+func CompressFile(inputPath, outputPath string, level int, callback ProgressFunc) error {
+	if err := validateCompressionLevel(level); err != nil {
+		return err
+	}
+
+	inputCString := C.CString(inputPath)
 	outputCString := C.CString(outputPath)
-	errorBuffer := C.calloc(1, C.size_t(errorBufferSize))
-	defer C.free(unsafe.Pointer(referenceCString))
-	defer C.free(unsafe.Pointer(targetCString))
+	errorBuffer, err := nativeErrorBuffer()
+	defer C.free(unsafe.Pointer(inputCString))
 	defer C.free(unsafe.Pointer(outputCString))
-	if errorBuffer == nil {
-		return fmt.Errorf("allocate native error buffer")
+	if err != nil {
+		return err
 	}
 	defer C.free(errorBuffer)
 
 	handle := newProgressHandle(callback)
 	defer handle.Delete()
 	result := C.vipr_compress_file(
-		referenceCString,
-		targetCString,
+		inputCString,
 		outputCString,
 		C.int(level),
 		C.uintptr_t(handle),
@@ -80,7 +94,47 @@ func CompressFile(referencePath, targetPath, outputPath string, level int, callb
 		errorBufferSize,
 	)
 	if result != 0 {
-		return fmt.Errorf("zstd patch creation failed: %s", C.GoString((*C.char)(errorBuffer)))
+		return fmt.Errorf("zstd compression failed: %s", C.GoString((*C.char)(errorBuffer)))
+	}
+	return nil
+}
+
+// CompressFileSegment creates one standalone zstd frame from a positional
+// segment of an already-open file. The input cursor is never modified, so
+// independent segments may be compressed concurrently from the same handle.
+func CompressFileSegment(input *os.File, offset, length uint64, outputPath string, level int, callback ProgressFunc) error {
+	if input == nil {
+		return fmt.Errorf("compression input file is required")
+	}
+	if offset > math.MaxInt64 || length > math.MaxInt64-offset {
+		return fmt.Errorf("compression input segment exceeds the supported signed 64-bit range")
+	}
+	if err := validateCompressionLevel(level); err != nil {
+		return err
+	}
+
+	outputCString := C.CString(outputPath)
+	errorBuffer, err := nativeErrorBuffer()
+	defer C.free(unsafe.Pointer(outputCString))
+	if err != nil {
+		return err
+	}
+	defer C.free(errorBuffer)
+
+	handle := newProgressHandle(callback)
+	defer handle.Delete()
+	result := C.vipr_compress_segment(
+		C.uintptr_t(input.Fd()),
+		C.uint64_t(offset),
+		C.uint64_t(length),
+		outputCString,
+		C.int(level),
+		C.uintptr_t(handle),
+		(*C.char)(errorBuffer),
+		errorBufferSize,
+	)
+	if result != 0 {
+		return fmt.Errorf("zstd segment compression failed: %s", C.GoString((*C.char)(errorBuffer)))
 	}
 	return nil
 }
@@ -121,23 +175,21 @@ type decodeCallbacks struct {
 	err          error
 }
 
-// DecompressSegmentToFile applies one frame directly from already-open source
-// and patch handles to an already-open output handle. reference may be nil for
-// standalone zstd payloads. Output blocks are delivered to outputCallback while
-// still resident in the native buffer, allowing SHA-256 to be calculated during
-// the write pass.
-func (decoder *Decoder) DecompressSegmentToFile(ctx context.Context, reference, patch *os.File, offset, length uint64, output *os.File, expectedOutputSize uint64, callback ProgressFunc, outputCallback OutputFunc) error {
-	return decoder.decompressSegment(ctx, reference, patch, offset, length, output, expectedOutputSize, callback, outputCallback)
+// DecompressSegmentToFile decodes one standalone frame directly from an
+// already-open patch handle to an already-open output handle. Output blocks are
+// exposed synchronously so BLAKE3 can be calculated during the write pass.
+func (decoder *Decoder) DecompressSegmentToFile(ctx context.Context, patch *os.File, offset, length uint64, output *os.File, expectedOutputSize uint64, callback ProgressFunc, outputCallback OutputFunc) error {
+	return decoder.decompressSegment(ctx, patch, offset, length, output, expectedOutputSize, callback, outputCallback)
 }
 
-// DecompressSegmentToWriter streams one frame to writer without materializing an
-// intermediate file. Memory use remains bounded by the native decoder buffers and
-// the writer's own buffering.
-func (decoder *Decoder) DecompressSegmentToWriter(ctx context.Context, reference, patch *os.File, offset, length uint64, writer io.Writer, expectedOutputSize uint64, callback ProgressFunc) error {
+// DecompressSegmentToWriter streams one standalone frame to writer without
+// materializing an intermediate file. Memory use remains bounded by the native
+// decoder buffers and the writer's own buffering.
+func (decoder *Decoder) DecompressSegmentToWriter(ctx context.Context, patch *os.File, offset, length uint64, writer io.Writer, expectedOutputSize uint64, callback ProgressFunc) error {
 	if writer == nil {
 		return fmt.Errorf("decompressed output writer is required")
 	}
-	return decoder.decompressSegment(ctx, reference, patch, offset, length, nil, expectedOutputSize, callback, func(block []byte) error {
+	return decoder.decompressSegment(ctx, patch, offset, length, nil, expectedOutputSize, callback, func(block []byte) error {
 		written, err := writer.Write(block)
 		if err == nil && written != len(block) {
 			return io.ErrShortWrite
@@ -146,7 +198,7 @@ func (decoder *Decoder) DecompressSegmentToWriter(ctx context.Context, reference
 	})
 }
 
-func (decoder *Decoder) decompressSegment(ctx context.Context, reference, patch *os.File, offset, length uint64, output *os.File, expectedOutputSize uint64, callback ProgressFunc, outputCallback OutputFunc) error {
+func (decoder *Decoder) decompressSegment(ctx context.Context, patch *os.File, offset, length uint64, output *os.File, expectedOutputSize uint64, callback ProgressFunc, outputCallback OutputFunc) error {
 	if decoder == nil || decoder.native == nil {
 		return fmt.Errorf("zstd decoder is closed")
 	}
@@ -169,12 +221,6 @@ func (decoder *Decoder) decompressSegment(ctx context.Context, reference, patch 
 	}
 	defer C.free(errorBuffer)
 
-	var hasReference C.int
-	var referenceHandle C.uintptr_t
-	if reference != nil {
-		hasReference = 1
-		referenceHandle = C.uintptr_t(reference.Fd())
-	}
 	var writeOutput C.int
 	var outputHandle C.uintptr_t
 	if output != nil {
@@ -183,8 +229,6 @@ func (decoder *Decoder) decompressSegment(ctx context.Context, reference, patch 
 	}
 	result := C.vipr_decoder_decompress_segment(
 		decoder.native,
-		hasReference,
-		referenceHandle,
 		C.uintptr_t(patch.Fd()),
 		C.uint64_t(offset),
 		C.uint64_t(length),
@@ -199,7 +243,7 @@ func (decoder *Decoder) decompressSegment(ctx context.Context, reference, patch 
 		return callbacks.err
 	}
 	if result != 0 {
-		return fmt.Errorf("zstd patch application failed: %s", C.GoString((*C.char)(errorBuffer)))
+		return fmt.Errorf("zstd decompression failed: %s", C.GoString((*C.char)(errorBuffer)))
 	}
 	return nil
 }

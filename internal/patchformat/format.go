@@ -12,23 +12,23 @@ import (
 	"time"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/pathutil"
+	"github.com/DarkCenobyte/viper-patcher/internal/zstdversion"
 )
 
 var Magic = [8]byte{'V', 'I', 'P', 'R', '\r', '\n', 0x1a, 0x01}
 
 const (
-	LegacyFormatVersion  = 1
-	FormatVersion        = 2
+	FormatVersion        = 3
 	MaxHeaderSize        = 64 << 20
-	SupportedZstdVersion = "1.5.7"
-	CompressionPatchFrom = "patch-from"
-	CompressionHybridV2  = "hybrid-v2"
-	AlgorithmZstd        = "zstd"
+	HashBLAKE3Tree       = "blake3-tree-v1"
+	SupportedZstdVersion = zstdversion.Version
+	CompressionHybrid    = "hybrid-v3"
 	AlgorithmHybrid      = "hybrid"
-	MethodPatchFrom      = "zstd-patch-from"
 	MethodCopyAdd        = "zstd-copy-add"
 	MethodSparse         = "zstd-sparse"
 	MethodReplace        = "zstd-replace"
+	MethodChunkedReplace = "zstd-chunked-replace"
+	maxSignedFileSize    = uint64(^uint64(0) >> 1)
 )
 
 // Header describes a VIPR patch. Blob offsets are relative to DataOffset.
@@ -63,8 +63,6 @@ type FileEntry struct {
 	TargetHash            string `json:"targetHash"`
 	SourceSize            uint64 `json:"sourceSize"`
 	TargetSize            uint64 `json:"targetSize"`
-	SourceMode            uint32 `json:"sourceMode"`
-	TargetMode            uint32 `json:"targetMode"`
 	ForwardMethod         string `json:"forwardMethod,omitempty"`
 	ForwardOffset         uint64 `json:"forwardOffset"`
 	ForwardLength         uint64 `json:"forwardLength"`
@@ -74,35 +72,6 @@ type FileEntry struct {
 	ReverseLength         uint64 `json:"reverseLength,omitempty"`
 	ReverseExpandedLength uint64 `json:"reverseExpandedLength,omitempty"`
 }
-
-// ForwardDifferentialMethod returns the normalized forward method. Version 1
-// entries and early version 2 entries without an explicit method remain
-// compatible and use zstd patch-from.
-func (entry FileEntry) ForwardDifferentialMethod() string {
-	if entry.ForwardMethod == "" {
-		return MethodPatchFrom
-	}
-	return entry.ForwardMethod
-}
-
-// ReverseDifferentialMethod returns the normalized reverse method.
-func (entry FileEntry) ReverseDifferentialMethod() string {
-	if entry.ReverseMethod == "" {
-		return MethodPatchFrom
-	}
-	return entry.ReverseMethod
-}
-
-// ignoredFields lists legacy JSON fields that remain accepted for backward
-// compatibility but are intentionally discarded instead of being retained in
-// the parsed patch model.
-type ignoredFields struct {
-	TargetHint ignoredJSONValue `json:"targetHint"`
-}
-
-type ignoredJSONValue struct{}
-
-func (*ignoredJSONValue) UnmarshalJSON([]byte) error { return nil }
 
 // Patch provides parsed metadata and the absolute offset of the data section.
 type Patch struct {
@@ -165,18 +134,10 @@ func Decode(reader io.Reader) (Patch, error) {
 }
 
 func decodeHeader(payload []byte) (Header, error) {
-	type headerAlias Header
-	type fileEntryJSON struct {
-		FileEntry
-		ignoredFields
-	}
-	decoded := struct {
-		headerAlias
-		Files []fileEntryJSON `json:"files"`
-	}{}
+	var header Header
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&decoded); err != nil {
+	if err := decoder.Decode(&header); err != nil {
 		return Header{}, fmt.Errorf("decode patch header: %w", err)
 	}
 	var trailing any
@@ -186,41 +147,22 @@ func decodeHeader(payload []byte) (Header, error) {
 		}
 		return Header{}, fmt.Errorf("decode trailing patch header data: %w", err)
 	}
-	header := Header(decoded.headerAlias)
-	header.Files = make([]FileEntry, len(decoded.Files))
-	for index, entry := range decoded.Files {
-		header.Files[index] = entry.FileEntry
-	}
 	return header, nil
 }
 
 // ValidateHeader validates format-level invariants and blob metadata.
 func ValidateHeader(header Header) error {
-	if header.FormatVersion != LegacyFormatVersion && header.FormatVersion != FormatVersion {
+	if header.FormatVersion != FormatVersion {
 		return fmt.Errorf("unsupported VIPR format version %d", header.FormatVersion)
 	}
-	if header.HashAlgorithm != "sha256" {
+	if header.HashAlgorithm != HashBLAKE3Tree {
 		return fmt.Errorf("unsupported hash algorithm %q", header.HashAlgorithm)
 	}
-	if header.FormatVersion == LegacyFormatVersion && header.Compression.Algorithm != AlgorithmZstd {
-		return fmt.Errorf("unsupported version 1 compression algorithm %q", header.Compression.Algorithm)
+	if header.Compression.Algorithm != AlgorithmHybrid {
+		return fmt.Errorf("format 3 requires compression algorithm %q", AlgorithmHybrid)
 	}
-	if header.FormatVersion == FormatVersion {
-		switch header.Compression.Mode {
-		case CompressionHybridV2:
-			if header.Compression.Algorithm != AlgorithmHybrid {
-				return fmt.Errorf("version 2 hybrid mode requires algorithm %q", AlgorithmHybrid)
-			}
-		case CompressionPatchFrom:
-			if header.Compression.Algorithm != AlgorithmZstd {
-				return fmt.Errorf("version 2 patch-from mode requires algorithm %q", AlgorithmZstd)
-			}
-		default:
-			return fmt.Errorf("unsupported version 2 compression mode %q", header.Compression.Mode)
-		}
-	}
-	if header.FormatVersion == LegacyFormatVersion && header.Compression.Mode != CompressionPatchFrom {
-		return fmt.Errorf("unsupported version 1 compression mode %q", header.Compression.Mode)
+	if header.Compression.Mode != CompressionHybrid {
+		return fmt.Errorf("format 3 requires compression mode %q", CompressionHybrid)
 	}
 	if header.Compression.Library != SupportedZstdVersion {
 		return fmt.Errorf("unsupported libzstd version %q", header.Compression.Library)
@@ -239,45 +181,24 @@ func ValidateHeader(header Header) error {
 			return fmt.Errorf("duplicate, Unicode-equivalent, or case-colliding patch path %q", entry.Path)
 		}
 		seen[key] = struct{}{}
-		if !validSHA256(entry.SourceHash) || !validSHA256(entry.TargetHash) {
-			return fmt.Errorf("file entry %q has an invalid SHA-256 digest", entry.Path)
+		if !validDigest(entry.SourceHash) || !validDigest(entry.TargetHash) {
+			return fmt.Errorf("file entry %q has an invalid 256-bit digest", entry.Path)
 		}
-		if err := validatePortableMode(entry.SourceMode); err != nil {
-			return fmt.Errorf("file entry %q has an invalid source mode: %w", entry.Path, err)
-		}
-		if err := validatePortableMode(entry.TargetMode); err != nil {
-			return fmt.Errorf("file entry %q has an invalid target mode: %w", entry.Path, err)
+		if entry.SourceSize > maxSignedFileSize || entry.TargetSize > maxSignedFileSize {
+			return fmt.Errorf("file entry %q exceeds the supported signed 64-bit file size", entry.Path)
 		}
 		if entry.ForwardLength == 0 {
 			return fmt.Errorf("file entry %q has no forward differential", entry.Path)
 		}
-		if !validMethod(entry.ForwardDifferentialMethod()) {
-			return fmt.Errorf("file entry %q has unsupported forward method %q", entry.Path, entry.ForwardDifferentialMethod())
-		}
-		if methodRequiresExpandedLength(entry.ForwardDifferentialMethod()) && entry.ForwardExpandedLength == 0 {
-			return fmt.Errorf("file entry %q has no forward expanded length", entry.Path)
-		}
-		if entry.ForwardDifferentialMethod() != MethodPatchFrom && header.Compression.Mode != CompressionHybridV2 {
-			return fmt.Errorf("file entry %q uses a hybrid method with non-hybrid compression metadata", entry.Path)
-		}
-		if methodRequiresExpandedLength(entry.ForwardDifferentialMethod()) && !validInstructionExpandedLength(entry.ForwardExpandedLength, entry.TargetSize) {
-			return fmt.Errorf("file entry %q has an unsafe forward instruction-stream expanded length", entry.Path)
+		if err := validateMethodMetadata(entry.ForwardMethod, entry.ForwardExpandedLength, entry.SourceSize, entry.TargetSize); err != nil {
+			return fmt.Errorf("file entry %q has invalid forward metadata: %w", entry.Path, err)
 		}
 		if header.Reverse {
 			if entry.ReverseLength == 0 {
 				return fmt.Errorf("file entry %q has no reverse differential", entry.Path)
 			}
-			if !validMethod(entry.ReverseDifferentialMethod()) {
-				return fmt.Errorf("file entry %q has unsupported reverse method %q", entry.Path, entry.ReverseDifferentialMethod())
-			}
-			if methodRequiresExpandedLength(entry.ReverseDifferentialMethod()) && entry.ReverseExpandedLength == 0 {
-				return fmt.Errorf("file entry %q has no reverse expanded length", entry.Path)
-			}
-			if entry.ReverseDifferentialMethod() != MethodPatchFrom && header.Compression.Mode != CompressionHybridV2 {
-				return fmt.Errorf("file entry %q uses a hybrid reverse method with non-hybrid compression metadata", entry.Path)
-			}
-			if methodRequiresExpandedLength(entry.ReverseDifferentialMethod()) && !validInstructionExpandedLength(entry.ReverseExpandedLength, entry.SourceSize) {
-				return fmt.Errorf("file entry %q has an unsafe reverse instruction-stream expanded length", entry.Path)
+			if err := validateMethodMetadata(entry.ReverseMethod, entry.ReverseExpandedLength, entry.TargetSize, entry.SourceSize); err != nil {
+				return fmt.Errorf("file entry %q has invalid reverse metadata: %w", entry.Path, err)
 			}
 		} else if entry.ReverseLength != 0 || entry.ReverseOffset != 0 || entry.ReverseMethod != "" || entry.ReverseExpandedLength != 0 {
 			return fmt.Errorf("file entry %q unexpectedly contains reverse data", entry.Path)
@@ -286,12 +207,40 @@ func ValidateHeader(header Header) error {
 	return nil
 }
 
-func validMethod(method string) bool {
-	return method == MethodPatchFrom || method == MethodCopyAdd || method == MethodSparse || method == MethodReplace
-}
-
-func methodRequiresExpandedLength(method string) bool {
-	return method == MethodCopyAdd || method == MethodSparse
+func validateMethodMetadata(method string, expandedLength, inputSize, outputSize uint64) error {
+	switch method {
+	case MethodSparse:
+		if inputSize != outputSize {
+			return fmt.Errorf("sparse method requires equal input and output sizes")
+		}
+		if expandedLength == 0 {
+			return fmt.Errorf("sparse method has no expanded length")
+		}
+		if !validInstructionExpandedLength(expandedLength, outputSize) {
+			return fmt.Errorf("unsafe sparse instruction-stream expanded length")
+		}
+	case MethodCopyAdd:
+		if expandedLength == 0 {
+			return fmt.Errorf("copy-add method has no expanded length")
+		}
+		if !validInstructionExpandedLength(expandedLength, outputSize) {
+			return fmt.Errorf("unsafe copy-add instruction-stream expanded length")
+		}
+	case MethodReplace:
+		if expandedLength != 0 {
+			return fmt.Errorf("replace method must not declare an expanded length")
+		}
+	case MethodChunkedReplace:
+		if outputSize == 0 {
+			return fmt.Errorf("chunked replacement requires a non-empty output")
+		}
+		if expandedLength != 0 {
+			return fmt.Errorf("chunked replacement must not declare an expanded length")
+		}
+	default:
+		return fmt.Errorf("unsupported method %q", method)
+	}
+	return nil
 }
 
 func validInstructionExpandedLength(expanded, fileSize uint64) bool {
@@ -302,7 +251,7 @@ func validInstructionExpandedLength(expanded, fileSize uint64) bool {
 	return expanded > 0 && expanded <= fileSize*2+allowance
 }
 
-func validSHA256(value string) bool {
+func validDigest(value string) bool {
 	if len(value) != 64 || value != strings.ToLower(value) {
 		return false
 	}
@@ -345,11 +294,4 @@ func isWindowsDeviceName(component string) bool {
 		return base[3] >= '1' && base[3] <= '9'
 	}
 	return false
-}
-
-func validatePortableMode(mode uint32) error {
-	if mode&^uint32(0o777) != 0 {
-		return fmt.Errorf("unsupported file mode %#o", mode)
-	}
-	return nil
 }

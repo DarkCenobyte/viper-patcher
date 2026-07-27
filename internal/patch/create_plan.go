@@ -21,6 +21,8 @@ type plannedPair struct {
 	sourcePath   string
 	targetPath   string
 	relativePath string
+	sourceSize   uint64
+	targetSize   uint64
 }
 
 type resolvedInput struct {
@@ -82,6 +84,8 @@ func createPlanFromOptions(options CreateOptions) (createPlan, error) {
 			sourcePath:   resolvedSources[index].path,
 			targetPath:   resolvedTargets[index].path,
 			relativePath: relativePath,
+			sourceSize:   uint64(resolvedSources[index].info.Size()),
+			targetSize:   uint64(resolvedTargets[index].info.Size()),
 		}
 	}
 	return plan, nil
@@ -106,8 +110,8 @@ func validateCreateOptions(options CreateOptions) error {
 	if options.CompressionLevel < minimum || options.CompressionLevel > maximum {
 		return fmt.Errorf("compression level must be between %d and %d", minimum, maximum)
 	}
-	if options.Parallelism < 0 || options.Parallelism > runtime.NumCPU() {
-		return fmt.Errorf("parallel file operations must be 0 (default 1) or between 1 and %d", runtime.NumCPU())
+	if options.WorkerBudget < 0 || options.WorkerBudget > runtime.NumCPU() {
+		return fmt.Errorf("worker target must be 0 (automatic) or between 1 and %d", runtime.NumCPU())
 	}
 	if strings.TrimSpace(options.WorkDirectory) != "" {
 		if _, err := resolveWorkDirectory(options.WorkDirectory); err != nil {
@@ -117,11 +121,22 @@ func validateCreateOptions(options CreateOptions) error {
 	return nil
 }
 
-func effectiveParallelism(value int) int {
+func effectiveWorkerBudget(value int) int {
 	if value <= 0 {
-		return 1
+		return defaultWorkerBudget()
 	}
 	return value
+}
+
+func defaultWorkerBudget() int {
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 1 {
+		workers = 1
+	}
+	if maximum := runtime.NumCPU(); workers > maximum {
+		workers = maximum
+	}
+	return workers
 }
 
 func resolveRegularInput(path string) (resolvedInput, error) {

@@ -15,7 +15,7 @@ func TestRunHelp(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run(context.Background(), []string{"--help"}, &stdout, &stderr)
-	if code != 0 || !strings.Contains(stdout.String(), "--patch-file") {
+	if code != 0 || !strings.Contains(stdout.String(), "--patch-file") || !strings.Contains(stdout.String(), "--workers") {
 		t.Fatalf("code = %d, stdout = %s", code, stdout.String())
 	}
 }
@@ -67,7 +67,7 @@ func TestRunAppliesForwardAndReversePatch(t *testing.T) {
 		{name: "reverse", extraArgs: []string{"--reverse"}, wantData: oldData, message: "reverse patch applied successfully"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			arguments := []string{"--headless", "--patch-file", patchPath}
+			arguments := []string{"--headless", "--patch-file", patchPath, "--workers", "1"}
 			arguments = append(arguments, test.extraArgs...)
 			arguments = append(arguments, installRoot)
 			var stdout bytes.Buffer
@@ -109,11 +109,13 @@ func TestRunRejectsExtraDirectory(t *testing.T) {
 }
 
 func TestRunRejectsUnknownParameter(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	code := Run(context.Background(), []string{"--unknown"}, &stdout, &stderr)
-	if code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined") {
-		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	for _, argument := range []string{"--unknown", "--parallel"} {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := Run(context.Background(), []string{argument}, &stdout, &stderr)
+		if code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined") {
+			t.Fatalf("argument = %s, code = %d, stderr = %s", argument, code, stderr.String())
+		}
 	}
 }
 

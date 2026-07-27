@@ -2,18 +2,14 @@ package patch
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
-	"github.com/DarkCenobyte/viper-patcher/internal/zstd"
 )
 
 const portablePermissionMask uint32 = 0o777
@@ -32,10 +28,18 @@ type ApplyOptions struct {
 	Root              string
 	Direction         Direction
 	ExpectedPatchHash string
-	Parallelism       int
+	WorkerBudget      int
 }
 
-// Apply applies a patch using the fast handle-based path and automatic file-level parallelism.
+// PreparedApplyOptions configures application through an already validated and
+// fingerprinted PreparedPatch.
+type PreparedApplyOptions struct {
+	Root         string
+	Direction    Direction
+	WorkerBudget int
+}
+
+// Apply applies a patch using the fast handle-based path and automatic worker allocation.
 func Apply(ctx context.Context, patchPath, root string, direction Direction, callback progress.Callback) error {
 	return ApplyWithOptions(ctx, ApplyOptions{PatchPath: patchPath, Root: root, Direction: direction}, callback)
 }
@@ -45,104 +49,93 @@ func ApplyWithOptions(ctx context.Context, options ApplyOptions, callback progre
 	return applyWithOperations(ctx, options, callback, defaultApplyOperations)
 }
 
+// ApplyPreparedWithOptions reuses the stable handle owned by prepared. It does
+// not reopen or fingerprint the patch again.
+func ApplyPreparedWithOptions(ctx context.Context, prepared *PreparedPatch, options PreparedApplyOptions, callback progress.Callback) error {
+	return applyPreparedWithOperations(ctx, prepared, options, callback, defaultApplyOperations)
+}
+
 type preparedApplicationFile struct {
-	source        *os.File
 	targetName    string
 	temporaryName string
 	expectation   fileExpectation
 	preparedEvent progress.Event
 }
 
-type decoderPool struct {
-	available chan *zstd.Decoder
-	all       []*zstd.Decoder
+type applicationFilePreparer struct {
+	root           *installationRoot
+	patch          *openedPatch
+	direction      Direction
+	fileCount      int
+	perFileWorkers int
+	callback       progress.Callback
+	operations     applyOperations
+	decoders       *decoderPool
 }
 
-func newDecoderPool(count int) (*decoderPool, error) {
-	if count < 1 {
-		count = 1
+func validateApplyRequest(ctx context.Context, direction Direction) error {
+	if direction != Forward && direction != Reverse {
+		return fmt.Errorf("unsupported patch direction %q", direction)
 	}
-	pool := &decoderPool{available: make(chan *zstd.Decoder, count), all: make([]*zstd.Decoder, 0, count)}
-	for range count {
-		decoder, err := zstd.NewDecoder()
-		if err != nil {
-			_ = pool.Close()
-			return nil, err
-		}
-		pool.all = append(pool.all, decoder)
-		pool.available <- decoder
-	}
-	return pool, nil
-}
-
-func (pool *decoderPool) acquire() *zstd.Decoder {
-	return <-pool.available
-}
-
-func (pool *decoderPool) release(decoder *zstd.Decoder) {
-	pool.available <- decoder
-}
-
-func (pool *decoderPool) Close() error {
-	if pool == nil {
-		return nil
-	}
-	var closeErrors []error
-	for _, decoder := range pool.all {
-		closeErrors = append(closeErrors, decoder.Close())
-	}
-	pool.all = nil
-	return errors.Join(closeErrors...)
+	return ctx.Err()
 }
 
 func applyWithOperations(ctx context.Context, options ApplyOptions, callback progress.Callback, operations applyOperations) error {
-	if options.Direction != Forward && options.Direction != Reverse {
-		return fmt.Errorf("unsupported patch direction %q", options.Direction)
-	}
-	if err := ctx.Err(); err != nil {
+	if err := validateApplyRequest(ctx, options.Direction); err != nil {
 		return err
 	}
+	opened, err := openPatchForApply(options.PatchPath, options.ExpectedPatchHash)
+	if err != nil {
+		return err
+	}
+	return applyOpenedPatchWithOperations(ctx, opened, opened.Close, options.Root, options.Direction, options.WorkerBudget, callback, operations)
+}
 
-	openedPatch, err := openPatchForApply(options.PatchPath, options.ExpectedPatchHash)
+func applyPreparedWithOperations(ctx context.Context, prepared *PreparedPatch, options PreparedApplyOptions, callback progress.Callback, operations applyOperations) error {
+	if err := validateApplyRequest(ctx, options.Direction); err != nil {
+		return err
+	}
+	opened, release, err := prepared.acquire()
 	if err != nil {
 		return err
 	}
-	root, err := openInstallationRoot(options.Root)
+	return applyOpenedPatchWithOperations(ctx, opened, release, options.Root, options.Direction, options.WorkerBudget, callback, operations)
+}
+
+func applyOpenedPatchWithOperations(ctx context.Context, opened *openedPatch, releasePatch func() error, rootPath string, direction Direction, workerBudget int, callback progress.Callback, operations applyOperations) error {
+	root, err := openInstallationRoot(rootPath)
 	if err != nil {
-		return errors.Join(err, wrapJoinedError("close patch", openedPatch.Close()))
+		return errors.Join(err, wrapJoinedError("release patch", releasePatch()))
 	}
-	callback = synchronizedProgress(callback)
-	parsed := openedPatch.parsed
-	if options.Direction == Reverse && !parsed.Header.Reverse {
+	parsed := opened.parsed
+	if direction == Reverse && !parsed.Header.Reverse {
 		return errors.Join(
 			fmt.Errorf("patch does not contain reverse differentials"),
 			wrapJoinedError("close target root", root.Close()),
-			wrapJoinedError("close patch", openedPatch.Close()),
+			wrapJoinedError("release patch", releasePatch()),
 		)
 	}
-
-	parallelism := options.Parallelism
-	if parallelism <= 0 {
-		parallelism = runtime.NumCPU()
-	}
-	if parallelism > runtime.NumCPU() {
-		parallelism = runtime.NumCPU()
-	}
-	if parallelism > len(parsed.Header.Files) {
-		parallelism = len(parsed.Header.Files)
-	}
-	if parallelism < 1 {
-		parallelism = 1
-	}
-	decoders, err := newDecoderPool(parallelism)
+	callback = newApplicationProgress(callback, parsed.Header.Files, direction)
+	plan := newApplicationPlan(workerBudget, parsed.Header.Files, direction)
+	decoders, err := newDecoderPool(plan.decoderCount)
 	if err != nil {
-		return errors.Join(err, wrapJoinedError("close target root", root.Close()), wrapJoinedError("close patch", openedPatch.Close()))
+		return errors.Join(err, wrapJoinedError("close target root", root.Close()), wrapJoinedError("release patch", releasePatch()))
 	}
 
 	prepared := make([]preparedApplicationFile, len(parsed.Header.Files))
-	operationError := parallelFor(ctx, len(parsed.Header.Files), parallelism, func(ctx context.Context, index int) error {
+	preparer := applicationFilePreparer{
+		root:           root,
+		patch:          opened,
+		direction:      direction,
+		fileCount:      len(parsed.Header.Files),
+		perFileWorkers: plan.perFileWorkers,
+		callback:       callback,
+		operations:     operations,
+		decoders:       decoders,
+	}
+	operationError := parallelFor(ctx, len(parsed.Header.Files), plan.fileWorkers, func(ctx context.Context, index int) error {
 		entry := parsed.Header.Files[index]
-		result, err := prepareApplicationFile(ctx, root, openedPatch, entry, options.Direction, index, len(parsed.Header.Files), callback, operations, decoders)
+		result, err := preparer.prepare(ctx, index, entry)
 		if err != nil {
 			return err
 		}
@@ -184,25 +177,17 @@ func applyWithOperations(ctx context.Context, options ApplyOptions, callback pro
 			}
 		}
 	}
-	var sourceCloseErrors []error
-	for index := range prepared {
-		if prepared[index].source != nil {
-			sourceCloseErrors = append(sourceCloseErrors, prepared[index].source.Close())
-			prepared[index].source = nil
-		}
-	}
 	decoderCloseError := decoders.Close()
 	rootCloseError := root.Close()
-	patchCloseError := openedPatch.Close()
+	patchReleaseError := releasePatch()
 	if !committed {
 		return errors.Join(
 			operationError,
 			wrapJoinedError("cleanup abandoned transaction", transactionCleanup),
 			wrapJoinedError("remove unregistered prepared outputs", errors.Join(preparedCleanupErrors...)),
-			wrapJoinedError("close source files", errors.Join(sourceCloseErrors...)),
 			wrapJoinedError("close decoders", decoderCloseError),
 			wrapJoinedError("close target root", rootCloseError),
-			wrapJoinedError("close patch", patchCloseError),
+			wrapJoinedError("release patch", patchReleaseError),
 		)
 	}
 
@@ -216,16 +201,15 @@ func applyWithOperations(ctx context.Context, options ApplyOptions, callback pro
 		"patch application",
 		operationError,
 		wrapJoinedError("cleanup committed transaction", transactionCleanup),
-		wrapJoinedError("close source files", errors.Join(sourceCloseErrors...)),
 		wrapJoinedError("close decoders", decoderCloseError),
 		wrapJoinedError("close target root", rootCloseError),
-		wrapJoinedError("close patch", patchCloseError),
+		wrapJoinedError("release patch", patchReleaseError),
 	)
 }
 
-func prepareApplicationFile(ctx context.Context, root *installationRoot, patch *openedPatch, entry patchformat.FileEntry, direction Direction, index, fileCount int, callback progress.Callback, operations applyOperations, decoders *decoderPool) (preparedApplicationFile, error) {
-	offset, length, expandedLength, method, expectedInput, expectedOutput := differential(entry, direction)
-	source, identity, targetName, err := root.openStableRegularFile(entry.Path)
+func (preparer applicationFilePreparer) prepare(ctx context.Context, index int, entry patchformat.FileEntry) (preparedApplicationFile, error) {
+	offset, length, expandedLength, method, expectedInput, expectedOutput := differential(entry, preparer.direction)
+	source, identity, targetName, err := preparer.root.openStableRegularFile(entry.Path)
 	if err != nil {
 		return preparedApplicationFile{}, fmt.Errorf("open installed file %q: %w", entry.Path, err)
 	}
@@ -236,14 +220,14 @@ func prepareApplicationFile(ctx context.Context, root *installationRoot, patch *
 		}
 	}()
 	if identity.Size() < 0 || uint64(identity.Size()) != expectedInput.size {
-		return preparedApplicationFile{}, fmt.Errorf("installed file %q does not match the required %s input size", entry.Path, direction)
+		return preparedApplicationFile{}, fmt.Errorf("installed file %q does not match the required %s input size", entry.Path, preparer.direction)
 	}
 
-	segmentOffset, ok := checkedAdd(patch.parsed.DataOffset, offset)
+	segmentOffset, ok := checkedAdd(preparer.patch.parsed.DataOffset, offset)
 	if !ok {
 		return preparedApplicationFile{}, fmt.Errorf("differential offset for %q overflows", entry.Path)
 	}
-	temporary, temporaryName, err := createRootTemp(root.root, filepath.Dir(targetName), ".viper-patcher-output-")
+	temporary, temporaryName, err := createRootTemp(preparer.root.root, filepath.Dir(targetName), ".viper-patcher-output-")
 	if err != nil {
 		return preparedApplicationFile{}, fmt.Errorf("create temporary output for %q: %w", entry.Path, err)
 	}
@@ -251,77 +235,44 @@ func prepareApplicationFile(ctx context.Context, root *installationRoot, patch *
 	defer func() {
 		if cleanupTemporary {
 			_ = temporary.Close()
-			_ = root.root.Remove(temporaryName)
+			_ = preparer.root.root.Remove(temporaryName)
 		}
 	}()
 
-	event := progress.Event{FileIndex: index + 1, FileCount: fileCount, Path: entry.Path, TotalBytes: expectedOutput.size}
+	event := progress.Event{FileIndex: index + 1, FileCount: preparer.fileCount, Path: entry.Path, TotalBytes: expectedOutput.size}
+	chunkWorkers := adaptiveChunkWorkers(preparer.perFileWorkers, maxUint64(expectedInput.size, expectedOutput.size))
 
 	switch method {
 	case patchformat.MethodSparse:
-		if expectedInput.size != expectedOutput.size {
-			return preparedApplicationFile{}, fmt.Errorf("sparse differential for %q changes file size", entry.Path)
-		}
 		event.Stage = progress.StageApplying
-		progress.Report(callback, event)
-		decoder := decoders.acquire()
-		err = applyCompressedInstructionStream(ctx, decoder, patch.file, segmentOffset, length, expandedLength, func(reader io.Reader) error {
-			return applySparseStreamContext(ctx, source, reader, temporary, expectedOutput.size, expectedInput.hash, expectedOutput.hash, callback, event)
+		progress.Report(preparer.callback, event)
+		decoder := preparer.decoders.acquire()
+		err = applyCompressedInstructionStream(ctx, decoder, preparer.patch.file, segmentOffset, length, expandedLength, func(reader io.Reader) error {
+			return applySparseStreamParallel(ctx, source, reader, temporary, expectedOutput.size, expectedInput.hash, expectedOutput.hash, chunkWorkers, preparer.callback, event)
 		})
-		decoders.release(decoder)
+		preparer.decoders.release(decoder)
 		if err != nil {
 			return preparedApplicationFile{}, fmt.Errorf("apply %s differential for %q: %w", method, entry.Path, err)
 		}
 	case patchformat.MethodCopyAdd:
-		if err := verifySourceForDecode(ctx, source, expectedInput, callback, event); err != nil {
-			return preparedApplicationFile{}, fmt.Errorf("validate installed file %q: %w", entry.Path, err)
-		}
-		event.Stage = progress.StageApplying
-		event.ProcessedBytes = 0
-		event.TotalBytes = expectedOutput.size
-		progress.Report(callback, event)
-		decoder := decoders.acquire()
-		err = applyCompressedInstructionStream(ctx, decoder, patch.file, segmentOffset, length, expandedLength, func(reader io.Reader) error {
-			return applyCopyAddStreamContext(ctx, source, reader, temporary, expectedInput.size, expectedOutput.size, expectedOutput.hash, callback, event)
-		})
-		decoders.release(decoder)
-		if err != nil {
+		if err := applyCopyAddConcurrent(ctx, source, preparer.patch.file, temporary, segmentOffset, length, expandedLength, expectedInput, expectedOutput, chunkWorkers, preparer.callback, event, preparer.decoders); err != nil {
 			return preparedApplicationFile{}, fmt.Errorf("apply %s differential for %q: %w", method, entry.Path, err)
 		}
-	case patchformat.MethodPatchFrom, patchformat.MethodReplace:
-		if err := verifySourceForDecode(ctx, source, expectedInput, callback, event); err != nil {
-			return preparedApplicationFile{}, fmt.Errorf("validate installed file %q: %w", entry.Path, err)
-		}
+	case patchformat.MethodChunkedReplace:
 		event.Stage = progress.StageApplying
-		event.ProcessedBytes = 0
-		event.TotalBytes = expectedOutput.size
-		progress.Report(callback, event)
-		outputHash := sha256.New()
-		decoder := decoders.acquire()
-		var reference *os.File
-		if method == patchformat.MethodPatchFrom {
-			reference = source
-		}
-		err = decoder.DecompressSegmentToFile(ctx, reference, patch.file, segmentOffset, length, temporary, expectedOutput.size, func(processed, total uint64) {
-			event.ProcessedBytes = processed
-			event.TotalBytes = total
-			progress.Report(callback, event)
-		}, func(block []byte) error {
-			_, writeError := outputHash.Write(block)
-			return writeError
-		})
-		decoders.release(decoder)
-		if err != nil {
+		progress.Report(preparer.callback, event)
+		if err := applyChunkedReplace(ctx, source, preparer.patch.file, temporary, segmentOffset, length, expectedInput, expectedOutput, chunkWorkers, preparer.callback, event, preparer.decoders); err != nil {
 			return preparedApplicationFile{}, fmt.Errorf("apply %s differential for %q: %w", method, entry.Path, err)
 		}
-		if hex.EncodeToString(outputHash.Sum(nil)) != expectedOutput.hash {
-			return preparedApplicationFile{}, fmt.Errorf("generated file %q failed SHA-256 verification", entry.Path)
+	case patchformat.MethodReplace:
+		if err := applyStandaloneReplaceConcurrent(ctx, source, preparer.patch.file, temporary, segmentOffset, length, expectedInput, expectedOutput, chunkWorkers, preparer.callback, event, preparer.decoders); err != nil {
+			return preparedApplicationFile{}, fmt.Errorf("apply %s differential for %q: %w", method, entry.Path, err)
 		}
 	default:
 		return preparedApplicationFile{}, fmt.Errorf("unsupported differential method %q", method)
 	}
 
-	if err := applyOutputMode(temporary, uint32(identity.Mode().Perm()), operations.chmod); err != nil {
+	if err := applyOutputMode(temporary, uint32(identity.Mode().Perm()), preparer.operations.chmod); err != nil {
 		return preparedApplicationFile{}, fmt.Errorf("set permissions for %q: %w", entry.Path, err)
 	}
 	outputInfo, err := temporary.Stat()
@@ -337,13 +288,15 @@ func prepareApplicationFile(ctx context.Context, root *installationRoot, patch *
 	if err := temporary.Close(); err != nil {
 		return preparedApplicationFile{}, fmt.Errorf("close generated file %q: %w", entry.Path, err)
 	}
+	if err := source.Close(); err != nil {
+		return preparedApplicationFile{}, fmt.Errorf("close installed file %q after preparation: %w", entry.Path, err)
+	}
 
 	cleanupSource = false
 	cleanupTemporary = false
-	preparedEvent := progress.Event{FileIndex: index + 1, FileCount: fileCount, Path: entry.Path, Stage: progress.StageFilePrepared, ProcessedBytes: expectedOutput.size, TotalBytes: expectedOutput.size}
-	progress.Report(callback, preparedEvent)
+	preparedEvent := progress.Event{FileIndex: index + 1, FileCount: preparer.fileCount, Path: entry.Path, Stage: progress.StageFilePrepared, ProcessedBytes: expectedOutput.size, TotalBytes: expectedOutput.size}
+	progress.Report(preparer.callback, preparedEvent)
 	return preparedApplicationFile{
-		source:        source,
 		targetName:    targetName,
 		temporaryName: temporaryName,
 		expectation: fileExpectation{
@@ -352,20 +305,4 @@ func prepareApplicationFile(ctx context.Context, root *installationRoot, patch *
 		},
 		preparedEvent: preparedEvent,
 	}, nil
-}
-
-type fileState struct {
-	hash string
-	size uint64
-}
-
-func differential(entry patchformat.FileEntry, direction Direction) (offset, length, expandedLength uint64, method string, input, output fileState) {
-	if direction == Reverse {
-		return entry.ReverseOffset, entry.ReverseLength, entry.ReverseExpandedLength, entry.ReverseDifferentialMethod(),
-			fileState{hash: entry.TargetHash, size: entry.TargetSize},
-			fileState{hash: entry.SourceHash, size: entry.SourceSize}
-	}
-	return entry.ForwardOffset, entry.ForwardLength, entry.ForwardExpandedLength, entry.ForwardDifferentialMethod(),
-		fileState{hash: entry.SourceHash, size: entry.SourceSize},
-		fileState{hash: entry.TargetHash, size: entry.TargetSize}
 }

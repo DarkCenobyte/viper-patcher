@@ -23,9 +23,12 @@ type Event struct {
 	ProcessedBytes uint64
 	TotalBytes     uint64
 	Stage          Stage
+	// Overall is the monotonic weighted progress of the complete operation in
+	// the inclusive range 0..1.
+	Overall float64
 }
 
-// Callback receives progress events. Implementations must be concurrency-safe.
+// Callback receives serialized progress events.
 type Callback func(Event)
 
 // Report invokes callback when it is not nil.

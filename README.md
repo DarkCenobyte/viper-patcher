@@ -24,17 +24,17 @@ available, the application prints a warning and falls back to CLI mode.
 ## Key properties
 
 - Exact libzstd **1.5.7** dependency, statically linked in release builds.
-- VIPR format version 2 with automatic sparse, general COPY/ADD, and replacement methods.
+- VIPR format version 3 with sparse, COPY/ADD, replacement, and chunked replacement methods.
 - Content-defined chunking keeps COPY/ADD patches effective across insertions and deletions.
 - Ordered multi-file patches with explicit source/target file pairs.
-- SHA-256 source, target, and patch integrity validation.
+- BLAKE3 tree source and target validation plus BLAKE3 patch fingerprints.
 - Optional reverse differential for every file.
-- Strict, versioned, bounds-checked `.vipr` container with version 1 read compatibility.
+- Strict, bounds-checked `.vipr` format 3 container; versions 1 and 2 are rejected.
 - Immutable creator snapshots and handle-based fast application.
-- Automatic parallel output preparation with positional patch reads.
+- Adaptive worker allocation across files and large chunks with positional patch reads.
 - Traversal-resistant installation access with `os.Root`.
 - Transactional file replacement with best-effort rollback and explicit post-commit warnings.
-- File-level and byte-level progress reporting.
+- File-level, byte-level, and monotonic overall progress reporting.
 - Fyne GUI plus deterministic CLI behavior.
 - MIT-licensed Go code.
 
@@ -73,8 +73,9 @@ The creator interface provides:
 - A dedicated comment section.
 - A collapsed **Settings** section containing compression levels 1 through 22,
   optional reverse-patch generation, creator-only work-directory selection, and
-  bounded per-file parallelism. Parallelism defaults to one worker and cannot
-  exceed the logical CPU count.
+  a worker target. It defaults to **Auto**, follows the process CPU limit, and
+  cannot exceed the logical CPU count; overlapping verification and decoding may
+  use helper goroutines.
 - An output directory and `.vipr` filename.
 - A conservative peak temporary-disk estimate shown before creation starts.
 - Progress by file and by processed bytes.
@@ -99,7 +100,7 @@ creator --headless \
   --compression-level 12 \
   --comment "Version 1.1 update" \
   --create-reverse \
-  --parallel 2 \
+  --workers 2 \
   --work-directory /path/to/temporary-storage \
   update.vipr
 ```
@@ -112,7 +113,7 @@ Supported parameters:
 [--comment <text>]             Default: Created with Viper-Patcher.
 [--create-reverse]             Default: false.
 [--work-directory <directory>] Optional creator temporary-data parent.
-[--parallel <count>]           Parallel file operations. Default: 1.
+[--workers <count>]            Logical worker target. Default: 0 (automatic).
 [--headless]                   Force CLI mode.
 [--version]                    Show version information.
 [--help]                       Show help.
@@ -139,14 +140,16 @@ Selecting a target directory triggers a complete preflight:
 - A file that validly matches both states enables both directions.
 - Mixed, unknown, non-regular, or missing states disable the affected directions
   and report the first problem.
-- Stored Unix mode metadata is advisory. Application preserves the installed
-  file mode on Unix and ignores Unix permission bits on Windows, so the same
-  patch remains usable across supported operating systems.
+- Patch metadata is content-only and stores no Unix permission fields. Application
+  preserves the installed file mode on Unix and ignores Unix permission semantics
+  on Windows, so the same patch remains usable across supported operating systems.
 
 Patch and directory selections are locked while an operation is running. The
-operation uses captured selections and rejects a patch whose SHA-256 digest
+operation uses captured selections and rejects a patch whose BLAKE3 fingerprint
 changed after the displayed GUI preflight. The application core then prepares
-files through the same handle-based fast path used by the CLI.
+files through the same handle-based fast path used by the CLI. Preflight hashing
+uses a bounded parallel worker plan, and a successful operation updates the known
+forward/reverse readiness without an immediate redundant full output rescan.
 
 ## Patcher CLI
 
@@ -168,36 +171,41 @@ Supported parameters:
 --patch-file <file.vipr>      Required.
 <target-directory>            Required positional argument.
 [--reverse]                   Default: false.
-[--parallel <count>]          Parallel file preparation. Default: logical CPU count.
+[--workers <count>]           Logical worker target. Default: logical CPU count.
 [--headless]                  Force CLI mode.
 [--version]                   Show version information.
 [--help]                      Show help.
 ```
 
-The CLI opens and hashes the patch once and does not run a separate full-file
-inspection pass before application.
+The CLI parses the patch without a redundant whole-file fingerprint pass and does
+not run a separate full-file inspection before application.
 
-## Hybrid version 2 implementation
+## Format 3 implementation
 
-Viper Patcher does not invoke an external `zstd` executable. Version 2 selects a
+Viper Patcher does not invoke an external `zstd` executable. Format 3 selects a
 method independently for each file and direction:
 
-- `zstd-sparse` stores a compressed COPY/ADD instruction stream for equal-size
+- `zstd-sparse` stores a compressed replacement instruction stream for equal-size
   files with relatively few changes.
 - `zstd-replace` stores a standalone frame for equal-size files with little
   useful similarity.
-- `zstd-patch-from` keeps libzstd patch-from behavior as the general fallback
-  when file sizes differ.
+- `zstd-copy-add` handles insertions, deletions, and moved reusable regions.
+- `zstd-chunked-replace` splits large standalone replacements into independent
+  frames that can be decoded and verified concurrently.
 
-Application opens the patch and installed source files once. Native workers use
-positional reads, reusable zstd contexts, and bounded 1 MiB buffers. Output
-SHA-256 is calculated while decompressed blocks are written. Sparse application
-calculates source and target SHA-256 values while it copies unchanged ranges and
-writes replacements. Generated files are committed atomically only after all
-workers finish successfully.
+Application opens the patch and each installed source only for the preparation
+of that file, closing source handles before the multi-file commit. Native workers
+use positional reads, a decoder pool sized to actual concurrent demand,
+standalone frames, and bounded 1 MiB buffers. Creator snapshots retain their
+32-byte BLAKE3 chunk digests so chunked replacement does not reread target chunks
+solely for hashing. Output digests are calculated while blocks are written.
+Sparse application uses a bounded producer/consumer queue, reads each source chunk
+once, overlays replacements in memory, and assembles source and target BLAKE3 tree
+roots. Generated files are committed atomically only after all workers finish.
 
-Version 1 patches remain readable and normalize missing method fields to
-`zstd-patch-from`. Version 2 is documented in [VIPR format](docs/FORMAT.md).
+Only format 3 patches are accepted. Older `.vipr` files must be applied with a
+compatible Viper-Patcher 0.4.1-or-earlier release. Format 3 is documented in
+[VIPR format](docs/FORMAT.md).
 
 ## Building
 
@@ -240,20 +248,21 @@ creator temporary-data options.
 make check
 ```
 
-The repository includes unit, integration, race, fuzz, native sanitizer, and
-vulnerability-reachability checks for path normalization, container parsing,
-version 1 compatibility, version 2 method selection, malformed sparse and COPY/ADD streams,
+The repository includes unit, integration, race, fuzz, native sanitizer,
+Staticcheck, and vulnerability-reachability checks for path normalization,
+container parsing,
+format 3 validation, rejection of older formats, malformed sparse and COPY/ADD streams,
 CLI validation, zstd streaming, parallel positional reads, transaction rollback,
 GUI state models, patch creation, forward application, reverse application,
-preflight states, output replacement, and SHA-256 integrity. CI enforces at
+preflight states, output replacement, and BLAKE3 integrity. CI enforces at
 least 80% statement coverage across the non-GUI core and compiles the complete
 GUI executables. See [Testing strategy](docs/TESTING.md).
 
 ## GitHub Actions
 
 - `ci.yml` checks formatting, runs race and sanitizer tests, vets the code,
-  executes `govulncheck`, enforces coverage, and compiles on every push and pull
-  request.
+  executes Staticcheck and `govulncheck`, enforces coverage, and compiles on every
+  push and pull request.
 - `release.yml` validates one release version, builds unsigned cross-platform
   archives, and grants write access only to the publication job.
 - External actions are referenced by immutable commit identifiers.
@@ -272,9 +281,9 @@ release tags, and future code-signing insertion points.
 | Linux | arm64 | Yes |
 | macOS | arm64 | Yes |
 
-A 32-bit process has a much smaller virtual address space. Patch-from reference
-files are memory-mapped, so x86 builds should not be used for very large
-references. Sparse, COPY/ADD, and replacement methods do not map a reference file.
+A 32-bit process has a much smaller virtual address space. Large files therefore
+benefit most from chunked replacement, which keeps each independent work unit
+bounded. Sparse, COPY/ADD, and replacement methods do not map a reference file.
 
 ## Documentation
 

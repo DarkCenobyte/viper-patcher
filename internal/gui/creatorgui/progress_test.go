@@ -15,15 +15,13 @@ func TestCreatorProgressPresentation(t *testing.T) {
 		Stage:          progress.StageCompressingForward,
 		ProcessedBytes: 50,
 		TotalBytes:     100,
+		Overall:        0.375,
 	}
 	if text := creatorProgressText(event); !strings.Contains(text, "forward differential") || !strings.Contains(text, event.Path) {
 		t.Fatalf("unexpected progress text: %s", text)
 	}
-	if value := creatorOverallProgress(event, false); value != 0.375 {
-		t.Fatalf("progress = %v, want 0.375", value)
-	}
-	if value := creatorOverallProgress(progress.Event{Stage: progress.StageCompleted}, true); value != 1 {
-		t.Fatalf("completed progress = %v, want 1", value)
+	if event.Overall != 0.375 {
+		t.Fatalf("progress = %v, want 0.375", event.Overall)
 	}
 }
 

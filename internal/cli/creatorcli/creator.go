@@ -42,7 +42,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	var comment string
 	var reverse bool
 	var workDirectory string
-	var parallelism int
+	var workerBudget int
 	var help bool
 	var version bool
 	flags.Var(&pairs, "file-pair", "source and target pair; repeat for each file")
@@ -50,7 +50,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.StringVar(&comment, "comment", "Created with Viper-Patcher", "comment stored in the patch")
 	flags.BoolVar(&reverse, "create-reverse", false, "include reverse differentials")
 	flags.StringVar(&workDirectory, "work-directory", "", "parent directory for temporary creator data")
-	flags.IntVar(&parallelism, "parallel", 1, "number of files processed in parallel")
+	flags.IntVar(&workerBudget, "workers", 0, "logical worker target; 0 selects the automatic system-aware default")
 	flags.Bool("headless", false, "force command-line mode")
 	flags.BoolVar(&help, "help", false, "show help")
 	flags.BoolVar(&version, "version", false, "show version")
@@ -105,7 +105,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		Comment:          comment,
 		CreateReverse:    reverse,
 		WorkDirectory:    workDirectory,
-		Parallelism:      parallelism,
+		WorkerBudget:     workerBudget,
 	}, reporter.Report)
 	reporter.Finish()
 	if err != nil && !patch.IsCommittedWarning(err) {
@@ -121,7 +121,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 
 func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "Example:")
-	fmt.Fprintln(writer, "  creator --headless --file-pair old/bin/game.exe::new/bin/game.exe --file-pair old/data/assets.bin::new/data/assets.bin --compression-level 12 --comment \"Version 1.1 update\" --create-reverse update.vipr")
+	fmt.Fprintln(writer, "  creator --headless --file-pair old/bin/game.exe::new/bin/game.exe --file-pair old/data/assets.bin::new/data/assets.bin --compression-level 12 --workers 4 --comment \"Version 1.1 update\" --create-reverse update.vipr")
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "Supported parameters and arguments:")
 	fmt.Fprintln(writer, "  --file-pair <source>::<target> Required. Repeat once per source/target pair.")
@@ -129,7 +129,7 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  [--comment <text>]             Default: Created with Viper-Patcher.")
 	fmt.Fprintln(writer, "  [--create-reverse]             Default: false.")
 	fmt.Fprintln(writer, "  [--work-directory <directory>] Optional creator temporary-data parent.")
-	fmt.Fprintln(writer, "  [--parallel <count>]           Parallel file operations. Default: 1.")
+	fmt.Fprintln(writer, "  [--workers <count>]            Logical worker target. Default: 0 (automatic).")
 	fmt.Fprintln(writer, "  [--headless]                   Force CLI mode.")
 	fmt.Fprintln(writer, "  [--version]                    Show version information.")
 	fmt.Fprintln(writer, "  [--help]                       Show this help.")
@@ -164,7 +164,7 @@ func (reporter *terminalProgress) Report(event progress.Event) {
 	}
 	if event.TotalBytes > 0 {
 		percentage := float64(event.ProcessedBytes) * 100 / float64(event.TotalBytes)
-		fmt.Fprintf(reporter.writer, "\r  Progress: %6.2f%% (%d/%d bytes)", percentage, event.ProcessedBytes, event.TotalBytes)
+		fmt.Fprintf(reporter.writer, "\r  Progress: %6.2f%% (%d/%d bytes, overall %6.2f%%)", percentage, event.ProcessedBytes, event.TotalBytes, event.Overall*100)
 		reporter.lineActive = true
 	}
 }

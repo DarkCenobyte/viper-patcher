@@ -3,8 +3,9 @@
 1. Discuss substantial format or compatibility changes in an issue first.
 2. Keep identifiers, filenames, directories, comments, documentation, commit
    messages, and user-facing strings in English.
-3. Add tests for every behavior change and preserve backward compatibility for
-   published `.vipr` format versions.
+3. Add tests for every behavior change. A deliberate `.vipr` compatibility break
+   requires a new application minor version, a format-version check, and an
+   explicit migration note.
 4. Keep cgo code small, defensive, and isolated under `internal/zstd`.
 5. Treat patch files, installation paths, external assets, and release inputs as
    untrusted data.

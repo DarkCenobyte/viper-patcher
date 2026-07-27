@@ -2,7 +2,6 @@ package patchergui
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 
@@ -16,7 +15,6 @@ import (
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/nativedialog"
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/windowsizing"
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
-	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
 
 const (
@@ -99,7 +97,7 @@ func (controller *patcherController) buildContent() fyne.CanvasObject {
 	controller.header = container.NewVBox(
 		branding.NewLogo(controller.logo, fyne.NewSize(patcherLogoWidth, patcherLogoHeight)),
 		widget.NewLabelWithStyle("Apply a VIPR differential patch", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-		widget.NewLabelWithStyle("The patch and installed files are snapshotted before native processing.", fyne.TextAlignCenter, fyne.TextStyle{}),
+		widget.NewLabelWithStyle("Patch metadata and installed files are validated through stable file handles.", fyne.TextAlignCenter, fyne.TextStyle{}),
 	)
 	controller.body = container.NewVBox(selectionCard, commentCard, operationCard)
 	return container.NewBorder(
@@ -185,11 +183,22 @@ func (controller *patcherController) chooseTargetDirectory() {
 }
 
 func (controller *patcherController) loadPatch(path string) error {
-	parsed, digest, err := patch.OpenWithDigest(path)
+	prepared, err := patch.Prepare(path)
 	if err != nil {
 		return err
 	}
-	if !controller.state.SetPatch(path, digest, parsed) {
+	parsed, err := prepared.Parsed()
+	if err != nil {
+		_ = prepared.Close()
+		return err
+	}
+	digest, err := prepared.Digest()
+	if err != nil {
+		_ = prepared.Close()
+		return err
+	}
+	if !controller.state.SetPreparedPatch(path, digest, parsed, prepared) {
+		_ = prepared.Close()
 		return fmt.Errorf("patch selection is locked while an operation is active")
 	}
 	controller.patchLabel.SetText(path)
@@ -216,117 +225,9 @@ func (controller *patcherController) selectAdjacentPatch(executablePath string) 
 	}
 }
 
-func (controller *patcherController) cancelValidation() {
-	controller.validationGeneration++
-	if controller.validationCancel != nil {
-		controller.validationCancel()
-		controller.validationCancel = nil
-	}
-}
-
-func (controller *patcherController) validate() {
-	if controller.state.Active() {
-		return
-	}
+func (controller *patcherController) close() {
 	controller.cancelValidation()
-	selection := controller.state.Snapshot()
-	controller.patchButton.Disable()
-	controller.reverseButton.Disable()
-	if selection.patchPath == "" || selection.targetDirectory == "" {
-		controller.status.SetText("Select a patch and a target directory.")
-		controller.growWindowToFitContent()
-		return
+	if prepared := controller.state.DetachPreparedPatch(); prepared != nil {
+		_ = prepared.Close()
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	controller.validationCancel = cancel
-	generation := controller.validationGeneration
-	controller.status.SetText("Inspecting installed files...")
-	controller.growWindowToFitContent()
-
-	go func() {
-		result, err := patch.InspectContext(ctx, selection.targetDirectory, selection.parsed)
-		fyne.Do(func() {
-			if generation != controller.validationGeneration || controller.state.Active() {
-				return
-			}
-			controller.validationCancel = nil
-			if err != nil {
-				if errors.Is(err, context.Canceled) {
-					return
-				}
-				controller.status.SetText("Preflight inspection failed.")
-				dialog.ShowError(err, controller.window)
-				controller.growWindowToFitContent()
-				return
-			}
-			if result.CanApplyForward {
-				controller.patchButton.Enable()
-			}
-			if result.CanApplyReverse {
-				controller.reverseButton.Enable()
-			}
-			controller.status.SetText(patcherValidationText(result))
-			controller.growWindowToFitContent()
-		})
-	}()
-}
-
-func (controller *patcherController) runDirection(direction patch.Direction) {
-	selection, err := controller.state.Begin(direction)
-	if err != nil {
-		dialog.ShowError(err, controller.window)
-		return
-	}
-	controller.cancelValidation()
-	controller.setSelectionEnabled(false)
-	controller.progressBar.SetValue(0)
-	controller.progressBar.Show()
-	controller.status.SetText(fmt.Sprintf("Preparing %s patch...", direction))
-	controller.growWindowToFitContent()
-
-	go func(snapshot patcherSelection) {
-		err := patch.ApplyWithOptions(context.Background(), patch.ApplyOptions{
-			PatchPath:         snapshot.patchPath,
-			Root:              snapshot.targetDirectory,
-			Direction:         direction,
-			ExpectedPatchHash: snapshot.patchHash,
-		}, func(event progress.Event) {
-			fyne.Do(func() {
-				controller.status.SetText(patcherProgressText(event, direction))
-				controller.progressBar.SetValue(patcherOverallProgress(event))
-				controller.growWindowToFitContent()
-			})
-		})
-		fyne.Do(func() {
-			controller.state.End()
-			controller.setSelectionEnabled(true)
-			if err != nil && !patch.IsCommittedWarning(err) {
-				controller.status.SetText("Patch operation failed.")
-				dialog.ShowError(err, controller.window)
-				controller.validate()
-				return
-			}
-			controller.progressBar.SetValue(1)
-			controller.status.SetText(fmt.Sprintf("%s patch applied successfully.", direction))
-			if err != nil {
-				dialog.ShowInformation("Operation completed with warning", fmt.Sprintf("The %s patch was applied successfully, but cleanup reported a warning:\n\n%s", direction, err), controller.window)
-			} else {
-				dialog.ShowInformation("Operation completed", fmt.Sprintf("The %s patch was applied successfully.", direction), controller.window)
-			}
-			controller.validate()
-		})
-	}(selection)
-}
-
-func (controller *patcherController) setSelectionEnabled(enabled bool) {
-	if enabled {
-		controller.selectPatch.Enable()
-		controller.selectDirectory.Enable()
-		return
-	}
-	controller.selectPatch.Disable()
-	controller.selectDirectory.Disable()
-	controller.patchButton.Disable()
-	controller.reverseButton.Disable()
 }

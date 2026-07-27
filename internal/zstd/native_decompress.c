@@ -5,7 +5,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 struct vipr_decoder {
     ZSTD_DCtx *context;
@@ -46,8 +45,6 @@ void vipr_decoder_free(vipr_decoder *decoder) {
 
 int vipr_decoder_decompress_segment(
     vipr_decoder *decoder,
-    int has_reference,
-    uintptr_t reference_handle,
     uintptr_t patch_handle,
     uint64_t patch_offset,
     uint64_t patch_length,
@@ -58,40 +55,27 @@ int vipr_decoder_decompress_segment(
     char *error_buffer,
     uint64_t error_buffer_size) {
     int result = -1;
-    vipr_mapped_file reference;
-    int reference_mapped = 0;
     FILE *output = NULL;
 
-    memset(&reference, 0, sizeof(reference));
-#if !defined(_WIN32)
-    reference.file = -1;
-#endif
     if (decoder == NULL || decoder->context == NULL) {
         vipr_set_error(error_buffer, error_buffer_size, "decoder is unavailable");
         return -1;
     }
     if (patch_length == 0) {
-        vipr_set_error(error_buffer, error_buffer_size, "empty differential segment");
+        vipr_set_error(error_buffer, error_buffer_size, "empty compressed segment");
         return -1;
-    }
-
-    if (has_reference) {
-        if (vipr_map_handle(reference_handle, &reference, error_buffer, error_buffer_size) != 0) {
-            return -1;
-        }
-        reference_mapped = 1;
     }
     if (write_output) {
         output = vipr_open_write_handle(output_handle);
         if (output == NULL) {
-            vipr_set_errno_error(error_buffer, error_buffer_size, "duplicate patched output handle");
+            vipr_set_errno_error(error_buffer, error_buffer_size, "duplicate output handle");
             goto cleanup;
         }
     }
 
     {
         size_t code = ZSTD_DCtx_reset(decoder->context, ZSTD_reset_session_and_parameters);
-        uint64_t required_window = reference.size > expected_output_size ? reference.size : expected_output_size;
+        uint64_t required_window = expected_output_size;
         const uint64_t minimum_window = 1ULL << ZSTD_WINDOWLOG_MIN;
         if (ZSTD_isError(code)) {
             vipr_set_zstd_error(error_buffer, error_buffer_size, "reset decompression context", code);
@@ -105,13 +89,6 @@ int vipr_decoder_decompress_segment(
             vipr_set_zstd_error(error_buffer, error_buffer_size, "configure decompression window", code);
             goto cleanup;
         }
-        if (has_reference) {
-            code = ZSTD_DCtx_refPrefix(decoder->context, reference.data, (size_t)reference.size);
-            if (ZSTD_isError(code)) {
-                vipr_set_zstd_error(error_buffer, error_buffer_size, "attach patch reference", code);
-                goto cleanup;
-            }
-        }
     }
 
     {
@@ -123,15 +100,15 @@ int vipr_decoder_decompress_segment(
             size_t read_size;
             ZSTD_inBuffer in;
             if (request == 0) {
-                vipr_set_error(error_buffer, error_buffer_size, "truncated differential segment");
+                vipr_set_error(error_buffer, error_buffer_size, "truncated compressed segment");
                 goto cleanup;
             }
             if (vipr_read_at(patch_handle, patch_offset + (patch_length - remaining_segment), decoder->input_buffer, request, &read_size) != 0) {
-                vipr_set_errno_error(error_buffer, error_buffer_size, "read differential segment");
+                vipr_set_errno_error(error_buffer, error_buffer_size, "read compressed segment");
                 goto cleanup;
             }
             if (read_size != request) {
-                vipr_set_error(error_buffer, error_buffer_size, "truncated differential segment");
+                vipr_set_error(error_buffer, error_buffer_size, "truncated compressed segment");
                 goto cleanup;
             }
             remaining_segment -= read_size;
@@ -146,7 +123,7 @@ int vipr_decoder_decompress_segment(
                 out.pos = 0;
                 frame_remaining = ZSTD_decompressStream(decoder->context, &out, &in);
                 if (ZSTD_isError(frame_remaining)) {
-                    vipr_set_zstd_error(error_buffer, error_buffer_size, "decompress differential", frame_remaining);
+                    vipr_set_zstd_error(error_buffer, error_buffer_size, "decompress payload", frame_remaining);
                     goto cleanup;
                 }
                 if (produced > expected_output_size || (uint64_t)out.pos > expected_output_size - produced) {
@@ -155,7 +132,7 @@ int vipr_decoder_decompress_segment(
                 }
                 if (out.pos > 0) {
                     if (output != NULL && fwrite(decoder->output_buffer, 1, out.pos, output) != out.pos) {
-                        vipr_set_errno_error(error_buffer, error_buffer_size, "write patched output file");
+                        vipr_set_errno_error(error_buffer, error_buffer_size, "write decompressed output");
                         goto cleanup;
                     }
                     produced += (uint64_t)out.pos;
@@ -165,34 +142,31 @@ int vipr_decoder_decompress_segment(
                     }
                 }
                 if (frame_remaining == 0 && (in.pos != in.size || remaining_segment != 0)) {
-                    vipr_set_error(error_buffer, error_buffer_size, "differential segment contains trailing data");
+                    vipr_set_error(error_buffer, error_buffer_size, "compressed segment contains trailing data");
                     goto cleanup;
                 }
             }
         }
         if (remaining_segment != 0) {
-            vipr_set_error(error_buffer, error_buffer_size, "differential segment was not fully consumed");
+            vipr_set_error(error_buffer, error_buffer_size, "compressed segment was not fully consumed");
             goto cleanup;
         }
         if (produced != expected_output_size) {
-            vipr_set_error(error_buffer, error_buffer_size, "patched output size does not match metadata");
+            vipr_set_error(error_buffer, error_buffer_size, "decompressed output size does not match metadata");
             goto cleanup;
         }
     }
 
     if (output != NULL && fflush(output) != 0) {
-        vipr_set_errno_error(error_buffer, error_buffer_size, "flush patched output file");
+        vipr_set_errno_error(error_buffer, error_buffer_size, "flush decompressed output");
         goto cleanup;
     }
     result = 0;
 
 cleanup:
     if (output != NULL && fclose(output) != 0 && result == 0) {
-        vipr_set_errno_error(error_buffer, error_buffer_size, "close patched output file");
+        vipr_set_errno_error(error_buffer, error_buffer_size, "close decompressed output");
         result = -1;
-    }
-    if (reference_mapped) {
-        vipr_unmap_file(&reference);
     }
     return result;
 }

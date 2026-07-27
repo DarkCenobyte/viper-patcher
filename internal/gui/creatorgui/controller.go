@@ -1,9 +1,6 @@
 package creatorgui
 
 import (
-	"context"
-	"fmt"
-	"path/filepath"
 	"runtime"
 	"strconv"
 
@@ -17,8 +14,6 @@ import (
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/branding"
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/nativedialog"
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/windowsizing"
-	"github.com/DarkCenobyte/viper-patcher/internal/patch"
-	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
 
 const (
@@ -26,6 +21,7 @@ const (
 	creatorWindowFallbackHeight = 940
 	creatorLogoWidth            = 360
 	creatorLogoHeight           = 166
+	automaticWorkerOption       = "Auto"
 )
 
 type creatorController struct {
@@ -36,7 +32,7 @@ type creatorController struct {
 	pairs                 *filePairEditor
 	levelSelect           *widget.Select
 	compressionWarning    *widget.Label
-	parallelSelect        *widget.Select
+	workerSelect          *widget.Select
 	comment               *widget.Entry
 	reverse               *widget.Check
 	outputDirectory       string
@@ -48,7 +44,6 @@ type creatorController struct {
 	selectWorkDirectory   *widget.Button
 	resetWorkDirectory    *widget.Button
 	progressBar           *widget.ProgressBar
-	lastProgress          float64
 	status                *widget.Label
 	createButton          *widget.Button
 }
@@ -64,8 +59,9 @@ func newCreatorController(application fyne.App) *creatorController {
 	controller.compressionWarning.Hide()
 	controller.levelSelect = widget.NewSelect(integerOptions(1, 22), controller.updateCompressionWarning)
 	controller.levelSelect.SetSelected("3")
-	controller.parallelSelect = widget.NewSelect(integerOptions(1, runtime.NumCPU()), nil)
-	controller.parallelSelect.SetSelected("1")
+	workerOptions := append([]string{automaticWorkerOption}, integerOptions(1, runtime.NumCPU())...)
+	controller.workerSelect = widget.NewSelect(workerOptions, nil)
+	controller.workerSelect.SetSelected(automaticWorkerOption)
 	controller.comment = widget.NewMultiLineEntry()
 	controller.comment.SetText("Created with Viper-Patcher")
 	controller.comment.SetMinRowsVisible(3)
@@ -103,7 +99,7 @@ func (controller *creatorController) buildContent() fyne.CanvasObject {
 	settingsContent := container.NewVBox(
 		container.NewGridWithColumns(2, widget.NewLabel("Compression level"), controller.levelSelect),
 		controller.compressionWarning,
-		container.NewGridWithColumns(2, widget.NewLabel("Parallel files"), controller.parallelSelect),
+		container.NewGridWithColumns(2, widget.NewLabel("Worker target"), controller.workerSelect),
 		container.NewGridWithColumns(2, widget.NewLabel("Reverse support"), controller.reverse),
 		container.NewBorder(nil, nil, container.NewHBox(controller.selectWorkDirectory, controller.resetWorkDirectory), nil, controller.workDirectoryLabel),
 	)
@@ -254,120 +250,4 @@ func (controller *creatorController) chooseWorkDirectory() {
 func (controller *creatorController) clearWorkDirectory() {
 	controller.workDirectory = ""
 	controller.workDirectoryLabel.SetText("System temporary directory")
-}
-
-func (controller *creatorController) createPatch() {
-	options, err := controller.createOptions()
-	if err != nil {
-		dialog.ShowError(err, controller.window)
-		return
-	}
-	estimate, err := patch.EstimateCreate(options)
-	if err != nil {
-		dialog.ShowError(err, controller.window)
-		return
-	}
-	message := fmt.Sprintf(
-		"Estimated peak temporary disk usage: %s\n\nEstimated creator work usage: %s\nEstimated output-folder usage: %s\n\nThe estimate is conservative and includes snapshots, differential bounds, the temporary patch, and an existing output backup. Continue?",
-		formatByteSize(estimate.TotalBytes),
-		formatByteSize(estimate.WorkDirectoryBytes),
-		formatByteSize(estimate.OutputDirectoryBytes),
-	)
-	dialog.NewConfirm("Confirm patch creation", message, func(confirmed bool) {
-		if confirmed {
-			controller.startCreate(options)
-		}
-	}, controller.window).Show()
-}
-
-func (controller *creatorController) startCreate(options patch.CreateOptions) {
-	controller.setControlsEnabled(false)
-	controller.lastProgress = 0
-	controller.progressBar.SetValue(0)
-	controller.progressBar.Show()
-	controller.status.SetText("Preparing immutable input snapshots...")
-
-	go func(options patch.CreateOptions) {
-		err := patch.Create(context.Background(), options, func(event progress.Event) {
-			fyne.Do(func() {
-				controller.status.SetText(creatorProgressText(event))
-				value := creatorOverallProgress(event, options.CreateReverse)
-				if value > controller.lastProgress {
-					controller.lastProgress = value
-					controller.progressBar.SetValue(value)
-				}
-			})
-		})
-		fyne.Do(func() {
-			controller.setControlsEnabled(true)
-			if err != nil && !patch.IsCommittedWarning(err) {
-				controller.status.SetText("Patch creation failed.")
-				dialog.ShowError(err, controller.window)
-				return
-			}
-			controller.progressBar.SetValue(1)
-			controller.status.SetText("Patch created successfully: " + options.OutputPath)
-			if err != nil {
-				dialog.ShowInformation("Patch created with warning", "The VIPR patch was created successfully, but cleanup reported a warning:\n\n"+err.Error(), controller.window)
-				return
-			}
-			dialog.ShowInformation("Patch created", "The VIPR patch was created successfully.", controller.window)
-		})
-	}(options)
-}
-
-func (controller *creatorController) createOptions() (patch.CreateOptions, error) {
-	filePairs := controller.pairs.Pairs()
-	if len(filePairs) == 0 {
-		return patch.CreateOptions{}, fmt.Errorf("add at least one source/target file pair")
-	}
-	if controller.outputDirectory == "" {
-		return patch.CreateOptions{}, fmt.Errorf("select an output folder")
-	}
-	name, err := normalizeOutputName(controller.outputName.Text)
-	if err != nil {
-		return patch.CreateOptions{}, err
-	}
-	level, err := strconv.Atoi(controller.levelSelect.Selected)
-	if err != nil {
-		return patch.CreateOptions{}, fmt.Errorf("invalid compression level")
-	}
-	parallelism, err := strconv.Atoi(controller.parallelSelect.Selected)
-	if err != nil {
-		return patch.CreateOptions{}, fmt.Errorf("invalid parallel file count")
-	}
-	return patch.CreateOptions{
-		Files:            filePairs,
-		OutputPath:       filepath.Join(controller.outputDirectory, name),
-		CompressionLevel: level,
-		Comment:          controller.comment.Text,
-		CreateReverse:    controller.reverse.Checked,
-		WorkDirectory:    controller.workDirectory,
-		Parallelism:      parallelism,
-	}, nil
-}
-
-func (controller *creatorController) setControlsEnabled(enabled bool) {
-	controller.pairs.SetEnabled(enabled)
-	if enabled {
-		controller.selectOutputDirectory.Enable()
-		controller.outputName.Enable()
-		controller.levelSelect.Enable()
-		controller.parallelSelect.Enable()
-		controller.comment.Enable()
-		controller.reverse.Enable()
-		controller.selectWorkDirectory.Enable()
-		controller.resetWorkDirectory.Enable()
-		controller.createButton.Enable()
-		return
-	}
-	controller.selectOutputDirectory.Disable()
-	controller.outputName.Disable()
-	controller.levelSelect.Disable()
-	controller.parallelSelect.Disable()
-	controller.comment.Disable()
-	controller.reverse.Disable()
-	controller.selectWorkDirectory.Disable()
-	controller.resetWorkDirectory.Disable()
-	controller.createButton.Disable()
 }

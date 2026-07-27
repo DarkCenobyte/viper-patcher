@@ -1,13 +1,13 @@
 package patch
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 )
 
 type fileExpectation struct {
@@ -20,7 +20,7 @@ type fileSnapshot struct {
 	SnapshotPath string
 	Hash         string
 	Size         uint64
-	Mode         uint32
+	ChunkDigests [][32]byte
 }
 
 type stableFileSource struct {
@@ -29,7 +29,25 @@ type stableFileSource struct {
 	lstat   func() (os.FileInfo, error)
 }
 
-func snapshotRegularFile(sourcePath, destinationPath string) (fileSnapshot, error) {
+type snapshotProgressWriter struct {
+	writer       io.Writer
+	onProgress   func(uint64)
+	processed    uint64
+	lastReported uint64
+	total        uint64
+}
+
+func (writer *snapshotProgressWriter) Write(data []byte) (int, error) {
+	count, err := writer.writer.Write(data)
+	writer.processed += uint64(count)
+	if writer.onProgress != nil && (writer.processed >= writer.total || writer.processed-writer.lastReported >= 8<<20) {
+		writer.lastReported = writer.processed
+		writer.onProgress(writer.processed)
+	}
+	return count, err
+}
+
+func snapshotRegularFile(sourcePath, destinationPath string, onProgress func(uint64)) (fileSnapshot, error) {
 	source := stableFileSource{
 		display: sourcePath,
 		open: func() (*os.File, os.FileInfo, error) {
@@ -39,10 +57,10 @@ func snapshotRegularFile(sourcePath, destinationPath string) (fileSnapshot, erro
 			return os.Lstat(sourcePath)
 		},
 	}
-	return snapshotStableFile(source, destinationPath)
+	return snapshotStableFile(source, destinationPath, onProgress)
 }
 
-func snapshotStableFile(source stableFileSource, destinationPath string) (snapshot fileSnapshot, resultError error) {
+func snapshotStableFile(source stableFileSource, destinationPath string, onProgress func(uint64)) (snapshot fileSnapshot, resultError error) {
 	file, identity, err := source.open()
 	if err != nil {
 		return fileSnapshot{}, err
@@ -71,13 +89,21 @@ func snapshotStableFile(source stableFileSource, destinationPath string) (snapsh
 		}
 	}()
 
-	hash := sha256.New()
-	written, err := io.Copy(io.MultiWriter(output, hash), file)
+	hash := hashutil.NewAccumulator()
+	copyWriter := &snapshotProgressWriter{
+		writer:     io.MultiWriter(output, hash),
+		onProgress: onProgress,
+		total:      uint64(identity.Size()),
+	}
+	written, err := io.Copy(copyWriter, file)
 	if err != nil {
 		return fileSnapshot{}, fmt.Errorf("snapshot %q: %w", source.display, err)
 	}
 	if written < 0 || identity.Size() < 0 || uint64(written) != uint64(identity.Size()) {
 		return fileSnapshot{}, fmt.Errorf("file %q changed size while it was being snapshotted", source.display)
+	}
+	if onProgress != nil && copyWriter.lastReported != uint64(written) {
+		onProgress(uint64(written))
 	}
 	if err := verifySnapshotSourceMetadata(file, source, identity, uint64(written)); err != nil {
 		return fileSnapshot{}, err
@@ -97,12 +123,16 @@ func snapshotStableFile(source stableFileSource, destinationPath string) (snapsh
 		return fileSnapshot{}, fmt.Errorf("close snapshot source %q: %w", source.display, err)
 	}
 	sourceClosed = true
+	digest, chunkDigests, err := hash.SumHexAndChunks()
+	if err != nil {
+		return fileSnapshot{}, err
+	}
 	committed = true
 	return fileSnapshot{
 		SnapshotPath: destinationPath,
-		Hash:         hex.EncodeToString(hash.Sum(nil)),
+		Hash:         digest,
 		Size:         uint64(written),
-		Mode:         uint32(identity.Mode().Perm()),
+		ChunkDigests: chunkDigests,
 	}, nil
 }
 
@@ -173,12 +203,11 @@ func verifyOpenedFileExpectation(file *os.File, identity os.FileInfo, displayPat
 	if expected.Hash == "" {
 		return nil
 	}
-	hash := sha256.New()
-	size, err := io.Copy(hash, file)
+	digest, size, err := hashutil.Reader(file)
 	if err != nil {
 		return fmt.Errorf("verify content of %q: %w", displayPath, err)
 	}
-	if size < 0 || uint64(size) != expected.Size || hex.EncodeToString(hash.Sum(nil)) != expected.Hash {
+	if size != expected.Size || digest != expected.Hash {
 		return fmt.Errorf("%q changed after validation", displayPath)
 	}
 	return nil

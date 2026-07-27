@@ -5,8 +5,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-
-	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
 
 func TestParallelForBoundaryAndFailureCases(t *testing.T) {
@@ -45,18 +43,5 @@ func TestParallelForBoundaryAndFailureCases(t *testing.T) {
 	cancel()
 	if err := parallelFor(ctx, 1, 1, func(context.Context, int) error { return nil }); !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context cancellation", err)
-	}
-}
-
-func TestSynchronizedProgress(t *testing.T) {
-	if synchronizedProgress(nil) != nil {
-		t.Fatal("nil callback must remain nil")
-	}
-	var count int
-	callback := synchronizedProgress(func(progress.Event) { count++ })
-	callback(progress.Event{})
-	callback(progress.Event{})
-	if count != 2 {
-		t.Fatalf("callback count = %d", count)
 	}
 }

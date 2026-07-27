@@ -18,12 +18,12 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.SetOutput(io.Discard)
 	var patchFile string
 	var reverse bool
-	var parallelism int
+	var workerBudget int
 	var help bool
 	var version bool
 	flags.StringVar(&patchFile, "patch-file", "", "input .vipr patch")
 	flags.BoolVar(&reverse, "reverse", false, "apply reverse differentials")
-	flags.IntVar(&parallelism, "parallel", runtime.NumCPU(), "number of files prepared in parallel")
+	flags.IntVar(&workerBudget, "workers", runtime.NumCPU(), "logical worker target")
 	flags.Bool("headless", false, "force command-line mode")
 	flags.BoolVar(&help, "help", false, "show help")
 	flags.BoolVar(&version, "version", false, "show version")
@@ -51,8 +51,8 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		printUsage(stderr)
 		return 2
 	}
-	if parallelism < 1 || parallelism > runtime.NumCPU() {
-		fmt.Fprintf(stderr, "Error: --parallel must be between 1 and %d.\n", runtime.NumCPU())
+	if workerBudget < 1 || workerBudget > runtime.NumCPU() {
+		fmt.Fprintf(stderr, "Error: --workers must be between 1 and %d.\n", runtime.NumCPU())
 		return 2
 	}
 
@@ -62,10 +62,10 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	}
 	reporter := newTerminalProgress(stderr)
 	applyError := patch.ApplyWithOptions(ctx, patch.ApplyOptions{
-		PatchPath:   patchFile,
-		Root:        flags.Arg(0),
-		Direction:   direction,
-		Parallelism: parallelism,
+		PatchPath:    patchFile,
+		Root:         flags.Arg(0),
+		Direction:    direction,
+		WorkerBudget: workerBudget,
 	}, reporter.Report)
 	reporter.Finish()
 	if applyError != nil && !patch.IsCommittedWarning(applyError) {
@@ -82,13 +82,13 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "Example:")
 	fmt.Fprintln(writer, "  patcher --headless --patch-file update.vipr /path/to/application")
-	fmt.Fprintln(writer, "  patcher --headless --patch-file update.vipr --reverse /path/to/application")
+	fmt.Fprintln(writer, "  patcher --headless --patch-file update.vipr --reverse --workers 4 /path/to/application")
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "Supported parameters:")
 	fmt.Fprintln(writer, "  --patch-file <file.vipr>       Required.")
 	fmt.Fprintln(writer, "  <target-directory>            Required positional argument.")
 	fmt.Fprintln(writer, "  [--reverse]                   Default: false.")
-	fmt.Fprintln(writer, "  [--parallel <count>]          Parallel file preparation. Default: logical CPU count.")
+	fmt.Fprintln(writer, "  [--workers <count>]           Logical worker target. Default: logical CPU count.")
 	fmt.Fprintln(writer, "  [--headless]                  Force CLI mode.")
 	fmt.Fprintln(writer, "  [--version]                   Show version information.")
 	fmt.Fprintln(writer, "  [--help]                      Show this help.")
@@ -136,7 +136,7 @@ func (reporter *terminalProgress) Report(event progress.Event) {
 		if event.Stage == progress.StageVerifying {
 			label = "Verifying"
 		}
-		fmt.Fprintf(reporter.writer, "\r  %s: %6.2f%% (%d/%d bytes)", label, percentage, event.ProcessedBytes, event.TotalBytes)
+		fmt.Fprintf(reporter.writer, "\r  %s: %6.2f%% (%d/%d bytes, overall %6.2f%%)", label, percentage, event.ProcessedBytes, event.TotalBytes, event.Overall*100)
 		reporter.lineActive = true
 	}
 }

@@ -15,12 +15,13 @@ func validHeader() Header {
 		CreatedAt:     time.Unix(1, 0).UTC(),
 		Creator:       CreatorInfo{Name: "creator", Version: "test"},
 		Comment:       "hello",
-		HashAlgorithm: "sha256",
-		Compression:   Compression{Algorithm: "zstd", Library: "1.5.7", Mode: "patch-from", Level: 3},
+		HashAlgorithm: HashBLAKE3Tree,
+		Compression:   Compression{Algorithm: AlgorithmHybrid, Library: SupportedZstdVersion, Mode: CompressionHybrid, Level: 3},
 		Files: []FileEntry{{
 			Path:          "bin/game.exe",
 			SourceHash:    strings.Repeat("a", 64),
 			TargetHash:    strings.Repeat("b", 64),
+			ForwardMethod: MethodReplace,
 			ForwardLength: 10,
 		}},
 	}
@@ -41,27 +42,14 @@ func TestEncodeDecode(t *testing.T) {
 	}
 }
 
-func TestLegacyTargetHintCompatibility(t *testing.T) {
-	header := validHeader()
-	payload, err := json.Marshal(header)
+func TestLegacyTargetHintIsRejected(t *testing.T) {
+	payload, err := json.Marshal(validHeader())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(payload, []byte(`"targetHint"`)) {
-		t.Fatal("current headers must not write targetHint")
-	}
-
 	payload = bytes.Replace(payload, []byte(`"path":"bin/game.exe"`), []byte(`"path":"bin/game.exe","targetHint":{"legacy":"renamed.exe"}`), 1)
-	parsed := decodePayload(t, payload)
-	if parsed.Header.Files[0] != header.Files[0] {
-		t.Fatalf("ignored legacy field changed the parsed entry: %#v", parsed.Header.Files[0])
-	}
-	reencoded, err := json.Marshal(parsed.Header)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(reencoded, []byte(`"targetHint"`)) {
-		t.Fatal("ignored targetHint must not be retained or re-encoded")
+	if _, err := Decode(encodedPayload(t, payload)); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("expected targetHint rejection, got %v", err)
 	}
 }
 
@@ -71,18 +59,12 @@ func TestFileEntryStillRejectsUnknownFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload = bytes.Replace(payload, []byte(`"path":"bin/game.exe"`), []byte(`"path":"bin/game.exe","unexpected":true`), 1)
-	var buffer bytes.Buffer
-	buffer.Write(Magic[:])
-	if err := binary.Write(&buffer, binary.LittleEndian, uint64(len(payload))); err != nil {
-		t.Fatal(err)
-	}
-	buffer.Write(payload)
-	if _, err := Decode(&buffer); err == nil || !strings.Contains(err.Error(), "unknown field") {
+	if _, err := Decode(encodedPayload(t, payload)); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("expected unknown file-entry field rejection, got %v", err)
 	}
 }
 
-func decodePayload(t *testing.T, payload []byte) Patch {
+func encodedPayload(t *testing.T, payload []byte) *bytes.Reader {
 	t.Helper()
 	var buffer bytes.Buffer
 	buffer.Write(Magic[:])
@@ -90,11 +72,7 @@ func decodePayload(t *testing.T, payload []byte) Patch {
 		t.Fatal(err)
 	}
 	buffer.Write(payload)
-	parsed, err := Decode(&buffer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return parsed
+	return bytes.NewReader(buffer.Bytes())
 }
 
 func TestDecodeRejectsMagic(t *testing.T) {
@@ -130,15 +108,15 @@ func TestValidateHeaderFailures(t *testing.T) {
 		mutate func(*Header)
 	}{
 		{"version", func(header *Header) { header.FormatVersion++ }},
-		{"hash", func(header *Header) { header.HashAlgorithm = "md5" }},
-		{"compression", func(header *Header) { header.Compression.Mode = "other" }},
+		{"hash", func(header *Header) { header.HashAlgorithm = "sha256" }},
+		{"compression algorithm", func(header *Header) { header.Compression.Algorithm = "zstd" }},
+		{"compression mode", func(header *Header) { header.Compression.Mode = "patch-from" }},
 		{"zstd version", func(header *Header) { header.Compression.Library = "1.5.6" }},
 		{"empty files", func(header *Header) { header.Files = nil }},
 		{"empty path", func(header *Header) { header.Files[0].Path = "" }},
 		{"bad digest", func(header *Header) { header.Files[0].SourceHash = "bad" }},
-		{"special source mode", func(header *Header) { header.Files[0].SourceMode = 0o4755 }},
-		{"special target mode", func(header *Header) { header.Files[0].TargetMode = 0o1000 }},
-		{"unknown mode bit", func(header *Header) { header.Files[0].TargetMode = 1 << 31 }},
+		{"source size overflow", func(header *Header) { header.Files[0].SourceSize = maxSignedFileSize + 1 }},
+		{"target size overflow", func(header *Header) { header.Files[0].TargetSize = maxSignedFileSize + 1 }},
 		{"non-hex digest", func(header *Header) { header.Files[0].SourceHash = strings.Repeat("z", 64) }},
 		{"uppercase digest", func(header *Header) { header.Files[0].SourceHash = strings.Repeat("A", 64) }},
 		{"traversal path", func(header *Header) { header.Files[0].Path = "../game.exe" }},
@@ -146,6 +124,7 @@ func TestValidateHeaderFailures(t *testing.T) {
 		{"non-canonical path", func(header *Header) { header.Files[0].Path = "bin/../game.exe" }},
 		{"reserved device path", func(header *Header) { header.Files[0].Path = "bin/CON.txt" }},
 		{"invalid Windows character", func(header *Header) { header.Files[0].Path = "bin/game?.exe" }},
+		{"missing method", func(header *Header) { header.Files[0].ForwardMethod = "" }},
 		{"missing forward", func(header *Header) { header.Files[0].ForwardLength = 0 }},
 		{"missing reverse", func(header *Header) { header.Reverse = true }},
 		{"duplicate path", func(header *Header) { header.Files = append(header.Files, header.Files[0]) }},
@@ -174,7 +153,7 @@ func TestValidateHeaderFailures(t *testing.T) {
 
 func TestDecodeRejectsTrailingJSON(t *testing.T) {
 	header := validHeader()
-	payload := []byte(`{"formatVersion":1} {}`)
+	payload := []byte(`{"formatVersion":3} {}`)
 	var buffer bytes.Buffer
 	buffer.Write(Magic[:])
 	_ = binary.Write(&buffer, binary.LittleEndian, uint64(len(payload)))

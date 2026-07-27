@@ -3,21 +3,23 @@ package patch
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
 
 func coverageDigest(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
+	digest, _, err := hashutil.Reader(bytes.NewReader(data))
+	if err != nil {
+		panic(err)
+	}
+	return digest
 }
 
 func coverageApplicationFiles(t *testing.T, sourceData, operationData []byte) (*os.File, *os.File, *os.File, string) {
@@ -89,13 +91,13 @@ func TestApplyCopyAddStreamSuccessAndProgress(t *testing.T) {
 	})
 	source, operations, output, outputPath := coverageApplicationFiles(t, sourceData, operationsData)
 	var reported progress.Event
-	err := applyCopyAddStream(
+	err := applyCopyAddStreamContext(
+		context.Background(),
 		source,
 		operations,
 		output,
 		uint64(len(sourceData)),
 		uint64(len(targetData)),
-		coverageDigest(sourceData),
 		coverageDigest(targetData),
 		func(event progress.Event) { reported = event },
 		progress.Event{Path: "game.bin"},
@@ -116,31 +118,17 @@ func TestApplyCopyAddStreamSuccessAndProgress(t *testing.T) {
 }
 
 func TestApplyCopyAddStreamRejectsMalformedInput(t *testing.T) {
-	if err := applyCopyAddStream(nil, nil, nil, 0, 0, "", "", nil, progress.Event{}); err == nil || !strings.Contains(err.Error(), "requires source") {
-		t.Fatalf("unexpected nil-file error: %v", err)
-	}
-
 	tests := []struct {
 		name       string
 		sourceData []byte
 		operations []byte
 		targetSize uint64
-		sourceHash string
 		targetHash string
 		want       string
 	}{
 		{
-			name:       "source hash",
-			sourceData: []byte("source"),
-			operations: coverageCopyAddStream(func(buffer *bytes.Buffer) { buffer.WriteByte(copyAddOpcodeEnd) }),
-			sourceHash: strings.Repeat("0", 64),
-			targetHash: coverageDigest(nil),
-			want:       "source failed",
-		},
-		{
 			name:       "invalid magic",
 			operations: []byte("not-copy-add"),
-			sourceHash: coverageDigest(nil),
 			targetHash: coverageDigest(nil),
 			want:       "invalid copy-add stream magic",
 		},
@@ -149,7 +137,6 @@ func TestApplyCopyAddStreamRejectsMalformedInput(t *testing.T) {
 			operations: coverageCopyAddStream(func(buffer *bytes.Buffer) {
 				buffer.WriteByte(99)
 			}),
-			sourceHash: coverageDigest(nil),
 			targetHash: coverageDigest(nil),
 			want:       "unsupported copy-add opcode",
 		},
@@ -161,7 +148,6 @@ func TestApplyCopyAddStreamRejectsMalformedInput(t *testing.T) {
 				coverageAppendUvarint(buffer, 0)
 				coverageAppendUvarint(buffer, 0)
 			}),
-			sourceHash: coverageDigest([]byte("a")),
 			targetHash: coverageDigest(nil),
 			want:       "COPY range",
 		},
@@ -173,7 +159,6 @@ func TestApplyCopyAddStreamRejectsMalformedInput(t *testing.T) {
 				coverageAppendUvarint(buffer, 1)
 				coverageAppendUvarint(buffer, 1)
 			}),
-			sourceHash: coverageDigest([]byte("a")),
 			targetHash: coverageDigest(nil),
 			want:       "COPY range",
 		},
@@ -183,7 +168,6 @@ func TestApplyCopyAddStreamRejectsMalformedInput(t *testing.T) {
 				buffer.WriteByte(copyAddOpcodeAdd)
 				coverageAppendUvarint(buffer, 0)
 			}),
-			sourceHash: coverageDigest(nil),
 			targetHash: coverageDigest(nil),
 			want:       "ADD range",
 		},
@@ -195,7 +179,6 @@ func TestApplyCopyAddStreamRejectsMalformedInput(t *testing.T) {
 				buffer.WriteByte('x')
 			}),
 			targetSize: 2,
-			sourceHash: coverageDigest(nil),
 			targetHash: coverageDigest([]byte("xx")),
 			want:       "read ADD payload",
 		},
@@ -205,7 +188,6 @@ func TestApplyCopyAddStreamRejectsMalformedInput(t *testing.T) {
 				buffer.WriteByte(copyAddOpcodeEnd)
 			}),
 			targetSize: 1,
-			sourceHash: coverageDigest(nil),
 			targetHash: coverageDigest([]byte{0}),
 			want:       "output size",
 		},
@@ -215,7 +197,6 @@ func TestApplyCopyAddStreamRejectsMalformedInput(t *testing.T) {
 				buffer.WriteByte(copyAddOpcodeEnd)
 				buffer.WriteByte(1)
 			}),
-			sourceHash: coverageDigest(nil),
 			targetHash: coverageDigest(nil),
 			want:       "trailing data",
 		},
@@ -228,7 +209,6 @@ func TestApplyCopyAddStreamRejectsMalformedInput(t *testing.T) {
 				buffer.WriteByte(copyAddOpcodeEnd)
 			}),
 			targetSize: 1,
-			sourceHash: coverageDigest(nil),
 			targetHash: strings.Repeat("0", 64),
 			want:       "output failed",
 		},
@@ -237,13 +217,13 @@ func TestApplyCopyAddStreamRejectsMalformedInput(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			source, operations, output, _ := coverageApplicationFiles(t, test.sourceData, test.operations)
-			err := applyCopyAddStream(
+			err := applyCopyAddStreamContext(
+				context.Background(),
 				source,
 				operations,
 				output,
 				uint64(len(test.sourceData)),
 				test.targetSize,
-				test.sourceHash,
 				test.targetHash,
 				nil,
 				progress.Event{},
@@ -267,13 +247,15 @@ func TestApplySparseStreamSuccessAndValidation(t *testing.T) {
 	})
 	source, operations, output, outputPath := coverageApplicationFiles(t, sourceData, operationsData)
 	var reported progress.Event
-	err := applySparseStream(
+	err := applySparseStreamParallel(
+		context.Background(),
 		source,
 		operations,
 		output,
 		uint64(len(sourceData)),
 		coverageDigest(sourceData),
 		coverageDigest(targetData),
+		1,
 		func(event progress.Event) { reported = event },
 		progress.Event{Path: "game.bin"},
 	)
@@ -291,7 +273,7 @@ func TestApplySparseStreamSuccessAndValidation(t *testing.T) {
 		t.Fatalf("unexpected progress event: %#v", reported)
 	}
 
-	if err := applySparseStream(nil, nil, nil, 0, "", "", nil, progress.Event{}); err == nil || !strings.Contains(err.Error(), "requires source") {
+	if err := applySparseStreamParallel(context.Background(), nil, nil, nil, 0, "", "", 1, nil, progress.Event{}); err == nil || !strings.Contains(err.Error(), "requires source") {
 		t.Fatalf("unexpected nil-file error: %v", err)
 	}
 }
@@ -388,13 +370,15 @@ func TestApplySparseStreamRejectsMalformedInput(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			source, operations, output, _ := coverageApplicationFiles(t, test.sourceData, test.operations)
-			err := applySparseStream(
+			err := applySparseStreamParallel(
+				context.Background(),
 				source,
 				operations,
 				output,
 				test.expected,
 				test.sourceHash,
 				test.targetHash,
+				1,
 				nil,
 				progress.Event{},
 			)
@@ -405,7 +389,7 @@ func TestApplySparseStreamRejectsMalformedInput(t *testing.T) {
 	}
 }
 
-func TestFastV2CreationCleanupAndUtilityBranches(t *testing.T) {
+func TestContentChunkUtilityBranches(t *testing.T) {
 	directory := t.TempDir()
 	chunkPath := filepath.Join(directory, "chunks.bin")
 	if err := os.WriteFile(chunkPath, []byte("chunk"), 0o600); err != nil {
@@ -416,39 +400,15 @@ func TestFastV2CreationCleanupAndUtilityBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer chunkFile.Close()
+	profile := copyAddProfileForSize(uint64(len("chunk")))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := forEachContentChunk(ctx, chunkFile, func(contentChunk) error { return nil }); !errors.Is(err, context.Canceled) {
+	if err := forEachContentChunk(ctx, chunkFile, profile, func(contentChunk) error { return nil }); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled chunking error = %v", err)
 	}
 	sentinel := errors.New("stop chunking")
-	if err := forEachContentChunk(context.Background(), chunkFile, func(contentChunk) error { return sentinel }); !errors.Is(err, sentinel) {
+	if err := forEachContentChunk(context.Background(), chunkFile, profile, func(contentChunk) error { return sentinel }); !errors.Is(err, sentinel) {
 		t.Fatalf("callback error = %v", err)
 	}
 
-	sourcePath := filepath.Join(directory, "source.bin")
-	targetPath := filepath.Join(directory, "target.bin")
-	forwardPath := filepath.Join(directory, "forward.ops")
-	if err := os.WriteFile(sourcePath, []byte("a"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(targetPath, []byte("ab"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := createSparseStreams(sourcePath, targetPath, forwardPath, ""); err == nil || !strings.Contains(err.Error(), "equal source and target sizes") {
-		t.Fatalf("unexpected sparse creation error: %v", err)
-	}
-	if _, err := os.Stat(forwardPath); !os.IsNotExist(err) {
-		t.Fatalf("incomplete sparse stream was not removed: %v", err)
-	}
-
-	copyAddPath := filepath.Join(directory, "copy-add.ops")
-	canceled, stop := context.WithCancel(context.Background())
-	stop()
-	if _, err := createCopyAddStream(canceled, sourcePath, targetPath, copyAddPath); !errors.Is(err, context.Canceled) {
-		t.Fatalf("unexpected canceled copy-add error: %v", err)
-	}
-	if _, err := os.Stat(copyAddPath); !os.IsNotExist(err) {
-		t.Fatalf("incomplete copy-add stream was not removed: %v", err)
-	}
 }

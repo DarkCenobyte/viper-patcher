@@ -16,9 +16,10 @@ repository permissions. It:
 6. Runs native patch and zstd tests with AddressSanitizer and
    UndefinedBehaviorSanitizer.
 7. Runs `go vet`.
-8. Runs `govulncheck`.
-9. Enforces at least 80% statement coverage across core packages.
-10. Compiles both executables, including their Fyne GUI packages.
+8. Runs Staticcheck.
+9. Runs `govulncheck`.
+10. Enforces at least 80% statement coverage across core packages.
+11. Compiles both executables, including their Fyne GUI packages.
 
 ## Releases
 
@@ -55,8 +56,8 @@ All build jobs remain read-only. Only the final publication job receives
 4. Create and push a release tag:
 
 ```sh
-git tag -a v0.4.1 -m "v0.4.1"
-git push origin v0.4.1
+git tag -a v0.5.0 -m "v0.5.0"
+git push origin v0.5.0
 ```
 
 ## Future signing

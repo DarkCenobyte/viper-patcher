@@ -1,20 +1,114 @@
 package patch
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"sort"
+	"sync"
 
+	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 )
 
 type openedPatch struct {
-	file   *os.File
-	parsed patchformat.Patch
-	digest string
+	file     *os.File
+	parsed   patchformat.Patch
+	digest   string
+	path     string
+	identity os.FileInfo
+	size     uint64
+}
+
+// PreparedPatch keeps one validated patch handle open between GUI inspection
+// and application. The same immutable handle is reused, so application does not
+// need to reopen and hash the complete patch a second time.
+type PreparedPatch struct {
+	mutex  sync.Mutex
+	path   string
+	opened *openedPatch
+}
+
+// Prepare opens, parses, validates, and fingerprints one patch for later reuse.
+func Prepare(path string) (*PreparedPatch, error) {
+	opened, err := openPatch(path, "", true)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedPatch{path: path, opened: opened}, nil
+}
+
+// Path returns the path used to open the prepared patch.
+func (prepared *PreparedPatch) Path() string {
+	if prepared == nil {
+		return ""
+	}
+	prepared.mutex.Lock()
+	defer prepared.mutex.Unlock()
+	return prepared.path
+}
+
+// Digest returns the physical BLAKE3-256 fingerprint calculated during Prepare.
+func (prepared *PreparedPatch) Digest() (string, error) {
+	if prepared == nil {
+		return "", fmt.Errorf("prepared patch is unavailable")
+	}
+	prepared.mutex.Lock()
+	defer prepared.mutex.Unlock()
+	if prepared.opened == nil {
+		return "", fmt.Errorf("prepared patch is closed")
+	}
+	return prepared.opened.digest, nil
+}
+
+// Parsed returns an independent copy of the validated patch metadata.
+func (prepared *PreparedPatch) Parsed() (patchformat.Patch, error) {
+	if prepared == nil {
+		return patchformat.Patch{}, fmt.Errorf("prepared patch is unavailable")
+	}
+	prepared.mutex.Lock()
+	defer prepared.mutex.Unlock()
+	if prepared.opened == nil {
+		return patchformat.Patch{}, fmt.Errorf("prepared patch is closed")
+	}
+	parsed := prepared.opened.parsed
+	parsed.Header.Files = append([]patchformat.FileEntry(nil), parsed.Header.Files...)
+	return parsed, nil
+}
+
+func (prepared *PreparedPatch) acquire() (*openedPatch, func() error, error) {
+	if prepared == nil {
+		return nil, nil, fmt.Errorf("prepared patch is unavailable")
+	}
+	prepared.mutex.Lock()
+	if prepared.opened == nil {
+		prepared.mutex.Unlock()
+		return nil, nil, fmt.Errorf("prepared patch is closed")
+	}
+	if err := prepared.opened.verifyStable(); err != nil {
+		prepared.mutex.Unlock()
+		return nil, nil, err
+	}
+	return prepared.opened, func() error {
+		prepared.mutex.Unlock()
+		return nil
+	}, nil
+}
+
+// Close releases the stable patch handle. It waits for an active prepared apply.
+func (prepared *PreparedPatch) Close() error {
+	if prepared == nil {
+		return nil
+	}
+	prepared.mutex.Lock()
+	defer prepared.mutex.Unlock()
+	if prepared.opened == nil {
+		return nil
+	}
+	err := prepared.opened.Close()
+	prepared.opened = nil
+	return err
 }
 
 // Open parses and validates one stable patch file.
@@ -23,10 +117,10 @@ func Open(path string) (patchformat.Patch, error) {
 	return parsed, err
 }
 
-// OpenWithDigest reads one stable patch file and returns its verified SHA-256
-// digest. The patch bytes are hashed exactly once.
+// OpenWithDigest reads one stable patch file and returns its verified BLAKE3-256
+// fingerprint. The patch bytes are hashed exactly once.
 func OpenWithDigest(path string) (patchformat.Patch, string, error) {
-	opened, err := openPatchForApply(path, "")
+	opened, err := openPatch(path, "", true)
 	if err != nil {
 		return patchformat.Patch{}, "", err
 	}
@@ -35,6 +129,10 @@ func OpenWithDigest(path string) (patchformat.Patch, string, error) {
 }
 
 func openPatchForApply(path, expectedDigest string) (*openedPatch, error) {
+	return openPatch(path, expectedDigest, expectedDigest != "")
+}
+
+func openPatch(path, expectedDigest string, calculateDigest bool) (*openedPatch, error) {
 	file, identity, err := openStableRegularFile(path)
 	if err != nil {
 		return nil, err
@@ -47,7 +145,14 @@ func openPatchForApply(path, expectedDigest string) (*openedPatch, error) {
 		return nil, operationError
 	}
 
-	parsed, digest, decodeError := decodeAndHashPatch(file)
+	var parsed patchformat.Patch
+	var digest string
+	var decodeError error
+	if calculateDigest {
+		parsed, digest, decodeError = decodeAndHashPatch(file)
+	} else {
+		parsed, decodeError = patchformat.Decode(file)
+	}
 	if decodeError != nil {
 		return closeWithError(decodeError)
 	}
@@ -64,11 +169,18 @@ func openPatchForApply(path, expectedDigest string) (*openedPatch, error) {
 	if err := validateDifferentialRanges(parsed, size); err != nil {
 		return closeWithError(err)
 	}
-	return &openedPatch{file: file, parsed: parsed, digest: digest}, nil
+	return &openedPatch{
+		file:     file,
+		parsed:   parsed,
+		digest:   digest,
+		path:     path,
+		identity: identity,
+		size:     size,
+	}, nil
 }
 
 func decodeAndHashPatch(reader io.Reader) (patchformat.Patch, string, error) {
-	hash := sha256.New()
+	hash := hashutil.NewFingerprintHasher()
 	hashingReader := io.TeeReader(reader, hash)
 	parsed, err := patchformat.Decode(hashingReader)
 	if err != nil {
@@ -78,6 +190,13 @@ func decodeAndHashPatch(reader io.Reader) (patchformat.Patch, string, error) {
 		return patchformat.Patch{}, "", fmt.Errorf("hash patch payload: %w", err)
 	}
 	return parsed, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func (opened *openedPatch) verifyStable() error {
+	if opened == nil || opened.file == nil || opened.identity == nil {
+		return fmt.Errorf("patch file is unavailable")
+	}
+	return verifyOpenPatchMetadata(opened.file, opened.path, opened.identity, opened.size)
 }
 
 func (opened *openedPatch) Close() error {

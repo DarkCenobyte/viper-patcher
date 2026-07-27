@@ -13,6 +13,7 @@ type patcherSelection struct {
 	patchHash       string
 	targetDirectory string
 	parsed          patchformat.Patch
+	prepared        *patch.PreparedPatch
 }
 
 type patcherState struct {
@@ -22,14 +23,28 @@ type patcherState struct {
 }
 
 func (state *patcherState) SetPatch(path, digest string, parsed patchformat.Patch) bool {
+	return state.setPatch(path, digest, parsed, nil)
+}
+
+func (state *patcherState) SetPreparedPatch(path, digest string, parsed patchformat.Patch, prepared *patch.PreparedPatch) bool {
+	return state.setPatch(path, digest, parsed, prepared)
+}
+
+func (state *patcherState) setPatch(path, digest string, parsed patchformat.Patch, prepared *patch.PreparedPatch) bool {
 	state.mutex.Lock()
-	defer state.mutex.Unlock()
 	if state.active {
+		state.mutex.Unlock()
 		return false
 	}
+	previous := state.selection.prepared
 	state.selection.patchPath = path
 	state.selection.patchHash = digest
 	state.selection.parsed = parsed
+	state.selection.prepared = prepared
+	state.mutex.Unlock()
+	if previous != nil && previous != prepared {
+		_ = previous.Close()
+	}
 	return true
 }
 
@@ -75,4 +90,12 @@ func (state *patcherState) Active() bool {
 	state.mutex.RLock()
 	defer state.mutex.RUnlock()
 	return state.active
+}
+
+func (state *patcherState) DetachPreparedPatch() *patch.PreparedPatch {
+	state.mutex.Lock()
+	defer state.mutex.Unlock()
+	prepared := state.selection.prepared
+	state.selection.prepared = nil
+	return prepared
 }

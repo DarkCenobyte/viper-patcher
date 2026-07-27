@@ -847,7 +847,7 @@ func TestEstimateCreateAndSelectedWorkDirectory(t *testing.T) {
 		CompressionLevel: 3,
 		CreateReverse:    true,
 		WorkDirectory:    workParent,
-		Parallelism:      1,
+		WorkerBudget:     1,
 	}
 	estimate, err := EstimateCreate(options)
 	if err != nil {
@@ -902,7 +902,7 @@ func TestCreateWithParallelFileProcessing(t *testing.T) {
 		Files:            pairs,
 		OutputPath:       patchPath,
 		CompressionLevel: 3,
-		Parallelism:      2,
+		WorkerBudget:     2,
 	}, nil); err != nil {
 		t.Fatal(err)
 	}

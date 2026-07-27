@@ -76,9 +76,10 @@ Settings section. The CLI exposes the same creator-only behavior through:
 
 This setting does not alter the patch format and has no effect on the patcher.
 
-Creator file processing is sequential by default. `--parallel <count>` may be
-used to process independent file pairs concurrently, up to the logical CPU
-count. Parallelism increases CPU, memory, and disk-I/O pressure.
+Creator work uses one logical worker by default. `--workers <count>` sets the
+scheduling target shared between independent files and large chunks, up to the
+logical CPU count. It is not a strict goroutine ceiling: source verification may
+run alongside decoding. Higher values increase CPU, memory, and disk-I/O pressure.
 
 ## Native file dialogs
 
@@ -94,7 +95,7 @@ convenient for Linux development but is not used for releases.
 
 ## Architecture notes
 
-The same Go and C sources are compiled for each architecture. Reference files
-are memory-mapped; 32-bit builds are constrained by available virtual address
-space and are unsuitable for very large reference files even though target,
-patch, and output streams use bounded buffers.
+The same Go and C sources are compiled for each architecture. The native API uses
+standalone zstd frames and does not map reference files. Chunked replacement and
+sparse application keep work units bounded, but 32-bit builds still have a much
+smaller address space and should use conservative worker targets for very large files.

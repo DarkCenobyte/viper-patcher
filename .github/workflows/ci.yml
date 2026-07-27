@@ -64,6 +64,13 @@ jobs:
           CGO_ENABLED: "1"
         run: go vet -tags vipr_static_zstd,migrated_fynedo ./...
 
+      - name: Run staticcheck
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2026.1
+          staticcheck -tags vipr_static_zstd,migrated_fynedo ./...
+
       - name: Run vulnerability analysis
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.6.0

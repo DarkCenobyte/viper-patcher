@@ -3,8 +3,6 @@ package patch
 import (
 	"context"
 	"sync"
-
-	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
 
 func parallelFor(ctx context.Context, count, workers int, operation func(context.Context, int) error) error {
@@ -58,16 +56,4 @@ sendLoop:
 		return firstError
 	}
 	return ctx.Err()
-}
-
-func synchronizedProgress(callback progress.Callback) progress.Callback {
-	if callback == nil {
-		return nil
-	}
-	var mutex sync.Mutex
-	return func(event progress.Event) {
-		mutex.Lock()
-		defer mutex.Unlock()
-		callback(event)
-	}
 }

@@ -32,41 +32,6 @@ func creatorProgressText(event progress.Event) string {
 	}
 }
 
-func creatorOverallProgress(event progress.Event, includeReverse bool) float64 {
-	if event.Stage == progress.StageCompleted {
-		return 1
-	}
-	if event.FileCount <= 0 || event.FileIndex <= 0 {
-		return 0
-	}
-	unitsPerFile := 2
-	if includeReverse {
-		unitsPerFile = 3
-	}
-	completedUnits := (event.FileIndex - 1) * unitsPerFile
-	switch event.Stage {
-	case progress.StageSnapshotting:
-	case progress.StageCompressingForward:
-		completedUnits++
-	case progress.StageCompressingReverse:
-		completedUnits += 2
-	case progress.StageFilePrepared:
-		completedUnits += unitsPerFile
-	}
-	fraction := 0.0
-	if event.Stage != progress.StageFilePrepared && event.TotalBytes > 0 {
-		fraction = float64(event.ProcessedBytes) / float64(event.TotalBytes)
-	}
-	value := (float64(completedUnits) + fraction) / float64(event.FileCount*unitsPerFile)
-	if value < 0 {
-		return 0
-	}
-	if value > 1 {
-		return 1
-	}
-	return value
-}
-
 func formatByteSize(value uint64) string {
 	const unit = 1024
 	if value < unit {

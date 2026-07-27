@@ -3,15 +3,14 @@ package patch
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 	"github.com/DarkCenobyte/viper-patcher/internal/zstd"
@@ -40,8 +39,16 @@ func TestDecodeAndHashPatchStopsAfterStructuralError(t *testing.T) {
 	}
 }
 
+func TestCopyAddGearTableMatchesMixer(t *testing.T) {
+	for value := range 256 {
+		if got, want := copyAddGearTable[value], mixCopyAddGear(byte(value)); got != want {
+			t.Fatalf("gear value %d = %d, want %d", value, got, want)
+		}
+	}
+}
+
 func TestContentChunkingPreservesDataAndOffsets(t *testing.T) {
-	data := make([]byte, 3*copyAddChunkMax+12345)
+	data := make([]byte, 3*copyAddChunkDefaultMax+12345)
 	for index := range data {
 		data[index] = byte((index*131 + index/17) & 0xff)
 	}
@@ -57,12 +64,13 @@ func TestContentChunkingPreservesDataAndOffsets(t *testing.T) {
 
 	var rebuilt []byte
 	var expectedOffset uint64
-	if err := forEachContentChunk(context.Background(), file, func(chunk contentChunk) error {
+	profile := copyAddProfileForSize(uint64(len(data)))
+	if err := forEachContentChunk(context.Background(), file, profile, func(chunk contentChunk) error {
 		if chunk.offset != expectedOffset {
 			t.Fatalf("chunk offset = %d, want %d", chunk.offset, expectedOffset)
 		}
-		if len(chunk.data) > copyAddChunkMax {
-			t.Fatalf("chunk length = %d, maximum = %d", len(chunk.data), copyAddChunkMax)
+		if len(chunk.data) > profile.maximum {
+			t.Fatalf("chunk length = %d, maximum = %d", len(chunk.data), profile.maximum)
 		}
 		rebuilt = append(rebuilt, chunk.data...)
 		expectedOffset += uint64(len(chunk.data))
@@ -137,12 +145,15 @@ func TestVerifySourceReportsProgressAndHonorsCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	sum := sha256.Sum256(data)
+	digest, _, err := hashutil.Reader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var events []progress.Event
 	if err := verifySourceForDecode(context.Background(), file, fileState{
-		hash: hex.EncodeToString(sum[:]),
+		hash: digest,
 		size: uint64(len(data)),
-	}, func(event progress.Event) {
+	}, 2, func(event progress.Event) {
 		events = append(events, event)
 	}, progress.Event{FileIndex: 1, FileCount: 1, Path: "source.bin"}); err != nil {
 		t.Fatal(err)
@@ -153,7 +164,7 @@ func TestVerifySourceReportsProgressAndHonorsCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := verifySourceForDecode(ctx, file, fileState{}, nil, progress.Event{}); !errors.Is(err, context.Canceled) {
+	if err := verifySourceForDecode(ctx, file, fileState{}, 2, nil, progress.Event{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled verification error = %v", err)
 	}
 }
@@ -186,7 +197,7 @@ func TestInstructionParsersHonorCancellation(t *testing.T) {
 	}
 	defer output.Close()
 
-	if err := applySparseStreamContext(ctx, source, bytes.NewReader(sparseMagic[:]), output, 0, "", "", nil, progress.Event{}); !errors.Is(err, context.Canceled) {
+	if err := applySparseStreamParallel(ctx, source, bytes.NewReader(sparseMagic[:]), output, 0, "", "", 1, nil, progress.Event{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("sparse cancellation error = %v", err)
 	}
 	if err := applyCopyAddStreamContext(ctx, source, bytes.NewReader(copyAddMagic[:]), output, 0, 0, "", nil, progress.Event{}); !errors.Is(err, context.Canceled) {
@@ -196,7 +207,6 @@ func TestInstructionParsersHonorCancellation(t *testing.T) {
 
 func TestLargeInstructionStreamUsesBoundedStreamingPath(t *testing.T) {
 	directory := t.TempDir()
-	emptyPath := filepath.Join(directory, "empty.bin")
 	operationsPath := filepath.Join(directory, "operations.bin")
 	compressedPath := filepath.Join(directory, "operations.zst")
 	sourcePath := filepath.Join(directory, "source.bin")
@@ -215,7 +225,6 @@ func TestLargeInstructionStreamUsesBoundedStreamingPath(t *testing.T) {
 		t.Fatalf("test instruction stream is too small: %d", operations.Len())
 	}
 	for path, data := range map[string][]byte{
-		emptyPath:      nil,
 		operationsPath: operations.Bytes(),
 		sourcePath:     nil,
 	} {
@@ -223,7 +232,7 @@ func TestLargeInstructionStreamUsesBoundedStreamingPath(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := zstd.CompressFile(emptyPath, operationsPath, compressedPath, 3, nil); err != nil {
+	if err := zstd.CompressFile(operationsPath, compressedPath, 3, nil); err != nil {
 		t.Fatal(err)
 	}
 	compressed, err := os.Open(compressedPath)
@@ -250,12 +259,15 @@ func TestLargeInstructionStreamUsesBoundedStreamingPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer decoder.Close()
-	targetHash := sha256.Sum256(payload)
+	targetHash, _, err := hashutil.Reader(bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := applyCompressedInstructionStream(
 		context.Background(), decoder, compressed, 0, uint64(compressedInfo.Size()), uint64(operations.Len()),
 		func(reader io.Reader) error {
 			return applyCopyAddStreamContext(
-				context.Background(), source, reader, output, 0, uint64(len(payload)), hex.EncodeToString(targetHash[:]), nil, progress.Event{},
+				context.Background(), source, reader, output, 0, uint64(len(payload)), targetHash, nil, progress.Event{},
 			)
 		},
 	); err != nil {

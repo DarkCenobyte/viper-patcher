@@ -90,7 +90,7 @@ func differentialWorkBound(targetSize uint64) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	// Version 2 may temporarily hold one uncompressed sparse or COPY/ADD stream
+	// Format 3 may temporarily hold one uncompressed sparse or COPY/ADD stream
 	// while its compressed payload is produced. Twice the target size plus one
 	// MiB safely covers operation metadata even for adversarial tiny records.
 	instructionRaw, err := addEstimate(targetSize, targetSize, 1<<20)

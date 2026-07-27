@@ -3,17 +3,17 @@ package patch
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
+	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 )
 
-func TestFormatV2SelectsAndAppliesFastMethods(t *testing.T) {
+func TestFormatThreeSelectsAndAppliesFastMethods(t *testing.T) {
 	tests := []struct {
 		name       string
 		source     []byte
@@ -70,7 +70,7 @@ func TestFormatV2SelectsAndAppliesFastMethods(t *testing.T) {
 				OutputPath:       patchPath,
 				CompressionLevel: 3,
 				CreateReverse:    true,
-				Parallelism:      1,
+				WorkerBudget:     1,
 			}, nil); err != nil {
 				t.Fatal(err)
 			}
@@ -78,7 +78,7 @@ func TestFormatV2SelectsAndAppliesFastMethods(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := parsed.Header.Files[0].ForwardDifferentialMethod(); got != test.wantMethod {
+			if got := parsed.Header.Files[0].ForwardMethod; got != test.wantMethod {
 				t.Fatalf("forward method = %q, want %q", got, test.wantMethod)
 			}
 			if parsed.Header.FormatVersion != patchformat.FormatVersion {
@@ -86,19 +86,19 @@ func TestFormatV2SelectsAndAppliesFastMethods(t *testing.T) {
 			}
 
 			if err := ApplyWithOptions(context.Background(), ApplyOptions{
-				PatchPath:   patchPath,
-				Root:        installRoot,
-				Direction:   Forward,
-				Parallelism: 2,
+				PatchPath:    patchPath,
+				Root:         installRoot,
+				Direction:    Forward,
+				WorkerBudget: 2,
 			}, nil); err != nil {
 				t.Fatal(err)
 			}
 			assertFile(t, installedPath, targetData)
 			if err := ApplyWithOptions(context.Background(), ApplyOptions{
-				PatchPath:   patchPath,
-				Root:        installRoot,
-				Direction:   Reverse,
-				Parallelism: 2,
+				PatchPath:    patchPath,
+				Root:         installRoot,
+				Direction:    Reverse,
+				WorkerBudget: 2,
 			}, nil); err != nil {
 				t.Fatal(err)
 			}
@@ -107,7 +107,7 @@ func TestFormatV2SelectsAndAppliesFastMethods(t *testing.T) {
 	}
 }
 
-func TestFormatV2SparsePatchIsSmallerThanChangedFile(t *testing.T) {
+func TestFormatThreeSparsePatchIsSmallerThanChangedFile(t *testing.T) {
 	workspace := t.TempDir()
 	sourceData := bytes.Repeat([]byte("0123456789abcdef"), 64*1024)
 	targetData := append([]byte(nil), sourceData...)
@@ -123,7 +123,7 @@ func TestFormatV2SparsePatchIsSmallerThanChangedFile(t *testing.T) {
 		Files:            []FilePair{{SourcePath: sourcePath, TargetPath: targetPath}},
 		OutputPath:       patchPath,
 		CompressionLevel: 3,
-		Parallelism:      1,
+		WorkerBudget:     1,
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestFormatV2SparsePatchIsSmallerThanChangedFile(t *testing.T) {
 	}
 }
 
-func TestFormatV2ParallelApplyUsesIndependentPatchOffsets(t *testing.T) {
+func TestFormatThreeParallelApplyUsesIndependentPatchOffsets(t *testing.T) {
 	if runtime.NumCPU() < 2 {
 		t.Skip("parallel test requires at least two logical CPUs")
 	}
@@ -164,15 +164,15 @@ func TestFormatV2ParallelApplyUsesIndependentPatchOffsets(t *testing.T) {
 		Files:            pairs,
 		OutputPath:       patchPath,
 		CompressionLevel: 3,
-		Parallelism:      2,
+		WorkerBudget:     2,
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := ApplyWithOptions(context.Background(), ApplyOptions{
-		PatchPath:   patchPath,
-		Root:        installRoot,
-		Direction:   Forward,
-		Parallelism: 2,
+		PatchPath:    patchPath,
+		Root:         installRoot,
+		Direction:    Forward,
+		WorkerBudget: 2,
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -181,19 +181,21 @@ func TestFormatV2ParallelApplyUsesIndependentPatchOffsets(t *testing.T) {
 	}
 }
 
-func TestOpenWithDigestReturnsPhysicalFileSHA256(t *testing.T) {
+func TestOpenWithDigestReturnsPhysicalFileBLAKE3(t *testing.T) {
 	fixture := newSingleFileFixture(t, false)
 	contents, err := os.ReadFile(fixture.patchPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := sha256.Sum256(contents)
+	hasher := hashutil.NewFingerprintHasher()
+	_, _ = hasher.Write(contents)
+	expected := hashutil.HashSumHex(hasher)
 	_, digest, err := OpenWithDigest(fixture.patchPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if digest != fmt.Sprintf("%x", expected) {
-		t.Fatalf("digest = %s, want %x", digest, expected)
+	if digest != expected {
+		t.Fatalf("digest = %s, want %s", digest, expected)
 	}
 }
 

@@ -21,124 +21,66 @@ func (writer *coverageFailWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func coverageHybridReverseHeader() Header {
+func coverageReverseHeader() Header {
 	header := validHeader()
-	header.Compression = Compression{
-		Algorithm: AlgorithmHybrid,
-		Library:   SupportedZstdVersion,
-		Mode:      CompressionHybridV2,
-		Level:     3,
-	}
 	header.Reverse = true
-	header.Files[0].ForwardMethod = MethodReplace
 	header.Files[0].ReverseMethod = MethodReplace
 	header.Files[0].ReverseLength = 10
 	return header
 }
 
-func TestReverseDifferentialMethodCoverage(t *testing.T) {
-	entry := FileEntry{}
-	if got := entry.ReverseDifferentialMethod(); got != MethodPatchFrom {
-		t.Fatalf("default reverse method = %q", got)
-	}
-	entry.ReverseMethod = MethodCopyAdd
-	if got := entry.ReverseDifferentialMethod(); got != MethodCopyAdd {
-		t.Fatalf("explicit reverse method = %q", got)
-	}
-}
-
-func TestVersionTwoValidationBranches(t *testing.T) {
+func TestFormatThreeValidationBranches(t *testing.T) {
 	tests := []struct {
 		name   string
 		header func() Header
 		want   string
 	}{
 		{
-			name: "hybrid mode algorithm",
+			name: "compression algorithm",
 			header: func() Header {
 				header := validHeader()
-				header.Compression.Mode = CompressionHybridV2
+				header.Compression.Algorithm = "zstd"
 				return header
 			},
-			want: "requires algorithm",
+			want: "compression algorithm",
 		},
 		{
-			name: "patch-from mode algorithm",
+			name: "compression mode",
 			header: func() Header {
 				header := validHeader()
-				header.Compression.Algorithm = AlgorithmHybrid
+				header.Compression.Mode = "patch-from"
 				return header
 			},
-			want: "requires algorithm",
-		},
-		{
-			name: "unsupported version two mode",
-			header: func() Header {
-				header := validHeader()
-				header.Compression.Mode = "unknown"
-				return header
-			},
-			want: "unsupported version 2 compression mode",
-		},
-		{
-			name: "legacy algorithm",
-			header: func() Header {
-				header := validHeader()
-				header.FormatVersion = LegacyFormatVersion
-				header.Compression.Algorithm = AlgorithmHybrid
-				return header
-			},
-			want: "version 1 compression algorithm",
-		},
-		{
-			name: "legacy mode",
-			header: func() Header {
-				header := validHeader()
-				header.FormatVersion = LegacyFormatVersion
-				header.Compression.Mode = CompressionHybridV2
-				return header
-			},
-			want: "version 1 compression mode",
+			want: "compression mode",
 		},
 		{
 			name: "unsupported reverse method",
 			header: func() Header {
-				header := coverageHybridReverseHeader()
+				header := coverageReverseHeader()
 				header.Files[0].ReverseMethod = "unknown"
 				return header
 			},
-			want: "unsupported reverse method",
+			want: "unsupported method",
 		},
 		{
 			name: "missing reverse expanded length",
 			header: func() Header {
-				header := coverageHybridReverseHeader()
+				header := coverageReverseHeader()
 				header.Files[0].ReverseMethod = MethodSparse
 				return header
 			},
-			want: "no reverse expanded length",
-		},
-		{
-			name: "hybrid reverse with patch-from metadata",
-			header: func() Header {
-				header := validHeader()
-				header.Reverse = true
-				header.Files[0].ReverseMethod = MethodReplace
-				header.Files[0].ReverseLength = 10
-				return header
-			},
-			want: "hybrid reverse method",
+			want: "no expanded length",
 		},
 		{
 			name: "unsafe reverse instruction length",
 			header: func() Header {
-				header := coverageHybridReverseHeader()
+				header := coverageReverseHeader()
 				header.Files[0].SourceSize = 1024
 				header.Files[0].ReverseMethod = MethodCopyAdd
 				header.Files[0].ReverseExpandedLength = 2*1024 + (1 << 20) + 1
 				return header
 			},
-			want: "unsafe reverse instruction-stream",
+			want: "unsafe copy-add instruction-stream",
 		},
 		{
 			name: "unexpected reverse metadata",

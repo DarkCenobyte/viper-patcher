@@ -4,25 +4,34 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"os"
-
-	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
-	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
 
 var copyAddMagic = [8]byte{'V', 'C', 'A', 'D', '\r', '\n', 0x1a, 0x01}
 
 const (
-	copyAddOpcodeEnd     byte = 0
-	copyAddOpcodeCopy    byte = 1
-	copyAddOpcodeAdd     byte = 2
-	copyAddChunkMin           = 4 << 10
-	copyAddChunkAvg           = 16 << 10
-	copyAddChunkMax           = 64 << 10
-	copyAddMaxCandidates      = 4
+	copyAddOpcodeEnd  byte = 0
+	copyAddOpcodeCopy byte = 1
+	copyAddOpcodeAdd  byte = 2
+
+	copyAddChunkDefaultMin = 4 << 10
+	copyAddChunkDefaultAvg = 16 << 10
+	copyAddChunkDefaultMax = 64 << 10
+	copyAddChunkLargestAvg = 4 << 20
+	copyAddChunkLargestMax = 16 << 20
+
+	copyAddMaxCandidates            = 4
+	copyAddIndexMemoryBudget uint64 = 64 << 20
 )
+
+var copyAddGearTable = func() [256]uint64 {
+	var table [256]uint64
+	for value := range table {
+		table[value] = mixCopyAddGear(byte(value))
+	}
+	return table
+}()
 
 type copyAddStats struct {
 	copiedBytes  uint64
@@ -39,6 +48,85 @@ type indexedChunk struct {
 	length uint32
 }
 
+type indexedChunkCandidates struct {
+	count  uint8
+	chunks [copyAddMaxCandidates]indexedChunk
+}
+
+func (candidates *indexedChunkCandidates) add(chunk indexedChunk) {
+	if candidates.count >= copyAddMaxCandidates {
+		return
+	}
+	candidates.chunks[candidates.count] = chunk
+	candidates.count++
+}
+
+type copyAddChunkProfile struct {
+	minimum         int
+	average         int
+	maximum         int
+	maxIndexEntries int
+	indexable       bool
+}
+
+// copyAddProfileForSize keeps the compact source index within an exact backing
+// array budget. Small and medium files retain the original 4/16/64 KiB chunking,
+// while very large files progressively use coarser content-defined chunks.
+func copyAddProfileForSize(size uint64) copyAddChunkProfile {
+	maxEntries := int(copyAddIndexMemoryBudget / copyAddIndexEntrySize)
+	average := copyAddChunkDefaultAvg
+	indexable := maxEntries > 1
+	if indexable && size > 0 {
+		// Content-defined chunks may be as small as average/4. Reserve one
+		// entry for the final short chunk and choose the average from that
+		// worst-case count instead of an estimated map-entry cost.
+		entryBudget := uint64(maxEntries - 1)
+		requiredMinimum := size / entryBudget
+		if size%entryBudget != 0 {
+			requiredMinimum++
+		}
+		requiredAverage := requiredMinimum * 4
+		if requiredMinimum > copyAddChunkLargestAvg/4 || requiredAverage > copyAddChunkLargestAvg {
+			indexable = false
+		}
+		for uint64(average) < requiredAverage && average < copyAddChunkLargestAvg {
+			average <<= 1
+		}
+	}
+	if average > copyAddChunkLargestAvg {
+		average = copyAddChunkLargestAvg
+	}
+	minimum := average / 4
+	if minimum < copyAddChunkDefaultMin {
+		minimum = copyAddChunkDefaultMin
+	}
+	maximum := average * 4
+	if maximum < copyAddChunkDefaultMax {
+		maximum = copyAddChunkDefaultMax
+	}
+	if maximum > copyAddChunkLargestMax {
+		maximum = copyAddChunkLargestMax
+	}
+	return copyAddChunkProfile{
+		minimum:         minimum,
+		average:         average,
+		maximum:         maximum,
+		maxIndexEntries: maxEntries,
+		indexable:       indexable,
+	}
+}
+
+func copyAddIndexCapacity(size uint64, profile copyAddChunkProfile) int {
+	if !profile.indexable || profile.minimum <= 0 || profile.maxIndexEntries <= 0 || size == 0 {
+		return 0
+	}
+	count := size/uint64(profile.minimum) + 1
+	if count > uint64(profile.maxIndexEntries) {
+		count = uint64(profile.maxIndexEntries)
+	}
+	return int(count)
+}
+
 type copyAddStreamWriter struct {
 	writer       *bufio.Writer
 	expandedSize uint64
@@ -47,24 +135,12 @@ type copyAddStreamWriter struct {
 	copyLength   uint64
 }
 
-func createCopyAddStream(ctx context.Context, sourcePath, targetPath, outputPath string) (copyAddStats, error) {
-	info, err := os.Stat(targetPath)
-	if err != nil {
-		return copyAddStats{}, fmt.Errorf("inspect copy-add target: %w", err)
-	}
-	if info.Size() < 0 {
-		return copyAddStats{}, fmt.Errorf("copy-add target has an invalid size")
-	}
-	stats, _, err := createCopyAddStreamOptimized(ctx, sourcePath, targetPath, outputPath, uint64(info.Size()))
-	return stats, err
-}
-
-func forEachContentChunk(ctx context.Context, file *os.File, callback func(contentChunk) error) error {
+func forEachContentChunk(ctx context.Context, file *os.File, profile copyAddChunkProfile, callback func(contentChunk) error) error {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
 	readBuffer := make([]byte, sparseIOBufferSize)
-	chunk := make([]byte, 0, copyAddChunkMax)
+	chunk := make([]byte, 0, profile.maximum)
 	var offset uint64
 	var gearHash uint64
 	emit := func() error {
@@ -86,11 +162,11 @@ func forEachContentChunk(ctx context.Context, file *os.File, callback func(conte
 		count, readError := file.Read(readBuffer)
 		for _, value := range readBuffer[:count] {
 			chunk = append(chunk, value)
-			gearHash = (gearHash << 1) + copyAddGear(value)
-			if len(chunk) < copyAddChunkMin {
+			gearHash = (gearHash << 1) + copyAddGearTable[value]
+			if len(chunk) < profile.minimum {
 				continue
 			}
-			if len(chunk) < copyAddChunkMax && gearHash&(copyAddChunkAvg-1) != 0 {
+			if len(chunk) < profile.maximum && gearHash&uint64(profile.average-1) != 0 {
 				continue
 			}
 			if err := emit(); err != nil {
@@ -106,7 +182,7 @@ func forEachContentChunk(ctx context.Context, file *os.File, callback func(conte
 	}
 }
 
-func copyAddGear(value byte) uint64 {
+func mixCopyAddGear(value byte) uint64 {
 	x := uint64(value) + 0x9e3779b97f4a7c15
 	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
 	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
@@ -199,24 +275,4 @@ func writeUvarint(writer io.Writer, value uint64) (int, error) {
 	count := binary.PutUvarint(encoded[:], value)
 	_, err := writer.Write(encoded[:count])
 	return count, err
-}
-
-func applyCopyAddStream(source, operations, output *os.File, expectedSourceSize, expectedTargetSize uint64, expectedSourceHash, expectedTargetHash string, callback progress.Callback, event progress.Event) error {
-	if source == nil || operations == nil || output == nil {
-		return fmt.Errorf("copy-add application requires source, operations, and output files")
-	}
-	if _, err := source.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	digest, size, err := hashutil.Reader(source)
-	if err != nil {
-		return fmt.Errorf("hash copy-add source: %w", err)
-	}
-	if digest != expectedSourceHash || size != expectedSourceSize {
-		return fmt.Errorf("installed source failed SHA-256 verification")
-	}
-	if _, err := operations.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	return applyCopyAddStreamContext(context.Background(), source, operations, output, expectedSourceSize, expectedTargetSize, expectedTargetHash, callback, event)
 }

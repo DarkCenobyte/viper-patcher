@@ -7,6 +7,58 @@ version before the first retained tag.
 
 ## [Unreleased]
 
+### Fixed
+
+- Enforced canonical fixed 8 MiB descriptor boundaries for chunked replacement.
+- Bounded sparse application memory with a producer/consumer queue whose retained
+  plans scale with the worker target instead of the complete file size.
+- Aggregated concurrent file and byte progress into one monotonic overall value.
+
+### Changed
+
+- Renamed the CLI `--parallel` option and public option fields to a `--workers`
+  logical scheduling target, with matching GUI and documentation wording.
+- Made BLAKE3 tree accumulation incremental so hashing no longer reserves one
+  8 MiB pending buffer per active accumulator.
+- Simplified the native zstd boundary to standalone compression and decompression.
+
+### Removed
+
+- Removed the remaining native patch-from reference mapping and dictionary-prefix
+  branches, format permission fields, and compatibility wrappers used only by tests.
+
+## [0.5.0] - 2026-07-28
+
+### Added
+
+- VIPR format 3 with BLAKE3 tree file identities and independent chunked zstd
+  replacement frames for large files.
+- Adaptive application parallelism shared between multiple files and chunks of a
+  single large file.
+
+### Changed
+
+- Sparse application now reconstructs large blocks in memory before positional
+  writes instead of issuing many small sequential reads and writes.
+- Patch application skips the full physical patch fingerprint pass when no
+  expected fingerprint was supplied by the caller.
+- Current patch fingerprints, source identities, target identities, and chunk
+  identities use BLAKE3.
+
+### Removed
+
+- Removed VIPR format 1 and format 2 decoding and validation compatibility.
+- Removed SHA-256 file verification, `zstd-patch-from`, patch-from compression
+  metadata, implicit missing-method normalization, and legacy `targetHint`
+  acceptance.
+- Removed legacy hash-selection wrappers and the superseded sequential sparse
+  application implementation.
+
+### Compatibility
+
+- `.vipr` files using format 1 or 2 must be applied with Viper-Patcher 0.4.1 or
+  an earlier compatible release.
+
 ## [0.4.1] - 2026-07-26
 
 ### Fixed
@@ -207,7 +259,8 @@ version before the first retained tag.
 - Fyne desktop interfaces and progress reporting.
 - Cross-platform release workflows for Windows, Linux, and macOS targets.
 
-[Unreleased]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.3.2...v0.3.3

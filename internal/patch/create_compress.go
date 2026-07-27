@@ -3,12 +3,12 @@ package patch
 import (
 	"context"
 	"fmt"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/buildinfo"
-	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 	"github.com/DarkCenobyte/viper-patcher/internal/zstd"
@@ -31,15 +31,45 @@ type createdDifferential struct {
 	expandedSize   uint64
 }
 
-func compressCreationInputs(ctx context.Context, options CreateOptions, snapshots []creationSnapshot, workDirectory string, parallelism int, callback progress.Callback) (patchformat.Header, []differentialBlobs, error) {
-	emptyReference := filepath.Join(workDirectory, "empty-reference")
-	if err := os.WriteFile(emptyReference, nil, 0o600); err != nil {
-		return patchformat.Header{}, nil, fmt.Errorf("create empty compression reference: %w", err)
-	}
+type differentialCreationRequest struct {
+	ctx           context.Context
+	options       CreateOptions
+	snapshot      creationSnapshot
+	workDirectory string
+	index         int
+	fileCount     int
+	chunkWorkers  int
+	callback      progress.Callback
+}
 
+type replacementCreationRequest struct {
+	ctx              context.Context
+	source           fileSnapshot
+	target           fileSnapshot
+	workDirectory    string
+	index            int
+	direction        string
+	compressionLevel int
+	chunkWorkers     int
+	callback         zstd.ProgressFunc
+}
+
+type payloadCompressionRequest struct {
+	ctx              context.Context
+	inputPath        string
+	outputPath       string
+	method           string
+	expandedSize     uint64
+	compressionLevel int
+	callback         zstd.ProgressFunc
+}
+
+func compressCreationInputs(ctx context.Context, options CreateOptions, snapshots []creationSnapshot, workDirectory string, workerBudget int, callback progress.Callback) (patchformat.Header, []differentialBlobs, error) {
 	compressed := make([]compressedCreationFile, len(snapshots))
-	err := parallelFor(ctx, len(snapshots), parallelism, func(ctx context.Context, index int) error {
+	fileWorkers, perFileWorkers := workerAllocation(workerBudget, len(snapshots))
+	err := parallelFor(ctx, len(snapshots), fileWorkers, func(ctx context.Context, index int) error {
 		snapshot := snapshots[index]
+		chunkWorkers := adaptiveChunkWorkers(perFileWorkers, maxUint64(snapshot.source.Size, snapshot.target.Size))
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -52,7 +82,16 @@ func compressCreationInputs(ctx context.Context, options CreateOptions, snapshot
 			TotalBytes: snapshot.target.Size,
 		})
 
-		forward, reverse, err := createBestDifferentials(ctx, options, snapshot, workDirectory, emptyReference, index, callback, len(snapshots))
+		forward, reverse, err := createPreferredDifferential(differentialCreationRequest{
+			ctx:           ctx,
+			options:       options,
+			snapshot:      snapshot,
+			workDirectory: workDirectory,
+			index:         index,
+			fileCount:     len(snapshots),
+			chunkWorkers:  chunkWorkers,
+			callback:      callback,
+		})
 		if err != nil {
 			return fmt.Errorf("create differential for %q: %w", snapshot.pair.relativePath, err)
 		}
@@ -64,8 +103,6 @@ func compressCreationInputs(ctx context.Context, options CreateOptions, snapshot
 				TargetHash:            snapshot.target.Hash,
 				SourceSize:            snapshot.source.Size,
 				TargetSize:            snapshot.target.Size,
-				SourceMode:            snapshot.source.Mode,
-				TargetMode:            snapshot.target.Mode,
 				ForwardMethod:         forward.method,
 				ForwardLength:         forward.compressedSize,
 				ForwardExpandedLength: forward.expandedSize,
@@ -117,26 +154,43 @@ func compressCreationInputs(ctx context.Context, options CreateOptions, snapshot
 	return header, blobs, nil
 }
 
-func createBestDifferentials(ctx context.Context, options CreateOptions, snapshot creationSnapshot, workDirectory, emptyReference string, index int, callback progress.Callback, fileCount int) (createdDifferential, createdDifferential, error) {
+func createPreferredDifferential(request differentialCreationRequest) (createdDifferential, createdDifferential, error) {
+	snapshot := request.snapshot
 	if snapshot.source.Size == snapshot.target.Size {
-		forwardRaw := filepath.Join(workDirectory, fmt.Sprintf("%06d.forward.sparse", index))
+		forwardRaw := filepath.Join(request.workDirectory, fmt.Sprintf("%06d.forward.sparse", request.index))
 		reverseRaw := ""
-		if options.CreateReverse {
-			reverseRaw = filepath.Join(workDirectory, fmt.Sprintf("%06d.reverse.sparse", index))
+		if request.options.CreateReverse {
+			reverseRaw = filepath.Join(request.workDirectory, fmt.Sprintf("%06d.reverse.sparse", request.index))
 		}
-		stats, usable, err := createSparseStreamsOptimized(ctx, snapshot.source.SnapshotPath, snapshot.target.SnapshotPath, forwardRaw, reverseRaw, snapshot.target.Size)
+		stats, usable, err := createSparseStreamsOptimized(request.ctx, snapshot.source.SnapshotPath, snapshot.target.SnapshotPath, forwardRaw, reverseRaw, snapshot.target.Size)
 		if err != nil {
 			return createdDifferential{}, createdDifferential{}, err
 		}
 		if usable {
-			forward, err := compressPreparedPayload(ctx, emptyReference, forwardRaw, filepath.Join(workDirectory, fmt.Sprintf("%06d.forward.sparse.zst", index)), patchformat.MethodSparse, stats.expandedSize, options.CompressionLevel, compressionProgress(callback, index, fileCount, snapshot.pair.relativePath, progress.StageCompressingForward))
+			forward, err := compressPreparedPayload(payloadCompressionRequest{
+				ctx:              request.ctx,
+				inputPath:        forwardRaw,
+				outputPath:       filepath.Join(request.workDirectory, fmt.Sprintf("%06d.forward.sparse.zst", request.index)),
+				method:           patchformat.MethodSparse,
+				expandedSize:     stats.expandedSize,
+				compressionLevel: request.options.CompressionLevel,
+				callback:         compressionProgress(request.callback, request.index, request.fileCount, snapshot.pair.relativePath, progress.StageCompressingForward, snapshot.target.Size),
+			})
 			if err != nil {
 				return createdDifferential{}, createdDifferential{}, err
 			}
 			var reverse createdDifferential
-			if options.CreateReverse {
-				progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: fileCount, Path: snapshot.pair.relativePath, Stage: progress.StageCompressingReverse, TotalBytes: snapshot.source.Size})
-				reverse, err = compressPreparedPayload(ctx, emptyReference, reverseRaw, filepath.Join(workDirectory, fmt.Sprintf("%06d.reverse.sparse.zst", index)), patchformat.MethodSparse, stats.expandedSize, options.CompressionLevel, compressionProgress(callback, index, fileCount, snapshot.pair.relativePath, progress.StageCompressingReverse))
+			if request.options.CreateReverse {
+				progress.Report(request.callback, progress.Event{FileIndex: request.index + 1, FileCount: request.fileCount, Path: snapshot.pair.relativePath, Stage: progress.StageCompressingReverse, TotalBytes: snapshot.source.Size})
+				reverse, err = compressPreparedPayload(payloadCompressionRequest{
+					ctx:              request.ctx,
+					inputPath:        reverseRaw,
+					outputPath:       filepath.Join(request.workDirectory, fmt.Sprintf("%06d.reverse.sparse.zst", request.index)),
+					method:           patchformat.MethodSparse,
+					expandedSize:     stats.expandedSize,
+					compressionLevel: request.options.CompressionLevel,
+					callback:         compressionProgress(request.callback, request.index, request.fileCount, snapshot.pair.relativePath, progress.StageCompressingReverse, snapshot.source.Size),
+				})
 				if err != nil {
 					return createdDifferential{}, createdDifferential{}, err
 				}
@@ -149,14 +203,34 @@ func createBestDifferentials(ctx context.Context, options CreateOptions, snapsho
 		}
 	}
 
-	forward, err := createCopyAddOrReplace(ctx, snapshot.source.SnapshotPath, snapshot.target.SnapshotPath, snapshot.target.Size, workDirectory, emptyReference, index, "forward", options.CompressionLevel, compressionProgress(callback, index, fileCount, snapshot.pair.relativePath, progress.StageCompressingForward))
+	forward, err := createCopyAddOrReplace(replacementCreationRequest{
+		ctx:              request.ctx,
+		source:           snapshot.source,
+		target:           snapshot.target,
+		workDirectory:    request.workDirectory,
+		index:            request.index,
+		direction:        "forward",
+		compressionLevel: request.options.CompressionLevel,
+		chunkWorkers:     request.chunkWorkers,
+		callback:         compressionProgress(request.callback, request.index, request.fileCount, snapshot.pair.relativePath, progress.StageCompressingForward, snapshot.target.Size),
+	})
 	if err != nil {
 		return createdDifferential{}, createdDifferential{}, err
 	}
 	var reverse createdDifferential
-	if options.CreateReverse {
-		progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: fileCount, Path: snapshot.pair.relativePath, Stage: progress.StageCompressingReverse, TotalBytes: snapshot.source.Size})
-		reverse, err = createCopyAddOrReplace(ctx, snapshot.target.SnapshotPath, snapshot.source.SnapshotPath, snapshot.source.Size, workDirectory, emptyReference, index, "reverse", options.CompressionLevel, compressionProgress(callback, index, fileCount, snapshot.pair.relativePath, progress.StageCompressingReverse))
+	if request.options.CreateReverse {
+		progress.Report(request.callback, progress.Event{FileIndex: request.index + 1, FileCount: request.fileCount, Path: snapshot.pair.relativePath, Stage: progress.StageCompressingReverse, TotalBytes: snapshot.source.Size})
+		reverse, err = createCopyAddOrReplace(replacementCreationRequest{
+			ctx:              request.ctx,
+			source:           snapshot.target,
+			target:           snapshot.source,
+			workDirectory:    request.workDirectory,
+			index:            request.index,
+			direction:        "reverse",
+			compressionLevel: request.options.CompressionLevel,
+			chunkWorkers:     request.chunkWorkers,
+			callback:         compressionProgress(request.callback, request.index, request.fileCount, snapshot.pair.relativePath, progress.StageCompressingReverse, snapshot.source.Size),
+		})
 		if err != nil {
 			return createdDifferential{}, createdDifferential{}, err
 		}
@@ -164,18 +238,44 @@ func createBestDifferentials(ctx context.Context, options CreateOptions, snapsho
 	return forward, reverse, nil
 }
 
-func createCopyAddOrReplace(ctx context.Context, sourcePath, targetPath string, targetSize uint64, workDirectory, emptyReference string, index int, direction string, level int, callback zstd.ProgressFunc) (createdDifferential, error) {
-	copyAddRaw := filepath.Join(workDirectory, fmt.Sprintf("%06d.%s.copy-add", index, direction))
-	stats, usable, err := createCopyAddStreamOptimized(ctx, sourcePath, targetPath, copyAddRaw, targetSize)
+func createCopyAddOrReplace(request replacementCreationRequest) (createdDifferential, error) {
+	copyAddRaw := filepath.Join(request.workDirectory, fmt.Sprintf("%06d.%s.copy-add", request.index, request.direction))
+	stats, usable, err := createCopyAddStreamOptimized(request.ctx, request.source.SnapshotPath, request.target.SnapshotPath, copyAddRaw, request.target.Size)
 	if err != nil {
 		return createdDifferential{}, err
 	}
 	if usable {
-		result, err := compressPreparedPayload(ctx, emptyReference, copyAddRaw, filepath.Join(workDirectory, fmt.Sprintf("%06d.%s.copy-add.zst", index, direction)), patchformat.MethodCopyAdd, stats.expandedSize, level, callback)
+		result, err := compressPreparedPayload(payloadCompressionRequest{
+			ctx:              request.ctx,
+			inputPath:        copyAddRaw,
+			outputPath:       filepath.Join(request.workDirectory, fmt.Sprintf("%06d.%s.copy-add.zst", request.index, request.direction)),
+			method:           patchformat.MethodCopyAdd,
+			expandedSize:     stats.expandedSize,
+			compressionLevel: request.compressionLevel,
+			callback:         request.callback,
+		})
 		_ = os.Remove(copyAddRaw)
 		return result, err
 	}
-	return compressPreparedPayload(ctx, emptyReference, targetPath, filepath.Join(workDirectory, fmt.Sprintf("%06d.%s.replace.zst", index, direction)), patchformat.MethodReplace, 0, level, callback)
+	if request.target.Size >= chunkedReplaceThreshold {
+		return createChunkedReplace(chunkedReplaceCreationRequest{
+			ctx:              request.ctx,
+			target:           request.target,
+			outputPath:       filepath.Join(request.workDirectory, fmt.Sprintf("%06d.%s.chunked-replace", request.index, request.direction)),
+			workDirectory:    request.workDirectory,
+			compressionLevel: request.compressionLevel,
+			workers:          request.chunkWorkers,
+			callback:         request.callback,
+		})
+	}
+	return compressPreparedPayload(payloadCompressionRequest{
+		ctx:              request.ctx,
+		inputPath:        request.target.SnapshotPath,
+		outputPath:       filepath.Join(request.workDirectory, fmt.Sprintf("%06d.%s.replace.zst", request.index, request.direction)),
+		method:           patchformat.MethodReplace,
+		compressionLevel: request.compressionLevel,
+		callback:         request.callback,
+	})
 }
 
 func sparseWorthUsing(stats sparseStats, size uint64) bool {
@@ -195,18 +295,23 @@ func copyAddWorthUsing(stats copyAddStats, targetSize uint64) bool {
 	return ok && stats.expandedSize <= limit
 }
 
-func compressPreparedPayload(ctx context.Context, referencePath, inputPath, outputPath, method string, expandedSize uint64, level int, callback zstd.ProgressFunc) (createdDifferential, error) {
-	if err := ctx.Err(); err != nil {
+func compressPreparedPayload(request payloadCompressionRequest) (createdDifferential, error) {
+	if err := request.ctx.Err(); err != nil {
 		return createdDifferential{}, err
 	}
-	if err := zstd.CompressFile(referencePath, inputPath, outputPath, level, callback); err != nil {
+	if err := zstd.CompressFile(request.inputPath, request.outputPath, request.compressionLevel, request.callback); err != nil {
 		return createdDifferential{}, err
 	}
-	compressedSize, err := regularFileSize(outputPath)
+	compressedSize, err := regularFileSize(request.outputPath)
 	if err != nil {
 		return createdDifferential{}, err
 	}
-	return createdDifferential{method: method, path: outputPath, compressedSize: compressedSize, expandedSize: expandedSize}, nil
+	return createdDifferential{
+		method:         request.method,
+		path:           request.outputPath,
+		compressedSize: compressedSize,
+		expandedSize:   request.expandedSize,
+	}, nil
 }
 
 func newPatchHeader(options CreateOptions, capacity int) patchformat.Header {
@@ -220,11 +325,11 @@ func newPatchHeader(options CreateOptions, capacity int) patchformat.Header {
 			BuildDate: buildinfo.BuildDate,
 		},
 		Comment:       options.Comment,
-		HashAlgorithm: hashutil.Algorithm,
+		HashAlgorithm: patchformat.HashBLAKE3Tree,
 		Compression: patchformat.Compression{
 			Algorithm: patchformat.AlgorithmHybrid,
 			Library:   zstd.Version(),
-			Mode:      patchformat.CompressionHybridV2,
+			Mode:      patchformat.CompressionHybrid,
 			Level:     options.CompressionLevel,
 		},
 		Reverse: options.CreateReverse,
@@ -232,17 +337,26 @@ func newPatchHeader(options CreateOptions, capacity int) patchformat.Header {
 	}
 }
 
-func compressionProgress(callback progress.Callback, index, count int, path string, stage progress.Stage) zstd.ProgressFunc {
+func compressionProgress(callback progress.Callback, index, count int, path string, stage progress.Stage, logicalTotal uint64) zstd.ProgressFunc {
 	return func(processed, total uint64) {
 		progress.Report(callback, progress.Event{
 			FileIndex:      index + 1,
 			FileCount:      count,
 			Path:           path,
 			Stage:          stage,
-			ProcessedBytes: processed,
-			TotalBytes:     total,
+			ProcessedBytes: scaleProgress(processed, total, logicalTotal),
+			TotalBytes:     logicalTotal,
 		})
 	}
+}
+
+func scaleProgress(processed, total, logicalTotal uint64) uint64 {
+	if logicalTotal == 0 || total == 0 || processed >= total {
+		return logicalTotal
+	}
+	high, low := bits.Mul64(processed, logicalTotal)
+	value, _ := bits.Div64(high, low, total)
+	return value
 }
 
 func regularFileSize(path string) (uint64, error) {

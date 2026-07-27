@@ -1,10 +1,15 @@
 $ErrorActionPreference = "Stop"
 
-$Version = "1.5.7"
+$Root = Split-Path -Parent $PSScriptRoot
+$VersionSource = Join-Path $Root "internal/zstdversion/version.go"
+$VersionLine = Select-String -Path $VersionSource -Pattern '^\s*const Version = "([^"]+)"' | Select-Object -First 1
+if (-not $VersionLine) {
+    throw "Could not read the required zstd version from $VersionSource."
+}
+$Version = $VersionLine.Matches[0].Groups[1].Value
 $Archive = "zstd-$Version.tar.gz"
 $Url = "https://github.com/facebook/zstd/releases/download/v$Version/$Archive"
 $ExpectedSha256 = "EB33E51F49A15E023950CD7825CA74A4A2B43DB8354825AC24FC1B7EE09E6FA3"
-$Root = Split-Path -Parent $PSScriptRoot
 $Destination = Join-Path $Root "third_party/zstd"
 $CacheDirectory = Join-Path $Root "build/downloads"
 $ArchivePath = Join-Path $CacheDirectory $Archive

@@ -36,7 +36,7 @@ size_t vipr_clamp_size_t(uint64_t value) {
 int vipr_set_parameter(ZSTD_CCtx *context, ZSTD_cParameter parameter, int value, char *error_buffer, uint64_t error_buffer_size) {
     size_t code = ZSTD_CCtx_setParameter(context, parameter, value);
     if (ZSTD_isError(code)) {
-        vipr_set_zstd_error(error_buffer, error_buffer_size, "configure zstd patch-from mode", code);
+        vipr_set_zstd_error(error_buffer, error_buffer_size, "configure zstd compression", code);
         return -1;
     }
     return 0;

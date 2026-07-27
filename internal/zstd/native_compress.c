@@ -6,54 +6,64 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static unsigned vipr_high_bit64(uint64_t value) {
-    unsigned result = 0;
-    while (value > 1) {
-        value >>= 1;
-        result++;
+typedef struct vipr_compression_input {
+    FILE *file;
+    uintptr_t handle;
+    uint64_t offset;
+    uint64_t length;
+    uint64_t position;
+} vipr_compression_input;
+
+static int vipr_read_compression_input(
+    vipr_compression_input *input,
+    void *buffer,
+    size_t request,
+    size_t *read_size,
+    char *error_buffer,
+    uint64_t error_buffer_size) {
+    if (request == 0) {
+        *read_size = 0;
+        return 0;
     }
-    return result;
+    if (input->file != NULL) {
+        *read_size = fread(buffer, 1, request, input->file);
+        if (*read_size != request) {
+            if (ferror(input->file)) {
+                vipr_set_errno_error(error_buffer, error_buffer_size, "read compression input");
+            } else {
+                vipr_set_error(error_buffer, error_buffer_size, "compression input changed size while being read");
+            }
+            return -1;
+        }
+        return 0;
+    }
+    if (vipr_read_at(input->handle, input->offset + input->position, buffer, request, read_size) != 0) {
+        vipr_set_errno_error(error_buffer, error_buffer_size, "read compression input segment");
+        return -1;
+    }
+    if (*read_size != request) {
+        vipr_set_error(error_buffer, error_buffer_size, "compression input segment is truncated");
+        return -1;
+    }
+    return 0;
 }
 
-static unsigned vipr_cycle_log(unsigned chain_log, ZSTD_strategy strategy) {
-    unsigned bt_scale = ((unsigned)strategy >= (unsigned)ZSTD_btlazy2);
-    return chain_log - bt_scale;
-}
-
-int vipr_compress_file(
-    const char *reference_path,
-    const char *target_path,
+static int vipr_compress_input(
+    vipr_compression_input *input,
     const char *output_path,
     int compression_level,
     uintptr_t progress_handle,
     char *error_buffer,
     uint64_t error_buffer_size) {
     int result = -1;
-    int size_ok = 0;
-    uint64_t target_size = vipr_file_size(target_path, &size_ok);
-    vipr_mapped_file reference;
-    FILE *input = NULL;
     FILE *output = NULL;
     ZSTD_CCtx *context = NULL;
     void *input_buffer = NULL;
     void *output_buffer = NULL;
 
-    if (!size_ok) {
-        vipr_set_errno_error(error_buffer, error_buffer_size, "stat target file");
-        return -1;
-    }
-    if (vipr_map_file(reference_path, &reference, error_buffer, error_buffer_size) != 0) {
-        return -1;
-    }
-
-    input = vipr_open_read(target_path);
-    if (input == NULL) {
-        vipr_set_errno_error(error_buffer, error_buffer_size, "open target file");
-        goto cleanup;
-    }
     output = vipr_open_write(output_path);
     if (output == NULL) {
-        vipr_set_errno_error(error_buffer, error_buffer_size, "create differential file");
+        vipr_set_errno_error(error_buffer, error_buffer_size, "create compressed output");
         goto cleanup;
     }
     context = ZSTD_createCCtx();
@@ -62,50 +72,15 @@ int vipr_compress_file(
         goto cleanup;
     }
 
-    {
-        size_t target_hint = vipr_clamp_size_t(target_size);
-        size_t reference_hint = vipr_clamp_size_t(reference.size);
-        ZSTD_compressionParameters parameters = ZSTD_getCParams(compression_level, target_hint, reference_hint);
-        unsigned file_window_log = vipr_high_bit64(target_size) + 1;
-        int enable_ldm = 0;
-
-        if (file_window_log < ZSTD_WINDOWLOG_MIN) {
-            file_window_log = ZSTD_WINDOWLOG_MIN;
-        }
-        if (file_window_log > ZSTD_WINDOWLOG_MAX) {
-            file_window_log = ZSTD_WINDOWLOG_MAX;
-        }
-        parameters.windowLog = file_window_log;
-        if (file_window_log > vipr_cycle_log(parameters.chainLog, parameters.strategy)) {
-            enable_ldm = 1;
-        }
-
-        if (vipr_set_parameter(context, ZSTD_c_contentSizeFlag, 1, error_buffer, error_buffer_size) != 0 ||
-            vipr_set_parameter(context, ZSTD_c_dictIDFlag, 1, error_buffer, error_buffer_size) != 0 ||
-            vipr_set_parameter(context, ZSTD_c_checksumFlag, 1, error_buffer, error_buffer_size) != 0 ||
-            vipr_set_parameter(context, ZSTD_c_compressionLevel, compression_level, error_buffer, error_buffer_size) != 0 ||
-            vipr_set_parameter(context, ZSTD_c_enableLongDistanceMatching, enable_ldm, error_buffer, error_buffer_size) != 0 ||
-            vipr_set_parameter(context, ZSTD_c_windowLog, (int)parameters.windowLog, error_buffer, error_buffer_size) != 0 ||
-            vipr_set_parameter(context, ZSTD_c_chainLog, (int)parameters.chainLog, error_buffer, error_buffer_size) != 0 ||
-            vipr_set_parameter(context, ZSTD_c_hashLog, (int)parameters.hashLog, error_buffer, error_buffer_size) != 0 ||
-            vipr_set_parameter(context, ZSTD_c_searchLog, (int)parameters.searchLog, error_buffer, error_buffer_size) != 0 ||
-            vipr_set_parameter(context, ZSTD_c_minMatch, (int)parameters.minMatch, error_buffer, error_buffer_size) != 0 ||
-            vipr_set_parameter(context, ZSTD_c_targetLength, (int)parameters.targetLength, error_buffer, error_buffer_size) != 0 ||
-            vipr_set_parameter(context, ZSTD_c_strategy, (int)parameters.strategy, error_buffer, error_buffer_size) != 0 ||
-            vipr_set_parameter(context, ZSTD_c_enableDedicatedDictSearch, 1, error_buffer, error_buffer_size) != 0) {
-            goto cleanup;
-        }
+    if (vipr_set_parameter(context, ZSTD_c_contentSizeFlag, 1, error_buffer, error_buffer_size) != 0 ||
+        vipr_set_parameter(context, ZSTD_c_checksumFlag, 1, error_buffer, error_buffer_size) != 0 ||
+        vipr_set_parameter(context, ZSTD_c_compressionLevel, compression_level, error_buffer, error_buffer_size) != 0) {
+        goto cleanup;
     }
-
     {
-        size_t code = ZSTD_CCtx_refPrefix(context, reference.data, (size_t)reference.size);
+        size_t code = ZSTD_CCtx_setPledgedSrcSize(context, input->length);
         if (ZSTD_isError(code)) {
-            vipr_set_zstd_error(error_buffer, error_buffer_size, "attach patch reference", code);
-            goto cleanup;
-        }
-        code = ZSTD_CCtx_setPledgedSrcSize(context, target_size);
-        if (ZSTD_isError(code)) {
-            vipr_set_zstd_error(error_buffer, error_buffer_size, "set target size", code);
+            vipr_set_zstd_error(error_buffer, error_buffer_size, "set compression input size", code);
             goto cleanup;
         }
     }
@@ -118,48 +93,49 @@ int vipr_compress_file(
     }
 
     {
-        uint64_t processed = 0;
         int finished = 0;
         while (!finished) {
-            size_t read_size = fread(input_buffer, 1, VIPR_IO_BUFFER_SIZE, input);
+            uint64_t remaining = input->length - input->position;
+            size_t request = remaining > VIPR_IO_BUFFER_SIZE ? VIPR_IO_BUFFER_SIZE : (size_t)remaining;
+            size_t read_size = 0;
             ZSTD_EndDirective directive;
             ZSTD_inBuffer in;
-            if (ferror(input)) {
-                vipr_set_errno_error(error_buffer, error_buffer_size, "read target file");
+
+            if (vipr_read_compression_input(input, input_buffer, request, &read_size, error_buffer, error_buffer_size) != 0) {
                 goto cleanup;
             }
-            directive = feof(input) ? ZSTD_e_end : ZSTD_e_continue;
+            input->position += read_size;
+            directive = input->position == input->length ? ZSTD_e_end : ZSTD_e_continue;
             in.src = input_buffer;
             in.size = read_size;
             in.pos = 0;
 
             do {
                 ZSTD_outBuffer out;
-                size_t remaining;
+                size_t frame_remaining;
                 out.dst = output_buffer;
                 out.size = ZSTD_CStreamOutSize();
                 out.pos = 0;
-                remaining = ZSTD_compressStream2(context, &out, &in, directive);
-                if (ZSTD_isError(remaining)) {
-                    vipr_set_zstd_error(error_buffer, error_buffer_size, "compress differential", remaining);
+                frame_remaining = ZSTD_compressStream2(context, &out, &in, directive);
+                if (ZSTD_isError(frame_remaining)) {
+                    vipr_set_zstd_error(error_buffer, error_buffer_size, "compress payload", frame_remaining);
                     goto cleanup;
                 }
                 if (out.pos > 0 && fwrite(output_buffer, 1, out.pos, output) != out.pos) {
-                    vipr_set_errno_error(error_buffer, error_buffer_size, "write differential file");
+                    vipr_set_errno_error(error_buffer, error_buffer_size, "write compressed output");
                     goto cleanup;
                 }
-                if (directive == ZSTD_e_end && remaining == 0) {
+                if (directive == ZSTD_e_end && frame_remaining == 0) {
                     finished = 1;
                 }
             } while (in.pos < in.size || (directive == ZSTD_e_end && !finished));
 
-            processed += read_size;
-            viprGoProgress(progress_handle, processed, target_size);
+            viprGoProgress(progress_handle, input->position, input->length);
         }
     }
 
     if (fflush(output) != 0) {
-        vipr_set_errno_error(error_buffer, error_buffer_size, "flush differential file");
+        vipr_set_errno_error(error_buffer, error_buffer_size, "flush compressed output");
         goto cleanup;
     }
     result = 0;
@@ -171,13 +147,66 @@ cleanup:
         ZSTD_freeCCtx(context);
     }
     if (output != NULL && fclose(output) != 0 && result == 0) {
-        vipr_set_errno_error(error_buffer, error_buffer_size, "close differential file");
+        vipr_set_errno_error(error_buffer, error_buffer_size, "close compressed output");
         result = -1;
     }
-    if (input != NULL && fclose(input) != 0 && result == 0) {
-        vipr_set_errno_error(error_buffer, error_buffer_size, "close target file");
-        result = -1;
-    }
-    vipr_unmap_file(&reference);
     return result;
+}
+
+int vipr_compress_file(
+    const char *input_path,
+    const char *output_path,
+    int compression_level,
+    uintptr_t progress_handle,
+    char *error_buffer,
+    uint64_t error_buffer_size) {
+    int size_ok = 0;
+    uint64_t input_size = vipr_file_size(input_path, &size_ok);
+    FILE *input_file = NULL;
+    int result;
+    vipr_compression_input input;
+
+    if (!size_ok) {
+        vipr_set_errno_error(error_buffer, error_buffer_size, "stat compression input");
+        return -1;
+    }
+    input_file = vipr_open_read(input_path);
+    if (input_file == NULL) {
+        vipr_set_errno_error(error_buffer, error_buffer_size, "open compression input");
+        return -1;
+    }
+
+    input.file = input_file;
+    input.handle = 0;
+    input.offset = 0;
+    input.length = input_size;
+    input.position = 0;
+    result = vipr_compress_input(&input, output_path, compression_level, progress_handle, error_buffer, error_buffer_size);
+    if (fclose(input_file) != 0 && result == 0) {
+        vipr_set_errno_error(error_buffer, error_buffer_size, "close compression input");
+        result = -1;
+    }
+    return result;
+}
+
+int vipr_compress_segment(
+    uintptr_t input_handle,
+    uint64_t input_offset,
+    uint64_t input_length,
+    const char *output_path,
+    int compression_level,
+    uintptr_t progress_handle,
+    char *error_buffer,
+    uint64_t error_buffer_size) {
+    vipr_compression_input input;
+    if (input_offset > UINT64_MAX - input_length) {
+        vipr_set_error(error_buffer, error_buffer_size, "compression input segment overflows");
+        return -1;
+    }
+    input.file = NULL;
+    input.handle = input_handle;
+    input.offset = input_offset;
+    input.length = input_length;
+    input.position = 0;
+    return vipr_compress_input(&input, output_path, compression_level, progress_handle, error_buffer, error_buffer_size);
 }

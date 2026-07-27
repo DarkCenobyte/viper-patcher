@@ -10,31 +10,55 @@ All integer fields outside JSON use little-endian byte order.
 | data offset | variable | Concatenated differential payloads |
 
 Payload offsets in the JSON header are relative to the first byte after the JSON
-header. Readers reject unknown JSON fields, invalid hashes, missing payloads,
-out-of-bounds ranges, overlaps, gaps, trailing unreferenced data, duplicate or
-case/Unicode-colliding paths, and inconsistent reverse metadata.
+header. Readers reject unknown JSON fields, invalid hashes, unsupported or
+inconsistent method metadata, file sizes outside signed 64-bit range, missing
+payloads, out-of-bounds ranges, overlaps, gaps, trailing unreferenced data,
+duplicate or case/Unicode-colliding paths, and inconsistent reverse metadata.
 
-## Version 2
+## Supported version
 
-Version 2 is written by Viper-Patcher 0.3.4 and uses `compression.mode =
-"hybrid-v2"`. Each direction of each file declares one method:
+Viper-Patcher 0.5.0 accepts only `formatVersion = 3`, `compression.algorithm =
+"hybrid"`, `compression.mode = "hybrid-v3"`, and `hashAlgorithm =
+"blake3-tree-v1"`. Format versions 1 and 2, the earlier `hybrid-v2` mode,
+legacy SHA-256 metadata, permission fields, and `zstd-patch-from` methods are
+rejected before payload processing.
 
-- `zstd-sparse`: a compressed sequential replacement stream for equal-size files
-  with relatively few changed bytes;
+File identities are domain-separated BLAKE3 roots over ordered fixed 8 MiB chunk
+digests. The root commits the total size, chunk size, chunk count, order, and
+every chunk digest.
+
+Each direction of each file declares one method:
+
+- `zstd-sparse`: a compressed sequential replacement instruction stream for
+  equal-size files with relatively few changed bytes;
 - `zstd-copy-add`: a compressed stream of arbitrary COPY and ADD operations,
-  selected with deterministic content-defined chunks so matching regions remain
-  discoverable after insertions and deletions;
-- `zstd-replace`: a standalone zstd frame containing the complete target state,
-  selected when too little source content can be reused;
-- `zstd-patch-from`: a zstd patch-from frame retained for version 1 compatibility
-  and valid version 2 containers, although the 0.3.4 creator prefers the faster
-  methods above.
+  selected with deterministic content-defined chunks;
+- `zstd-replace`: a standalone zstd frame containing the complete output state;
+- `zstd-chunked-replace`: a descriptor table followed by independent standalone
+  zstd frames for large non-empty replacements.
 
-`forwardExpandedLength` and `reverseExpandedLength` are required for sparse and
-COPY/ADD payloads. They bound decompression before an operation stream is
-interpreted.
+Sparse and COPY/ADD methods require a bounded non-zero expanded instruction
+length. Replace methods must not declare one. Chunked replacement must target a
+non-empty file and must not declare an expanded instruction length.
 
-### Sparse stream
+## Chunked replacement payload
+
+A chunked replacement starts with `56 43 52 50 0D 0A 1A 01`, followed by a
+little-endian chunk count and one descriptor per chunk containing:
+
+1. output offset;
+2. decompressed output size;
+3. compressed frame length;
+4. a 32-byte BLAKE3 chunk digest.
+
+Frames are concatenated after the descriptor table. Descriptor `i` must begin at
+`i * 8 MiB`; every non-final descriptor must be exactly 8 MiB and the final one
+must equal the remaining output size. The count must be `ceil(outputSize / 8
+MiB)`. Frames and descriptors must consume the payload exactly, without gaps or
+trailing bytes. These canonical boundaries are the same boundaries used by the
+file identity tree.
+
+## Sparse stream
 
 Sparse streams begin with `56 53 50 52 0D 0A 1A 01`, followed by records:
 
@@ -44,9 +68,11 @@ Sparse streams begin with `56 53 50 52 0D 0A 1A 01`, followed by records:
 
 A zero gap followed by a zero length terminates the stream. The remaining source
 tail is copied unchanged. Every operation is checked against the declared file
-size.
+size. Application validates records sequentially and dispatches bounded 8 MiB
+plans through a finite worker queue, without retaining the complete replacement
+stream in memory.
 
-### COPY/ADD stream
+## COPY/ADD stream
 
 COPY/ADD streams begin with `56 43 41 44 0D 0A 1A 01`. Records start with one
 opcode byte:
@@ -62,34 +88,26 @@ remains.
 
 The creator first tests the cheaper sparse representation for equal-size files.
 When sparse is not suitable, it builds a COPY/ADD candidate using deterministic
-content-defined chunks averaging 16 KiB. COPY/ADD is selected only when at least
-one eighth of the target is reused and its uncompressed instruction stream stays
-below a conservative bound. Otherwise the creator uses `zstd-replace`.
-
-## Version 1 compatibility
-
-Version 1 remains readable. Missing per-direction method fields normalize to
-`zstd-patch-from`; its compression metadata remains `algorithm = "zstd"` and
-`mode = "patch-from"`. Version 1 readers cannot read version 2 patches.
-
-Readers still accept the legacy optional `targetHint` field but discard it.
-Current creators never write it because installation paths are defined solely by
-the source-relative `path` field.
+content-defined chunks averaging 16 KiB. COPY/ADD is selected only when enough
+source content is reused and the instruction stream remains below a conservative
+bound. Otherwise the creator uses replacement, with chunked replacement selected
+for sufficiently large outputs.
 
 ## Common header fields
 
 - format version and UTC creation timestamp;
 - creator name, version, commit, and build date;
 - user comment;
-- hash algorithm (`sha256`);
+- hash algorithm (`blake3-tree-v1`);
 - compression family, linked libzstd version, mode, and level;
 - reverse availability;
 - ordered file entries containing source-relative path, source/target hashes,
-  sizes, advisory permission metadata, methods, and payload ranges.
+  sizes, methods, expanded instruction lengths when applicable, and payload
+  ranges.
 
-`sourceMode` and `targetMode` retain portable Unix permission bits. Readiness is
-based on content identity, Unix replacements preserve the installed file's local
-mode, and Windows ignores Unix permission metadata.
+Readiness is based on content identity and size. Replacements preserve the local
+permission bits already present on the installed file; permissions are not part
+of the portable patch metadata.
 
 No path may be absolute, non-canonical, contain backslashes or drive syntax,
 escape the selected installation root, or traverse a symbolic link. Components

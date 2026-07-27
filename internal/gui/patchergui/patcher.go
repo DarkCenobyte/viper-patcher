@@ -14,4 +14,5 @@ func Run() {
 	controller.window.Show()
 	controller.fitInitialWindow()
 	application.Run()
+	controller.close()
 }

@@ -18,7 +18,7 @@ func TestRunHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d", code)
 	}
-	if !strings.Contains(stdout.String(), "Example:") || !strings.Contains(stdout.String(), "--file-pair") || !strings.Contains(stdout.String(), "<output.vipr>") {
+	if !strings.Contains(stdout.String(), "Example:") || !strings.Contains(stdout.String(), "--file-pair") || !strings.Contains(stdout.String(), "--workers") || !strings.Contains(stdout.String(), "<output.vipr>") {
 		t.Fatalf("unexpected help: %s", stdout.String())
 	}
 }
@@ -56,6 +56,7 @@ func TestRunCreatesPatchWithAtomicPairs(t *testing.T) {
 		"--headless",
 		"--file-pair", sourceOne + filePairSeparator + targetOne,
 		"--file-pair", sourceTwo + filePairSeparator + targetTwo,
+		"--workers", "2",
 		"--create-reverse",
 		output,
 	}, &stdout, &stderr)
@@ -86,6 +87,7 @@ func TestRunArgumentValidation(t *testing.T) {
 		{name: "missing arguments", want: "Example:"},
 		{name: "unknown parameter", arguments: []string{"--unknown"}, want: "flag provided but not defined"},
 		{name: "removed source flag", arguments: []string{"--source-files", "one"}, want: "flag provided but not defined"},
+		{name: "removed parallel flag", arguments: []string{"--parallel", "2"}, want: "flag provided but not defined"},
 		{name: "no pair", arguments: []string{"update.vipr"}, want: "at least one --file-pair"},
 		{name: "malformed pair", arguments: []string{"--file-pair", "source-only", "update.vipr"}, want: "file pair must use the form"},
 		{name: "empty source", arguments: []string{"--file-pair", "::target", "update.vipr"}, want: "file pair must use the form"},

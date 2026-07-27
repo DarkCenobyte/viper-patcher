@@ -8,77 +8,97 @@ all patch logic to `internal/patch`; `internal/patchformat` owns the container a
 
 The patcher CLI applies directly through one application session instead of
 performing a complete inspection pass followed by a second validation pass. The
-GUI may still call `Inspect` to present readiness before the user starts an
-operation.
+GUI uses a bounded parallel `Inspect` pass to present readiness before the user
+starts an operation, and derives the known post-commit direction state without
+immediately hashing every generated file again.
 
 ## Patch creation
 
 `patch.Create` uses these phases:
 
 1. validate file pairs and derive source-relative installation paths;
-2. copy source and target files into immutable creator snapshots while hashing
-   them during the copy;
+2. copy source and target files into immutable creator snapshots while computing
+   their BLAKE3 tree identities and retaining one 32-byte digest per fixed chunk;
 3. for equal-size files, try the cheap sequential sparse representation;
 4. otherwise build a deterministic content-defined COPY/ADD candidate and use
-   it when enough target bytes can be reused, falling back to `zstd-replace`;
-5. compress independent file payloads through a bounded worker pool while
+   it when enough target bytes can be reused, falling back to `zstd-replace` or
+   `zstd-chunked-replace` for large standalone replacements;
+5. divide the requested worker target between files and large chunks while
    preserving deterministic archive order;
-6. assemble a version 2 container in a same-directory temporary file and commit
+6. assemble a format 3 container in a same-directory temporary file and commit
    it atomically.
 
-Creator snapshots no longer perform a redundant second full content hash or an
+Creator snapshots do not perform a redundant second full content hash or an
 `fsync` on disposable temporary files. Identity, size, modification time, and
-path identity are checked after each copy.
+path identity are checked after each copy. BLAKE3 chunks are hashed incrementally;
+a snapshot retains only one 32-byte digest per 8 MiB chunk and never retains an
+8 MiB copy solely for hashing.
 
 ## Patch application
 
-Application is optimized for one useful read and one useful write wherever the
-selected method permits it:
+Application is optimized for useful reads and writes wherever the selected
+method permits it:
 
-1. open the patch once, parse its header, and calculate its SHA-256 in the same
-   sequential pass;
-2. open each installed source through `os.Root` and keep the handle alive until
-   commit;
-3. prepare independent output files in parallel, with one reusable native zstd
-   decoder per worker;
-4. calculate output SHA-256 while bytes are produced instead of rereading the
-   generated file;
+1. open the patch once and parse its strict format 3 header; calculate a physical
+   BLAKE3 fingerprint only when an inspected digest must be checked;
+2. open each installed source through `os.Root`, prepare and validate its output,
+   then close the source before the multi-file commit begins;
+3. split the worker target between independent files and large chunks, with an
+   eagerly prepared decoder pool sized to the maximum concurrent decode demand;
+4. compute BLAKE3 chunk digests while bytes are produced and assemble file roots
+   without a final sequential reread;
 5. commit prepared files sequentially through the rollback-capable transaction.
 
+The worker option is a scheduling target, not a strict process-wide goroutine
+limit. Source verification may overlap output generation, and small coordination
+goroutines may temporarily run in addition to the requested workers. CPU-heavy
+compression and decompression remain bounded by the allocated file/chunk workers
+and decoder pool.
+
 Patch payload reads are positional (`pread` on POSIX and overlapped `ReadFile` on
-Windows), so parallel workers never share a file cursor. Source references are
-mapped directly from already-open handles; neither the patch nor installed files
-are copied into application snapshots.
+Windows), so parallel workers never share a file cursor. Neither the patch nor
+installed files are copied into application snapshots.
 
 ### Method-specific behavior
 
-- `zstd-sparse` reconstructs equal-size targets sequentially. Unchanged ranges
-  are copied from the source, replacement ranges come from the bounded operation
-  stream, and source plus target SHA-256 values are calculated in that pass.
-- `zstd-copy-add` validates the source once, then executes bounds-checked COPY
-  ranges and literal ADD data from a compressed operation stream. Content-defined
-  chunks keep matches stable across insertions and deletions.
-- `zstd-replace` validates the source once, then decodes a standalone frame while
-  hashing output blocks in the native-to-Go callback.
-- `zstd-patch-from` validates the source once, maps its open handle as the zstd
-  prefix, and hashes generated blocks during decompression.
+- `zstd-sparse` validates and streams the instruction sequence into a bounded
+  producer/consumer queue. At most the queued and active 8 MiB chunk plans retain
+  replacement bytes, so memory use is proportional to the active worker count,
+  not to the complete file size.
+- `zstd-copy-add` verifies the source in parallel while executing bounds-checked
+  COPY ranges and literal ADD data from the compressed operation stream. Its
+  source index is a compact sorted array with an exact backing-memory budget.
+  Content-defined chunks keep matches stable across insertions and deletions.
+- `zstd-replace` verifies the installed source with parallel BLAKE3 chunk reads
+  concurrently with standalone zstd decompression and output hashing.
+- `zstd-chunked-replace` decompresses canonical fixed-size independent frames
+  concurrently, verifies each output chunk, and assembles the final BLAKE3 tree
+  root in chunk order.
+
+Progress is aggregated by weighted per-file phases in the core. Callbacks are
+serialized and receive a monotone `Overall` value, so concurrent file events do
+not make GUI or CLI progress move backwards.
 
 The fast path intentionally avoids disposable-file `fsync` calls and content
 rehashing immediately before rename. The transaction still verifies source
 identity, size, and modification time before replacement, renames originals to
 backups, commits prepared files, and performs best-effort rollback if a later
-rename fails. This is the only application mode; there is no slower paranoid
-snapshot mode.
+rename fails. This is the only application mode.
 
 ## Native boundary
 
 Native code is split by responsibility:
 
 - `native_internal.h`: shared declarations and platform abstractions;
-- `native_common.c`: version checks, parameters, and error helpers;
-- `native_io.c`: path access, handle duplication, mapping, and positional reads;
-- `native_compress.c`: patch-from and standalone compression;
-- `native_decompress.c`: reusable decoder contexts and bounded segment decoding.
+- `native_common.c`: version checks, compression parameters, and error helpers;
+- `native_io.c`: UTF-8 file opening, handle duplication, and positional reads;
+- `native_compress.c`: standalone zstd compression;
+- `native_decompress.c`: reusable decoder contexts and bounded standalone frame
+  decoding.
+
+The native API no longer exposes reference files or zstd `patch-from` state.
+Sparse and COPY/ADD reuse is represented explicitly by format 3 instruction
+streams before standalone zstd compression.
 
 Each decoder owns one `ZSTD_DCtx` and reusable 1 MiB input/output buffers. Output
 blocks are synchronously exposed to Go for hashing and throttled progress. The
@@ -86,11 +106,16 @@ wrapper remains pinned to libzstd 1.5.7.
 
 ## Integrity and security boundary
 
-All patch and file hashes remain SHA-256. Format ranges, decompressed sizes,
-sparse and COPY/ADD instructions, portable paths, and symbolic-link traversal are validated.
+File identities use the domain-separated `blake3-tree-v1` construction and
+selected patch files use standard BLAKE3-256 fingerprints. Format ranges,
+decompressed sizes, canonical chunk descriptors, sparse and COPY/ADD
+instructions, portable paths, and symbolic-link traversal are validated.
 `os.Root` keeps installation operations relative to one stable root handle.
+
+The format stores content identities and sizes, not platform permission metadata.
+A replacement preserves the permissions already present on the installed file.
 
 The target directory is not treated as a privilege boundary. A hostile process
 with write access can still race file contents between preparation and commit;
-the fast design detects replacement, size, and modification-time changes but no
-longer performs another full content hash at commit.
+the fast design detects replacement, size, and modification-time changes but
+does not perform another full content hash at commit.

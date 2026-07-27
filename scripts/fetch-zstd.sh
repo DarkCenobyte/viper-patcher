@@ -1,11 +1,16 @@
 #!/usr/bin/env sh
 set -eu
 
-VERSION="1.5.7"
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+VERSION_SOURCE="$ROOT/internal/zstdversion/version.go"
+VERSION=$(sed -n 's/^[[:space:]]*const Version = "\([^"]*\)".*/\1/p' "$VERSION_SOURCE" | head -n 1)
+if [ -z "$VERSION" ]; then
+    printf 'Could not read the required zstd version from %s.\n' "$VERSION_SOURCE" >&2
+    exit 1
+fi
 ARCHIVE="zstd-${VERSION}.tar.gz"
 URL="https://github.com/facebook/zstd/releases/download/v${VERSION}/${ARCHIVE}"
 EXPECTED_SHA256="eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3"
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DESTINATION="$ROOT/third_party/zstd"
 CACHE_DIRECTORY="$ROOT/build/downloads"
 ARCHIVE_PATH="$CACHE_DIRECTORY/$ARCHIVE"

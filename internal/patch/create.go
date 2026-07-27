@@ -18,7 +18,7 @@ type CreateOptions struct {
 	Comment          string
 	CreateReverse    bool
 	WorkDirectory    string
-	Parallelism      int
+	WorkerBudget     int
 }
 
 // Create generates a VIPR patch atomically from immutable input snapshots.
@@ -42,12 +42,12 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 	if err != nil {
 		return fmt.Errorf("create temporary directory: %w", err)
 	}
-	callback = synchronizedProgress(callback)
-	parallelism := effectiveParallelism(options.Parallelism)
+	callback = newCreationProgress(callback, plan.pairs, options.CreateReverse)
+	workerBudget := effectiveWorkerBudget(options.WorkerBudget)
 
-	snapshots, operationError := snapshotCreationInputs(ctx, plan, workDirectory, parallelism, callback)
+	snapshots, operationError := snapshotCreationInputs(ctx, plan, workDirectory, workerBudget, callback)
 	if operationError == nil {
-		patchHeader, blobs, compressError := compressCreationInputs(ctx, options, snapshots, workDirectory, parallelism, callback)
+		patchHeader, blobs, compressError := compressCreationInputs(ctx, options, snapshots, workDirectory, workerBudget, callback)
 		if compressError == nil {
 			operationError = assemblePatch(plan.outputPath, patchHeader, blobs)
 		} else {
