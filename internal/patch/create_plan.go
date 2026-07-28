@@ -26,8 +26,9 @@ type plannedPair struct {
 }
 
 type resolvedInput struct {
-	path string
-	info os.FileInfo
+	path        string
+	lexicalPath string
+	info        os.FileInfo
 }
 
 func createPlanFromOptions(options CreateOptions) (createPlan, error) {
@@ -130,6 +131,7 @@ func resolveRegularInput(path string) (resolvedInput, error) {
 	if err != nil {
 		return resolvedInput{}, err
 	}
+	absolute = filepath.Clean(absolute)
 	resolved, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
 		return resolvedInput{}, err
@@ -141,7 +143,7 @@ func resolveRegularInput(path string) (resolvedInput, error) {
 	if err := opened.Close(); err != nil {
 		return resolvedInput{}, fmt.Errorf("close %q after validation: %w", path, err)
 	}
-	return resolvedInput{path: filepath.Clean(resolved), info: info}, nil
+	return resolvedInput{path: filepath.Clean(resolved), lexicalPath: absolute, info: info}, nil
 }
 
 func rejectOutputInputCollision(outputPath string, sources, targets []resolvedInput) error {
@@ -165,7 +167,9 @@ func rejectOutputInputCollision(outputPath string, sources, targets []resolvedIn
 			{label: "target", input: targets[index]},
 		}
 		for _, candidate := range inputs {
-			if pathutil.CaseInsensitiveKey(candidate.input.path) == outputKey ||
+			resolvedKey := pathutil.CaseInsensitiveKey(candidate.input.path)
+			lexicalKey := pathutil.CaseInsensitiveKey(candidate.input.lexicalPath)
+			if resolvedKey == outputKey || lexicalKey == outputKey ||
 				(outputInfo != nil && os.SameFile(outputInfo, candidate.input.info)) {
 				return fmt.Errorf("output path must not replace %s file %d (%q)", candidate.label, index+1, candidate.input.path)
 			}

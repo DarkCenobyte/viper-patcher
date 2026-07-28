@@ -5,9 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
-
-	"github.com/DarkCenobyte/viper-patcher/internal/zstd"
 )
 
 const instructionMemoryThreshold uint64 = 2 << 20
@@ -15,11 +12,11 @@ const instructionMemoryThreshold uint64 = 2 << 20
 // applyCompressedInstructionStream keeps small instruction streams in memory
 // and switches to a bounded pipe for larger streams shared by sparse and
 // COPY/ADD application.
-func applyCompressedInstructionStream(ctx context.Context, decoder *zstd.Decoder, patch *os.File, offset, length, expandedLength uint64, apply func(io.Reader) error) error {
+func applyCompressedInstructionStream(ctx context.Context, decoder *decoderLease, expandedLength uint64, apply func(io.Reader) error) error {
 	if expandedLength <= instructionMemoryThreshold {
 		var buffer bytes.Buffer
 		buffer.Grow(int(expandedLength))
-		if err := decoder.DecompressSegmentToWriter(ctx, patch, offset, length, &buffer, expandedLength, nil); err != nil {
+		if err := decoder.DecompressToWriter(ctx, &buffer, expandedLength, nil); err != nil {
 			return err
 		}
 		return apply(bytes.NewReader(buffer.Bytes()))
@@ -30,7 +27,7 @@ func applyCompressedInstructionStream(ctx context.Context, decoder *zstd.Decoder
 	reader, writer := io.Pipe()
 	decodeDone := make(chan error, 1)
 	go func() {
-		err := decoder.DecompressSegmentToWriter(decodeContext, patch, offset, length, writer, expandedLength, nil)
+		err := decoder.DecompressToWriter(decodeContext, writer, expandedLength, nil)
 		_ = writer.CloseWithError(err)
 		decodeDone <- err
 	}()

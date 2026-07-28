@@ -29,11 +29,16 @@ func applyCopyAddConcurrent(ctx context.Context, source, patchFile, output *os.F
 	applyEvent.TotalBytes = expectedOutput.size
 	progress.Report(callback, applyEvent)
 
-	decoder := decoders.acquire()
-	applyError := applyCompressedInstructionStream(workContext, decoder, patchFile, offset, length, expandedLength, func(reader io.Reader) error {
-		return applyCopyAddStreamContext(workContext, source, reader, output, expectedInput.size, expectedOutput.size, expectedOutput.hash, callback, applyEvent)
-	})
-	decoders.release(decoder)
+	applyError := func() error {
+		decoder, releaseDecoder, err := decoders.acquire(workContext, patchFile, offset, length)
+		if err != nil {
+			return err
+		}
+		defer releaseDecoder()
+		return applyCompressedInstructionStream(workContext, decoder, expandedLength, func(reader io.Reader) error {
+			return applyCopyAddStreamContext(workContext, source, reader, output, expectedInput.size, expectedOutput.size, expectedOutput.hash, callback, applyEvent)
+		})
+	}()
 	if applyError != nil {
 		cancel()
 	}

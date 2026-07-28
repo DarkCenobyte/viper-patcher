@@ -254,17 +254,22 @@ func TestLargeInstructionStreamUsesBoundedStreamingPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer output.Close()
-	decoder, err := zstd.NewDecoder()
+	decoders, err := newDecoderPool(1, newZstdWindowBudget(processZstdWindowBudgetLimit()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer decoder.Close()
+	defer decoders.Close()
+	decoder, releaseDecoder, err := decoders.acquire(context.Background(), compressed, 0, uint64(compressedInfo.Size()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseDecoder()
 	targetHash, _, err := hashutil.Reader(bytes.NewReader(payload))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := applyCompressedInstructionStream(
-		context.Background(), decoder, compressed, 0, uint64(compressedInfo.Size()), uint64(operations.Len()),
+		context.Background(), decoder, uint64(operations.Len()),
 		func(reader io.Reader) error {
 			return applyCopyAddStreamContext(
 				context.Background(), source, reader, output, 0, uint64(len(payload)), targetHash, nil, progress.Event{},

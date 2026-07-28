@@ -134,7 +134,7 @@ func applyOpenedPatchWithOperations(ctx context.Context, opened *openedPatch, re
 	}
 	callback = newApplicationProgress(callback, parsed.Header.Files, direction)
 	plan := newApplicationPlan(workerBudget, parsed.Header.Files, direction)
-	decoders, err := newDecoderPool(plan.decoderCount)
+	decoders, err := newDecoderPool(plan.decoderCount, processApplicationResources.zstdWindowBudget)
 	if err != nil {
 		return errors.Join(err, wrapJoinedError("close target root", root.Close()), wrapJoinedError("release patch", releasePatch()))
 	}
@@ -263,11 +263,16 @@ func (preparer applicationFilePreparer) prepare(ctx context.Context, index int, 
 	case patchformat.MethodSparse:
 		event.Stage = progress.StageApplying
 		progress.Report(preparer.callback, event)
-		decoder := preparer.decoders.acquire()
-		err = applyCompressedInstructionStream(ctx, decoder, preparer.patch.file, segmentOffset, length, expandedLength, func(reader io.Reader) error {
-			return applySparseStreamParallel(ctx, source, reader, temporary, expectedOutput.size, expectedInput.hash, expectedOutput.hash, chunkWorkers, preparer.callback, event)
-		})
-		preparer.decoders.release(decoder)
+		err = func() error {
+			decoder, releaseDecoder, acquireError := preparer.decoders.acquire(ctx, preparer.patch.file, segmentOffset, length)
+			if acquireError != nil {
+				return acquireError
+			}
+			defer releaseDecoder()
+			return applyCompressedInstructionStream(ctx, decoder, expandedLength, func(reader io.Reader) error {
+				return applySparseStreamParallel(ctx, source, reader, temporary, expectedOutput.size, expectedInput.hash, expectedOutput.hash, chunkWorkers, preparer.callback, event)
+			})
+		}()
 		if err != nil {
 			return preparedApplicationFile{}, fmt.Errorf("apply %s differential for %q: %w", method, entry.Path, err)
 		}

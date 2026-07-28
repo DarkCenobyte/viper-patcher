@@ -33,6 +33,15 @@ typedef struct vipr_decoder vipr_decoder;
 
 vipr_decoder *vipr_decoder_create(void);
 void vipr_decoder_free(vipr_decoder *decoder);
+uint64_t vipr_zstd_decoder_window_limit(void);
+
+int vipr_zstd_frame_window_size(
+    uintptr_t patch_handle,
+    uint64_t patch_offset,
+    uint64_t patch_length,
+    uint64_t *window_size,
+    char *error_buffer,
+    uint64_t error_buffer_size);
 
 int vipr_decoder_decompress_segment(
     vipr_decoder *decoder,
@@ -42,6 +51,7 @@ int vipr_decoder_decompress_segment(
     int write_output,
     uintptr_t output_handle,
     uint64_t expected_output_size,
+    uint64_t decoder_window_limit,
     uintptr_t callback_handle,
     char *error_buffer,
     uint64_t error_buffer_size);

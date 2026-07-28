@@ -3,6 +3,7 @@ package patch
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,20 @@ func TestPreparedPatchRejectsPathReplacementBeforeApply(t *testing.T) {
 	replacement := filepath.Join(directory, "replacement.vipr")
 	writePreparedPatchFixture(t, replacement)
 	if err := os.Rename(replacement, path); err != nil {
+		// Windows normally denies replacement while the prepared read handle is
+		// open. That is stronger than the identity check this test exercises on
+		// rename-capable platforms, so verify that the prepared handle remains
+		// usable instead of treating the OS protection as a test failure.
+		if runtime.GOOS == "windows" {
+			opened, release, acquireError := prepared.acquire()
+			if acquireError != nil || opened == nil {
+				t.Fatalf("prepared patch became unusable after blocked replacement: %v", acquireError)
+			}
+			if releaseError := release(); releaseError != nil {
+				t.Fatal(releaseError)
+			}
+			return
+		}
 		t.Fatal(err)
 	}
 	if _, _, err := prepared.acquire(); err == nil {

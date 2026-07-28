@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
+	"math"
 	"os"
 	"sync"
 
@@ -173,26 +175,36 @@ func Reader(reader io.Reader) (string, uint64, error) {
 }
 
 // FileParallel calculates a VIPR file identity using independent fixed-size reads.
-func FileParallel(ctx context.Context, file *os.File, size uint64, workers int, onProgress func(uint64)) (string, uint64, error) {
+func FileParallel(ctx context.Context, file *os.File, size uint64, workers int, onProgress func(uint64)) (digest string, readSize uint64, resultError error) {
 	if file == nil {
 		return "", 0, fmt.Errorf("hash input file is unavailable")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	chunkCount := int((size + ChunkSize - 1) / ChunkSize)
+	if size > math.MaxInt64 {
+		return "", 0, fmt.Errorf("hash input exceeds the signed 64-bit file range")
+	}
+	chunkCount := ChunkCount(size)
 	if chunkCount == 0 {
 		return RootFromChunkDigestBytes(0, nil), 0, nil
 	}
 	if workers < 1 {
 		workers = 1
 	}
-	if workers > chunkCount {
-		workers = chunkCount
+	if uint64(workers) > chunkCount {
+		workers = int(chunkCount)
 	}
 
-	digests := make([][32]byte, chunkCount)
-	jobs := make(chan int)
+	digests, err := NewChunkDigestStore(chunkCount)
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() {
+		resultError = errors.Join(resultError, digests.Close())
+	}()
+
+	jobs := make(chan uint64)
 	workerContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var group sync.WaitGroup
@@ -210,7 +222,7 @@ func FileParallel(ctx context.Context, file *os.File, size uint64, workers int, 
 				if err := workerContext.Err(); err != nil {
 					return
 				}
-				offset := uint64(index) * ChunkSize
+				offset := index * ChunkSize
 				length := ChunkSize
 				if size-offset < length {
 					length = size - offset
@@ -223,7 +235,13 @@ func FileParallel(ctx context.Context, file *os.File, size uint64, workers int, 
 					})
 					return
 				}
-				digests[index] = ChunkDigestBytes(chunk)
+				if err := digests.Set(index, ChunkDigestBytes(chunk)); err != nil {
+					errorOnce.Do(func() {
+						firstError = err
+						cancel()
+					})
+					return
+				}
 				if onProgress != nil {
 					progressMutex.Lock()
 					processed += length
@@ -235,7 +253,7 @@ func FileParallel(ctx context.Context, file *os.File, size uint64, workers int, 
 	}
 
 sendLoop:
-	for index := 0; index < chunkCount; index++ {
+	for index := uint64(0); index < chunkCount; index++ {
 		select {
 		case jobs <- index:
 		case <-workerContext.Done():
@@ -250,5 +268,9 @@ sendLoop:
 	if err := ctx.Err(); err != nil {
 		return "", 0, err
 	}
-	return RootFromChunkDigestBytes(size, digests), size, nil
+	root, err := digests.Root(size)
+	if err != nil {
+		return "", 0, err
+	}
+	return root, size, nil
 }

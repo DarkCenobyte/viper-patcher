@@ -49,6 +49,91 @@ func CompressionLevelRange() (int, int) {
 	return int(C.vipr_zstd_min_level()), int(C.vipr_zstd_max_level())
 }
 
+// DecoderWindowLimit returns libzstd's normal maximum decoder window for the
+// current target architecture.
+func DecoderWindowLimit() uint64 {
+	return uint64(C.vipr_zstd_decoder_window_limit())
+}
+
+// PreparedSegment owns one positional handle for a bounded compressed segment.
+// The same private Windows handle is used for frame inspection and decompression,
+// so neither operation can move the cursor of the caller's Go file.
+type PreparedSegment struct {
+	owner   *os.File
+	handle  uintptr
+	offset  uint64
+	length  uint64
+	release func()
+}
+
+// PrepareSegment acquires one positional handle that remains valid until Close.
+func PrepareSegment(patch *os.File, offset, length uint64) (*PreparedSegment, error) {
+	if patch == nil {
+		return nil, fmt.Errorf("patch file is required")
+	}
+	if length == 0 {
+		return nil, fmt.Errorf("empty compressed segment")
+	}
+	if offset > math.MaxInt64 || length > math.MaxInt64-offset {
+		return nil, fmt.Errorf("compressed segment exceeds the supported signed 64-bit range")
+	}
+	handle, release, err := acquirePositionalReadHandle(patch)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedSegment{owner: patch, handle: handle, offset: offset, length: length, release: release}, nil
+}
+
+// Close releases the positional handle. It is safe to call more than once after
+// all reads using the segment have completed.
+func (segment *PreparedSegment) Close() error {
+	if segment == nil || segment.release == nil {
+		return nil
+	}
+	segment.release()
+	segment.release = nil
+	segment.owner = nil
+	segment.handle = 0
+	return nil
+}
+
+// WindowSize inspects only the bounded zstd frame header.
+func (segment *PreparedSegment) WindowSize() (uint64, error) {
+	if segment == nil || segment.owner == nil || segment.release == nil {
+		return 0, fmt.Errorf("prepared zstd segment is closed")
+	}
+	errorBuffer, err := nativeErrorBuffer()
+	if err != nil {
+		return 0, err
+	}
+	defer C.free(errorBuffer)
+
+	var windowSize C.uint64_t
+	result := C.vipr_zstd_frame_window_size(
+		C.uintptr_t(segment.handle),
+		C.uint64_t(segment.offset),
+		C.uint64_t(segment.length),
+		&windowSize,
+		(*C.char)(errorBuffer),
+		errorBufferSize,
+	)
+	runtime.KeepAlive(segment.owner)
+	if result != 0 {
+		return 0, fmt.Errorf("inspect zstd frame: %s", C.GoString((*C.char)(errorBuffer)))
+	}
+	return uint64(windowSize), nil
+}
+
+// FrameWindowSize inspects a frame through a short-lived prepared segment.
+func FrameWindowSize(patch *os.File, offset, length uint64) (uint64, error) {
+	segment, err := PrepareSegment(patch, offset, length)
+	if err != nil {
+		return 0, err
+	}
+	defer segment.Close()
+	return segment.WindowSize()
+}
+
 func validateCompressionLevel(level int) error {
 	if err := RequireExpectedVersion(); err != nil {
 		return err
@@ -113,6 +198,11 @@ func CompressFileSegment(input *os.File, offset, length uint64, outputPath strin
 	if err := validateCompressionLevel(level); err != nil {
 		return err
 	}
+	inputHandle, releaseInputHandle, err := acquirePositionalReadHandle(input)
+	if err != nil {
+		return err
+	}
+	defer releaseInputHandle()
 
 	outputCString := C.CString(outputPath)
 	errorBuffer, err := nativeErrorBuffer()
@@ -125,7 +215,7 @@ func CompressFileSegment(input *os.File, offset, length uint64, outputPath strin
 	handle := newProgressHandle(callback)
 	defer handle.Delete()
 	result := C.vipr_compress_segment(
-		C.uintptr_t(input.Fd()),
+		C.uintptr_t(inputHandle),
 		C.uint64_t(offset),
 		C.uint64_t(length),
 		outputCString,
@@ -146,7 +236,8 @@ func CompressFileSegment(input *os.File, offset, length uint64, outputPath strin
 // Decoder reuses one native zstd context and its input/output buffers across
 // multiple files. A Decoder is not safe for concurrent use.
 type Decoder struct {
-	native *C.vipr_decoder
+	native      *C.vipr_decoder
+	windowLimit uint64
 }
 
 // NewDecoder creates a reusable native decoder.
@@ -158,7 +249,21 @@ func NewDecoder() (*Decoder, error) {
 	if native == nil {
 		return nil, fmt.Errorf("allocate native zstd decoder")
 	}
-	return &Decoder{native: native}, nil
+	return &Decoder{native: native, windowLimit: DecoderWindowLimit()}, nil
+}
+
+// SetWindowLimit caps the next and subsequent decode operations on this decoder.
+// Decoder pools set it from the inspected frame before handing the decoder to a
+// worker, closing the mutation window between reservation and decompression.
+func (decoder *Decoder) SetWindowLimit(limit uint64) error {
+	if decoder == nil || decoder.native == nil {
+		return fmt.Errorf("zstd decoder is closed")
+	}
+	if limit == 0 || limit > DecoderWindowLimit() {
+		return fmt.Errorf("zstd decoder window limit %d is invalid", limit)
+	}
+	decoder.windowLimit = limit
+	return nil
 }
 
 // Close releases native decoder resources.
@@ -183,7 +288,21 @@ type decodeCallbacks struct {
 // already-open patch handle to an already-open output handle. Output blocks are
 // exposed synchronously so BLAKE3 can be calculated during the write pass.
 func (decoder *Decoder) DecompressSegmentToFile(ctx context.Context, patch *os.File, offset, length uint64, output *os.File, expectedOutputSize uint64, callback ProgressFunc, outputCallback OutputFunc) error {
-	return decoder.decompressSegment(ctx, patch, offset, length, output, expectedOutputSize, callback, outputCallback)
+	if decoder == nil || decoder.native == nil {
+		return fmt.Errorf("zstd decoder is closed")
+	}
+	segment, err := PrepareSegment(patch, offset, length)
+	if err != nil {
+		return err
+	}
+	defer segment.Close()
+	return decoder.DecompressPreparedSegmentToFile(ctx, segment, output, expectedOutputSize, callback, outputCallback)
+}
+
+// DecompressPreparedSegmentToFile decodes one prepared segment without reopening
+// its input handle.
+func (decoder *Decoder) DecompressPreparedSegmentToFile(ctx context.Context, segment *PreparedSegment, output *os.File, expectedOutputSize uint64, callback ProgressFunc, outputCallback OutputFunc) error {
+	return decoder.decompressSegment(ctx, segment, output, expectedOutputSize, callback, outputCallback)
 }
 
 // DecompressSegmentToWriter streams one standalone frame to writer without
@@ -193,7 +312,23 @@ func (decoder *Decoder) DecompressSegmentToWriter(ctx context.Context, patch *os
 	if writer == nil {
 		return fmt.Errorf("decompressed output writer is required")
 	}
-	return decoder.decompressSegment(ctx, patch, offset, length, nil, expectedOutputSize, callback, func(block []byte) error {
+	if decoder == nil || decoder.native == nil {
+		return fmt.Errorf("zstd decoder is closed")
+	}
+	segment, err := PrepareSegment(patch, offset, length)
+	if err != nil {
+		return err
+	}
+	defer segment.Close()
+	return decoder.DecompressPreparedSegmentToWriter(ctx, segment, writer, expectedOutputSize, callback)
+}
+
+// DecompressPreparedSegmentToWriter streams one prepared segment to writer.
+func (decoder *Decoder) DecompressPreparedSegmentToWriter(ctx context.Context, segment *PreparedSegment, writer io.Writer, expectedOutputSize uint64, callback ProgressFunc) error {
+	if writer == nil {
+		return fmt.Errorf("decompressed output writer is required")
+	}
+	return decoder.decompressSegment(ctx, segment, nil, expectedOutputSize, callback, func(block []byte) error {
 		written, err := writer.Write(block)
 		if err == nil && written != len(block) {
 			return io.ErrShortWrite
@@ -202,12 +337,12 @@ func (decoder *Decoder) DecompressSegmentToWriter(ctx context.Context, patch *os
 	})
 }
 
-func (decoder *Decoder) decompressSegment(ctx context.Context, patch *os.File, offset, length uint64, output *os.File, expectedOutputSize uint64, callback ProgressFunc, outputCallback OutputFunc) error {
+func (decoder *Decoder) decompressSegment(ctx context.Context, segment *PreparedSegment, output *os.File, expectedOutputSize uint64, callback ProgressFunc, outputCallback OutputFunc) error {
 	if decoder == nil || decoder.native == nil {
 		return fmt.Errorf("zstd decoder is closed")
 	}
-	if patch == nil {
-		return fmt.Errorf("patch file is required")
+	if segment == nil || segment.owner == nil || segment.release == nil {
+		return fmt.Errorf("prepared zstd segment is closed")
 	}
 	if output == nil && outputCallback == nil {
 		return fmt.Errorf("decompressed output destination is required")
@@ -233,19 +368,20 @@ func (decoder *Decoder) decompressSegment(ctx context.Context, patch *os.File, o
 	}
 	result := C.vipr_decoder_decompress_segment(
 		decoder.native,
-		C.uintptr_t(patch.Fd()),
-		C.uint64_t(offset),
-		C.uint64_t(length),
+		C.uintptr_t(segment.handle),
+		C.uint64_t(segment.offset),
+		C.uint64_t(segment.length),
 		writeOutput,
 		outputHandle,
 		C.uint64_t(expectedOutputSize),
+		C.uint64_t(decoder.windowLimit),
 		C.uintptr_t(handle),
 		(*C.char)(errorBuffer),
 		errorBufferSize,
 	)
 	// The cgo call only sees integer handles and cannot keep the owning files
 	// reachable on the Go side while native code is reading or writing them.
-	runtime.KeepAlive(patch)
+	runtime.KeepAlive(segment.owner)
 	runtime.KeepAlive(output)
 	if callbacks.err != nil {
 		return callbacks.err

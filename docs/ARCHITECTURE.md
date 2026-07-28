@@ -45,8 +45,12 @@ method permits it:
    then close the source before the multi-file commit begins;
 3. split the worker target between independent files and large chunks, with an
    eagerly prepared decoder pool sized to the maximum concurrent decode demand;
+   inspect each bounded zstd frame header before use and reserve its actual window
+   against one process-wide decoder-memory budget;
 4. compute BLAKE3 chunk digests while bytes are produced and assemble file roots
-   without a final sequential reread;
+   without a final sequential reread. Digest tables stay as direct arrays on the
+   normal path and spill to private temporary files only beyond 64 MiB on 64-bit
+   targets or 16 MiB on 32-bit targets;
 5. synchronize each prepared output, commit files sequentially through
    rollback-capable per-file renames, synchronize each affected parent directory
    once on Unix-like systems, and only then remove committed backups.
@@ -66,8 +70,10 @@ installed files are copied into application snapshots.
 
 - `zstd-sparse` validates and streams the instruction sequence into a bounded
   producer/consumer queue. At most the queued and active 8 MiB chunk plans retain
-  replacement bytes, so memory use is proportional to the active worker count,
-  not to the complete file size.
+  replacement bytes. Its existing parallel chunk path is unchanged for ordinary
+  files; only an extreme BLAKE3 digest table spills after 64 MiB on 64-bit
+  targets or 16 MiB on 32-bit targets, so logical file size is not capped and
+  the common path does not gain another data pass.
 - `zstd-copy-add` verifies the source in parallel while executing bounds-checked
   COPY ranges and literal ADD data from the compressed operation stream. Its
   source index is a compact BLAKE3-256-keyed sorted array with an exact per-index
@@ -77,9 +83,10 @@ installed files are copied into application snapshots.
   keep matches stable across insertions and deletions.
 - `zstd-replace` verifies the installed source with parallel BLAKE3 chunk reads
   concurrently with standalone zstd decompression and output hashing.
-- `zstd-chunked-replace` decompresses canonical fixed-size independent frames
-  concurrently, verifies each output chunk, and assembles the final BLAKE3 tree
-  root in chunk order.
+- `zstd-chunked-replace` validates its compact 56-byte descriptor table without
+  retaining it, streams the table a second time through a bounded worker queue,
+  decompresses independent frames concurrently, verifies each output chunk, and
+  assembles the final BLAKE3 tree root in chunk order.
 
 Progress is aggregated by weighted per-file phases in the core. Callbacks are
 serialized and receive a monotone `Overall` value, so concurrent file events do
@@ -116,17 +123,26 @@ The native API no longer exposes reference files or zstd `patch-from` state.
 Sparse and COPY/ADD reuse is represented explicitly by format 3 instruction
 streams before standalone zstd compression.
 
-Each decoder owns one `ZSTD_DCtx` and reusable 1 MiB input/output buffers. Output
-blocks are synchronously exposed to Go for hashing and throttled progress. The
-wrapper remains pinned to libzstd 1.5.7.
+Each decoder owns one `ZSTD_DCtx` and reusable 1 MiB input/output buffers. Before
+acquisition, a positional read inspects only the bounded frame header. The actual
+frame window is reserved atomically against one process-wide budget: 512 MiB on
+64-bit targets and at least one architecture-specific maximum window on 32-bit
+targets. Large declared output sizes with small windows therefore keep their
+normal parallelism; only simultaneous large-window frames are throttled. Output blocks
+are synchronously exposed to Go for hashing and throttled progress. The wrapper
+remains pinned to libzstd 1.5.7.
 
 ## Integrity and security boundary
 
 File identities use the domain-separated `blake3-tree-v1` construction and
 selected patch files use standard BLAKE3-256 fingerprints. Format ranges,
 decompressed sizes, canonical chunk descriptors, sparse and COPY/ADD
-instructions, portable paths, and symbolic-link traversal are validated.
-`os.Root` keeps installation operations relative to one stable root handle.
+instructions, portable paths, and symbolic-link traversal are validated. Header
+decoding stops before more than 262,144 file entries can be materialized; this is
+above the number of fully valid entries representable by the existing 64 MiB
+header bound. Transaction duplicate detection uses case-folded target and exact
+temporary-path indexes, avoiding quadratic registration work. `os.Root` keeps
+installation operations relative to one stable root handle.
 
 The format stores content identities and sizes, not platform permission metadata.
 A replacement preserves the permissions already present on the installed file.

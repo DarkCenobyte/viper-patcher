@@ -203,7 +203,7 @@ func checkedAddMany(values ...uint64) (uint64, bool) {
 }
 
 // applyCopyAddStreamContext executes one validated COPY/ADD instruction stream.
-func applyCopyAddStreamContext(ctx context.Context, source *os.File, operations io.Reader, output *os.File, expectedSourceSize, expectedTargetSize uint64, expectedTargetHash string, callback progress.Callback, event progress.Event) error {
+func applyCopyAddStreamContext(ctx context.Context, source *os.File, operations io.Reader, output *os.File, expectedSourceSize, expectedTargetSize uint64, expectedTargetHash string, callback progress.Callback, event progress.Event) (resultError error) {
 	reader := bufio.NewReaderSize(operations, sparseIOBufferSize)
 	var magic [8]byte
 	if _, err := io.ReadFull(reader, magic[:]); err != nil {
@@ -213,7 +213,13 @@ func applyCopyAddStreamContext(ctx context.Context, source *os.File, operations 
 		return fmt.Errorf("invalid copy-add stream magic")
 	}
 
-	outputHash := hashutil.NewAccumulator()
+	outputHash, err := hashutil.NewSizedAccumulator(expectedTargetSize)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultError = errors.Join(resultError, outputHash.Close())
+	}()
 	buffer := make([]byte, sparseIOBufferSize)
 	var produced uint64
 	lastReported := uint64(0)
@@ -236,7 +242,9 @@ func applyCopyAddStreamContext(ctx context.Context, source *os.File, operations 
 		if _, err := output.Write(block); err != nil {
 			return err
 		}
-		_, _ = outputHash.Write(block)
+		if _, err := outputHash.Write(block); err != nil {
+			return err
+		}
 		produced += uint64(len(block))
 		report(false)
 		return nil

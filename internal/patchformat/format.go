@@ -20,6 +20,7 @@ var Magic = [8]byte{'V', 'I', 'P', 'R', '\r', '\n', 0x1a, 0x01}
 const (
 	FormatVersion        = 3
 	MaxHeaderSize        = 64 << 20
+	MaxFileEntries       = 1 << 18
 	HashBLAKE3Tree       = "blake3-tree-v1"
 	SupportedZstdVersion = zstdversion.Version
 	CompressionHybrid    = "hybrid-v3"
@@ -133,11 +134,71 @@ func Decode(reader io.Reader) (Patch, error) {
 	return Patch{Header: header, DataOffset: uint64(len(Magic)) + 8 + headerLength}, nil
 }
 
-func decodeHeader(payload []byte) (Header, error) {
-	var header Header
+type boundedFileEntries []FileEntry
+
+func (entries *boundedFileEntries) UnmarshalJSON(payload []byte) error {
+	decoded, err := decodeBoundedFileEntries(payload, MaxFileEntries)
+	if err != nil {
+		return err
+	}
+	*entries = decoded
+	return nil
+}
+
+func decodeBoundedFileEntries(payload []byte, limit int) ([]FileEntry, error) {
+	if limit < 0 {
+		return nil, fmt.Errorf("invalid patch file entry limit")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&header); err != nil {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("decode patch file entries: %w", err)
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '[' {
+		return nil, fmt.Errorf("patch file entries must be an array")
+	}
+	decoded := make([]FileEntry, 0, min(len(payload)/256, min(limit, 4096)))
+	for decoder.More() {
+		if len(decoded) >= limit {
+			return nil, fmt.Errorf("patch contains more than %d files", limit)
+		}
+		var entry FileEntry
+		if err := decoder.Decode(&entry); err != nil {
+			return nil, fmt.Errorf("decode patch file entry %d: %w", len(decoded), err)
+		}
+		decoded = append(decoded, entry)
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("decode patch file entries: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("patch file entries contain trailing JSON values")
+		}
+		return nil, fmt.Errorf("decode trailing patch file entry data: %w", err)
+	}
+	return decoded, nil
+}
+
+type decodedHeader struct {
+	FormatVersion int                `json:"formatVersion"`
+	CreatedAt     time.Time          `json:"createdAt"`
+	Creator       CreatorInfo        `json:"creator"`
+	Comment       string             `json:"comment"`
+	HashAlgorithm string             `json:"hashAlgorithm"`
+	Compression   Compression        `json:"compression"`
+	Reverse       bool               `json:"reverse"`
+	Files         boundedFileEntries `json:"files"`
+}
+
+func decodeHeader(payload []byte) (Header, error) {
+	var decoded decodedHeader
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
 		return Header{}, fmt.Errorf("decode patch header: %w", err)
 	}
 	var trailing any
@@ -147,7 +208,16 @@ func decodeHeader(payload []byte) (Header, error) {
 		}
 		return Header{}, fmt.Errorf("decode trailing patch header data: %w", err)
 	}
-	return header, nil
+	return Header{
+		FormatVersion: decoded.FormatVersion,
+		CreatedAt:     decoded.CreatedAt,
+		Creator:       decoded.Creator,
+		Comment:       decoded.Comment,
+		HashAlgorithm: decoded.HashAlgorithm,
+		Compression:   decoded.Compression,
+		Reverse:       decoded.Reverse,
+		Files:         []FileEntry(decoded.Files),
+	}, nil
 }
 
 // ValidateHeader validates format-level invariants and blob metadata.
@@ -169,6 +239,9 @@ func ValidateHeader(header Header) error {
 	}
 	if len(header.Files) == 0 {
 		return fmt.Errorf("patch contains no files")
+	}
+	if len(header.Files) > MaxFileEntries {
+		return fmt.Errorf("patch contains more than %d files", MaxFileEntries)
 	}
 
 	seen := make(map[string]struct{}, len(header.Files))

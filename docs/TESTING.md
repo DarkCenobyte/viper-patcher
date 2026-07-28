@@ -15,16 +15,19 @@ The test suite covers:
 - GUI/CLI mode selection helpers.
 - Atomic creator file-pair parsing, required final positional arguments, help,
   version, failure, and success paths, including the `--workers` option.
-- BLAKE3 streaming, chunked, and parallel hashing, accumulator finalization, and
-  agreement between streaming and positional-read implementations.
+- BLAKE3 streaming, chunked, and parallel hashing, accumulator finalization,
+  agreement between streaming and positional-read implementations, overflow-safe
+  chunk counting, and forced digest-table spill equivalence.
 - Common-root and traversal-resistant `os.Root` handling, including target-root
   and component symbolic-link rejection.
 - Unicode-normalized, case-insensitive path collision detection.
-- Strict VIPR header parsing, malformed metadata, unknown fields, signed file-size
-  limits, method-specific invariants, rejection of old format versions, SHA-256
-  metadata, permission fields, and legacy `targetHint` fields.
+- Strict VIPR header parsing, malformed metadata, unknown fields, bounded file-entry
+  decoding, signed file-size limits, method-specific invariants, rejection of old
+  format versions, SHA-256 metadata, permission fields, and legacy `targetHint`
+  fields.
 - Differential-range validation and unreferenced-data rejection.
-- Standalone libzstd compression and bounded segment decompression through cgo.
+- Standalone libzstd compression, frame-window inspection, process-wide weighted
+  window budgeting, and bounded segment decompression through cgo.
 - Immediate termination before decompressed output can exceed its declared size.
 - Canonical chunked-replace descriptor boundaries and per-frame BLAKE3 checks.
 - Sparse parser cancellation, malformed streams, bounded producer/consumer
@@ -44,7 +47,8 @@ The test suite covers:
 - Serialized byte-level progress callbacks, monotone weighted overall progress,
   and distinct prepared and committed stages.
 - Creator disk estimates, selected work directories, centralized automatic worker
-  targets, `--workers 0`, and atomic multi-unit COPY/ADD index-memory budgeting.
+  targets, `--workers 0`, atomic multi-unit COPY/ADD index-memory budgeting, and
+  indexed constant-time transaction duplicate detection.
 - Fuzzing of VIPR decoding, patch opening, and secure path joining.
 
 CI runs the complete test suite with the Go race detector. It also rebuilds the
@@ -53,9 +57,10 @@ native packages with AddressSanitizer and UndefinedBehaviorSanitizer, runs
 vulnerabilities that are reachable from the current Go call graph.
 
 CI enforces at least 80% statement coverage across the non-GUI core packages.
-GUI packages are compiled by CI on Linux, and all release targets compile the
-complete GUI and CLI executables on their native runner or supported multilib
-toolchain.
+The same core set also runs natively on Windows amd64 and Windows 386, plus Linux
+386 through the supported multilib toolchain. GUI packages are compiled by CI on
+Linux, and all release targets compile the complete GUI and CLI executables on
+their native runner or supported multilib toolchain.
 
 A literal 100% line-coverage target is intentionally not used because it would
 encourage platform-specific error branches and GUI toolkit internals to be

@@ -94,3 +94,143 @@ jobs:
           ldflags="-s -w -X ${module}/internal/buildinfo.Version=ci -X ${module}/internal/buildinfo.Commit=${GITHUB_SHA} -X ${module}/internal/buildinfo.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o /tmp/creator ./cmd/creator
           go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o /tmp/patcher ./cmd/patcher
+
+  core-linux-386:
+    name: Core tests (Linux 386)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Install 32-bit dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install --yes curl gcc-multilib libc6-dev-i386
+          printf '#!/bin/sh\nexec gcc -m32 "$@"\n' > "$RUNNER_TEMP/gcc-386"
+          chmod +x "$RUNNER_TEMP/gcc-386"
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build 32-bit libzstd 1.5.7
+        env:
+          CC: ${{ runner.temp }}/gcc-386
+        run: |
+          ./scripts/fetch-zstd.sh
+          JOBS="$(nproc)" ./scripts/build-zstd.sh
+
+      - name: Run core tests
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: "386"
+          CC: ${{ runner.temp }}/gcc-386
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
+        run: |
+          packages="./internal/appmode ./internal/buildinfo ./internal/cli/... ./internal/hashutil ./internal/patch ./internal/patchformat ./internal/pathutil ./internal/progress ./internal/zstd"
+          go test -count=1 -tags vipr_static_zstd,migrated_fynedo $packages
+
+  core-windows:
+    name: Core tests (Windows ${{ matrix.name }})
+    runs-on: windows-2025
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x64
+            goarch: amd64
+            msystem: MINGW64
+            compiler_package: mingw-w64-x86_64-gcc
+            make_package: mingw-w64-x86_64-make
+            tool_directory: mingw64
+          - name: x86
+            goarch: "386"
+            msystem: MINGW32
+            compiler_package: mingw-w64-i686-gcc
+            make_package: mingw-w64-i686-make
+            tool_directory: mingw32
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          architecture: x64
+          cache: true
+
+      - name: Set up MinGW
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        id: msys2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: ${{ matrix.compiler_package }} ${{ matrix.make_package }}
+
+      - name: Configure MinGW toolchain
+        shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+          TOOL_DIRECTORY: ${{ matrix.tool_directory }}
+        run: |
+          $binDirectory = Join-Path (Join-Path $env:MSYS2_ROOT $env:TOOL_DIRECTORY) "bin"
+          $compiler = Join-Path $binDirectory "gcc.exe"
+          $cxxCompiler = Join-Path $binDirectory "g++.exe"
+          $archiver = Join-Path $binDirectory "ar.exe"
+          $ranlib = Join-Path $binDirectory "ranlib.exe"
+          foreach ($tool in @($compiler, $cxxCompiler, $archiver, $ranlib)) {
+            if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
+              throw "Required MinGW tool was not found: $tool"
+            }
+          }
+          $binDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CC=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=$cxxCompiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AR=$archiver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RANLIB=$ranlib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Download dependencies
+        shell: pwsh
+        run: go mod download
+
+      - name: Build libzstd 1.5.7
+        shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          ./scripts/fetch-zstd.ps1
+          ./scripts/build-zstd.ps1 -Architecture ${{ matrix.name }} -MSYS2Root $env:MSYS2_ROOT
+
+      - name: Run core tests
+        shell: pwsh
+        env:
+          CGO_ENABLED: "1"
+          GOOS: windows
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          $packages = @(
+            "./internal/appmode",
+            "./internal/buildinfo",
+            "./internal/cli/...",
+            "./internal/hashutil",
+            "./internal/patch",
+            "./internal/patchformat",
+            "./internal/pathutil",
+            "./internal/progress",
+            "./internal/zstd"
+          )
+          go test -count=1 -tags vipr_static_zstd,migrated_fynedo $packages
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }

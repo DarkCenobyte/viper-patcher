@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sync"
 
@@ -25,14 +27,14 @@ type sparseChunkPlan struct {
 }
 
 type sparseChunkJob struct {
-	index int
+	index uint64
 	plan  sparseChunkPlan
 }
 
 // streamSparseChunkPlans validates a sparse stream and emits one bounded plan
 // per fixed BLAKE3 chunk. At most the worker queue and active jobs retain
 // replacement data, so memory use does not grow with the complete file size.
-func streamSparseChunkPlans(ctx context.Context, reader io.Reader, expectedSize uint64, emit func(int, sparseChunkPlan) error) error {
+func streamSparseChunkPlans(ctx context.Context, reader io.Reader, expectedSize uint64, emit func(uint64, sparseChunkPlan) error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -48,8 +50,8 @@ func streamSparseChunkPlans(ctx context.Context, reader io.Reader, expectedSize 
 		return fmt.Errorf("invalid sparse stream magic")
 	}
 
-	chunkCount := int((expectedSize + hashutil.ChunkSize - 1) / hashutil.ChunkSize)
-	nextChunk := 0
+	chunkCount := hashutil.ChunkCount(expectedSize)
+	nextChunk := uint64(0)
 	current := sparseChunkPlan{}
 	emitCurrent := func() error {
 		if nextChunk >= chunkCount {
@@ -62,7 +64,7 @@ func streamSparseChunkPlans(ctx context.Context, reader io.Reader, expectedSize 
 		current = sparseChunkPlan{}
 		return nil
 	}
-	emitUntil := func(target int) error {
+	emitUntil := func(target uint64) error {
 		for nextChunk < target {
 			if err := emitCurrent(); err != nil {
 				return err
@@ -94,7 +96,7 @@ func streamSparseChunkPlans(ctx context.Context, reader io.Reader, expectedSize 
 			return fmt.Errorf("sparse operation exceeds expected file size")
 		}
 		position += gap
-		if err := emitUntil(int(position / hashutil.ChunkSize)); err != nil {
+		if err := emitUntil(position / hashutil.ChunkSize); err != nil {
 			return err
 		}
 
@@ -102,7 +104,7 @@ func streamSparseChunkPlans(ctx context.Context, reader io.Reader, expectedSize 
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			chunkIndex := int(position / hashutil.ChunkSize)
+			chunkIndex := position / hashutil.ChunkSize
 			if chunkIndex != nextChunk || chunkIndex >= chunkCount {
 				return fmt.Errorf("sparse operation exceeds expected file size")
 			}
@@ -144,26 +146,29 @@ func streamSparseChunkPlans(ctx context.Context, reader io.Reader, expectedSize 
 	return nil
 }
 
-func applySparseStreamParallel(ctx context.Context, source *os.File, operations io.Reader, output *os.File, expectedSize uint64, expectedSourceHash, expectedTargetHash string, workers int, callback progress.Callback, event progress.Event) error {
+func applySparseStreamParallel(ctx context.Context, source *os.File, operations io.Reader, output *os.File, expectedSize uint64, expectedSourceHash, expectedTargetHash string, workers int, callback progress.Callback, event progress.Event) (resultError error) {
 	if source == nil || operations == nil || output == nil {
 		return fmt.Errorf("sparse application requires source, operations, and output files")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	chunkCount := int((expectedSize + hashutil.ChunkSize - 1) / hashutil.ChunkSize)
+	if expectedSize > math.MaxInt64 {
+		return fmt.Errorf("sparse output exceeds the signed 64-bit file range")
+	}
+	chunkCount := hashutil.ChunkCount(expectedSize)
 	if workers < 1 {
 		workers = 1
 	}
-	if chunkCount > 0 && workers > chunkCount {
-		workers = chunkCount
+	if chunkCount > 0 && uint64(workers) > chunkCount {
+		workers = int(chunkCount)
 	}
 	if err := output.Truncate(int64(expectedSize)); err != nil {
 		return err
 	}
 
 	if chunkCount == 0 {
-		parseError := streamSparseChunkPlans(ctx, operations, expectedSize, func(int, sparseChunkPlan) error {
+		parseError := streamSparseChunkPlans(ctx, operations, expectedSize, func(uint64, sparseChunkPlan) error {
 			return fmt.Errorf("empty sparse output unexpectedly contains a chunk")
 		})
 		if parseError != nil {
@@ -182,8 +187,20 @@ func applySparseStreamParallel(ctx context.Context, source *os.File, operations 
 	workContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	jobs := make(chan sparseChunkJob, workers)
-	sourceDigests := make([][32]byte, chunkCount)
-	targetDigests := make([][32]byte, chunkCount)
+	sourceDigests, err := hashutil.NewChunkDigestStore(chunkCount)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultError = errors.Join(resultError, sourceDigests.Close())
+	}()
+	targetDigests, err := hashutil.NewChunkDigestStore(chunkCount)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultError = errors.Join(resultError, targetDigests.Close())
+	}()
 	buffers := newChunkBufferPool()
 	var group sync.WaitGroup
 	var firstError error
@@ -205,7 +222,7 @@ func applySparseStreamParallel(ctx context.Context, source *os.File, operations 
 				if err := workContext.Err(); err != nil {
 					return
 				}
-				offset := uint64(job.index) * hashutil.ChunkSize
+				offset := job.index * hashutil.ChunkSize
 				length := hashutil.ChunkSize
 				if expectedSize-offset < length {
 					length = expectedSize - offset
@@ -216,7 +233,11 @@ func applySparseStreamParallel(ctx context.Context, source *os.File, operations 
 					recordError(fmt.Errorf("read sparse source chunk %d: %w", job.index, err))
 					return
 				}
-				sourceDigests[job.index] = hashutil.ChunkDigestBytes(buffer)
+				if err := sourceDigests.Set(job.index, hashutil.ChunkDigestBytes(buffer)); err != nil {
+					buffers.put(pooled)
+					recordError(err)
+					return
+				}
 				for _, record := range job.plan.records {
 					start := uint64(record.offset)
 					end := start + uint64(record.length)
@@ -229,7 +250,11 @@ func applySparseStreamParallel(ctx context.Context, source *os.File, operations 
 					}
 					copy(buffer[int(start):int(end)], job.plan.data[int(dataStart):int(dataEnd)])
 				}
-				targetDigests[job.index] = hashutil.ChunkDigestBytes(buffer)
+				if err := targetDigests.Set(job.index, hashutil.ChunkDigestBytes(buffer)); err != nil {
+					buffers.put(pooled)
+					recordError(err)
+					return
+				}
 				if _, err := output.WriteAt(buffer, int64(offset)); err != nil {
 					buffers.put(pooled)
 					recordError(fmt.Errorf("write sparse output chunk %d: %w", job.index, err))
@@ -248,7 +273,7 @@ func applySparseStreamParallel(ctx context.Context, source *os.File, operations 
 		}()
 	}
 
-	parseError := streamSparseChunkPlans(workContext, operations, expectedSize, func(index int, plan sparseChunkPlan) error {
+	parseError := streamSparseChunkPlans(workContext, operations, expectedSize, func(index uint64, plan sparseChunkPlan) error {
 		select {
 		case jobs <- sparseChunkJob{index: index, plan: plan}:
 			return nil
@@ -271,8 +296,14 @@ func applySparseStreamParallel(ctx context.Context, source *os.File, operations 
 		return err
 	}
 
-	sourceRoot := hashutil.RootFromChunkDigestBytes(expectedSize, sourceDigests)
-	targetRoot := hashutil.RootFromChunkDigestBytes(expectedSize, targetDigests)
+	sourceRoot, err := sourceDigests.Root(expectedSize)
+	if err != nil {
+		return err
+	}
+	targetRoot, err := targetDigests.Root(expectedSize)
+	if err != nil {
+		return err
+	}
 	if sourceRoot != expectedSourceHash {
 		return fmt.Errorf("installed source failed BLAKE3 tree verification")
 	}

@@ -37,7 +37,7 @@ func chunkedContainer(descriptors []chunkedReplaceDescriptor, payload []byte) []
 	return buffer.Bytes()
 }
 
-func TestReadChunkedReplaceRejectsInvalidContainers(t *testing.T) {
+func TestInspectChunkedReplaceRejectsInvalidContainers(t *testing.T) {
 	validDigest := strings.Repeat("0", 64)
 	tests := []struct {
 		name         string
@@ -66,12 +66,12 @@ func TestReadChunkedReplaceRejectsInvalidContainers(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "invalid.bin")
 			file := writeTestFile(t, path, test.container)
 			defer file.Close()
-			if _, _, err := readChunkedReplace(file, 0, uint64(len(test.container)), test.expectedSize); err == nil {
+			if _, err := inspectChunkedReplace(file, 0, uint64(len(test.container)), test.expectedSize); err == nil {
 				t.Fatal("expected invalid container to be rejected")
 			}
 		})
 	}
-	if _, _, err := readChunkedReplace(nil, 0, 0, 0); err == nil {
+	if _, err := inspectChunkedReplace(nil, 0, 0, 0); err == nil {
 		t.Fatal("expected nil patch file to be rejected")
 	}
 }
@@ -91,7 +91,7 @@ func TestStreamSparseChunkPlansRejectsInvalidStreams(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := streamSparseChunkPlans(context.Background(), bytes.NewReader(test.data), test.size, func(int, sparseChunkPlan) error { return nil })
+			err := streamSparseChunkPlans(context.Background(), bytes.NewReader(test.data), test.size, func(uint64, sparseChunkPlan) error { return nil })
 			if err == nil {
 				t.Fatal("expected invalid sparse stream to be rejected")
 			}
@@ -130,7 +130,7 @@ func TestStandaloneReplaceVerifiesAndAppliesConcurrently(t *testing.T) {
 	defer output.Close()
 	sourceHash, _, _ := hashutil.Reader(bytes.NewReader(sourceData))
 	targetHash, _, _ := hashutil.Reader(bytes.NewReader(targetData))
-	decoders, err := newDecoderPool(2)
+	decoders, err := newDecoderPool(2, newZstdWindowBudget(processZstdWindowBudgetLimit()))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -31,9 +31,11 @@ type transactionFile struct {
 // rollback when a later handled replacement fails. It does not provide
 // crash-consistent multi-file transactions across power loss or kernel failure.
 type Transaction struct {
-	files      []transactionFile
-	operations transactionOperations
-	finished   bool
+	files          []transactionFile
+	targetKeys     map[string]struct{}
+	temporaryPaths map[string]struct{}
+	operations     transactionOperations
+	finished       bool
 }
 
 func newRootTransaction(root *os.Root) *Transaction {
@@ -53,7 +55,11 @@ func newRootTransaction(root *os.Root) *Transaction {
 }
 
 func newTransactionWithOperations(operations transactionOperations) *Transaction {
-	return &Transaction{operations: operations}
+	return &Transaction{
+		targetKeys:     make(map[string]struct{}),
+		temporaryPaths: make(map[string]struct{}),
+		operations:     operations,
+	}
 }
 
 // Add registers one prepared replacement and the identity of the validated file.
@@ -64,17 +70,26 @@ func (transaction *Transaction) Add(target, temporary string, expectation fileEx
 	if target == "" || temporary == "" || expectation.Identity == nil {
 		return fmt.Errorf("transaction replacement is incomplete")
 	}
+	if transaction.targetKeys == nil {
+		transaction.targetKeys = make(map[string]struct{})
+	}
+	if transaction.temporaryPaths == nil {
+		transaction.temporaryPaths = make(map[string]struct{})
+	}
 	targetKey := pathutil.CaseInsensitiveKey(target)
-	for _, existing := range transaction.files {
-		if pathutil.CaseInsensitiveKey(existing.target) == targetKey || existing.temporary == temporary {
-			return fmt.Errorf("transaction contains duplicate target or temporary path %q", target)
-		}
+	if _, exists := transaction.targetKeys[targetKey]; exists {
+		return fmt.Errorf("transaction contains duplicate target or temporary path %q", target)
+	}
+	if _, exists := transaction.temporaryPaths[temporary]; exists {
+		return fmt.Errorf("transaction contains duplicate target or temporary path %q", target)
 	}
 	transaction.files = append(transaction.files, transactionFile{
 		target:      target,
 		temporary:   temporary,
 		expectation: expectation,
 	})
+	transaction.targetKeys[targetKey] = struct{}{}
+	transaction.temporaryPaths[temporary] = struct{}{}
 	return nil
 }
 

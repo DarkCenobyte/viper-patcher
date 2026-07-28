@@ -43,6 +43,60 @@ void vipr_decoder_free(vipr_decoder *decoder) {
     free(decoder);
 }
 
+uint64_t vipr_zstd_decoder_window_limit(void) {
+    return 1ULL << ZSTD_WINDOWLOG_LIMIT_DEFAULT;
+}
+
+int vipr_zstd_frame_window_size(
+    uintptr_t patch_handle,
+    uint64_t patch_offset,
+    uint64_t patch_length,
+    uint64_t *window_size,
+    char *error_buffer,
+    uint64_t error_buffer_size) {
+    unsigned char header[ZSTD_FRAMEHEADERSIZE_MAX];
+    size_t request;
+    size_t read_size;
+    size_t code;
+    ZSTD_frameHeader frame_header;
+
+    if (window_size == NULL) {
+        vipr_set_error(error_buffer, error_buffer_size, "frame window output is unavailable");
+        return -1;
+    }
+    if (patch_length == 0) {
+        vipr_set_error(error_buffer, error_buffer_size, "empty compressed segment");
+        return -1;
+    }
+    request = patch_length > sizeof(header) ? sizeof(header) : (size_t)patch_length;
+    if (vipr_read_at(patch_handle, patch_offset, header, request, &read_size) != 0) {
+        vipr_set_errno_error(error_buffer, error_buffer_size, "read zstd frame header");
+        return -1;
+    }
+    if (read_size != request) {
+        vipr_set_error(error_buffer, error_buffer_size, "truncated zstd frame header");
+        return -1;
+    }
+    code = ZSTD_getFrameHeader(&frame_header, header, read_size);
+    if (ZSTD_isError(code)) {
+        vipr_set_zstd_error(error_buffer, error_buffer_size, "inspect zstd frame header", code);
+        return -1;
+    }
+    if (code != 0) {
+        vipr_set_error(error_buffer, error_buffer_size, "truncated zstd frame header");
+        return -1;
+    }
+    if (frame_header.windowSize > vipr_zstd_decoder_window_limit()) {
+        vipr_set_error(error_buffer, error_buffer_size, "zstd frame window exceeds decoder limit");
+        return -1;
+    }
+    *window_size = frame_header.windowSize;
+    if (*window_size < (1ULL << ZSTD_WINDOWLOG_MIN)) {
+        *window_size = 1ULL << ZSTD_WINDOWLOG_MIN;
+    }
+    return 0;
+}
+
 int vipr_decoder_decompress_segment(
     vipr_decoder *decoder,
     uintptr_t patch_handle,
@@ -51,6 +105,7 @@ int vipr_decoder_decompress_segment(
     int write_output,
     uintptr_t output_handle,
     uint64_t expected_output_size,
+    uint64_t decoder_window_limit,
     uintptr_t callback_handle,
     char *error_buffer,
     uint64_t error_buffer_size) {
@@ -77,9 +132,17 @@ int vipr_decoder_decompress_segment(
         size_t code = ZSTD_DCtx_reset(decoder->context, ZSTD_reset_session_and_parameters);
         uint64_t required_window = expected_output_size;
         const uint64_t minimum_window = 1ULL << ZSTD_WINDOWLOG_MIN;
+        const uint64_t maximum_window = 1ULL << ZSTD_WINDOWLOG_LIMIT_DEFAULT;
         if (ZSTD_isError(code)) {
             vipr_set_zstd_error(error_buffer, error_buffer_size, "reset decompression context", code);
             goto cleanup;
+        }
+        if (decoder_window_limit < minimum_window || decoder_window_limit > maximum_window) {
+            vipr_set_error(error_buffer, error_buffer_size, "invalid reserved zstd decoder window");
+            goto cleanup;
+        }
+        if (required_window > decoder_window_limit) {
+            required_window = decoder_window_limit;
         }
         if (required_window < minimum_window) {
             required_window = minimum_window;

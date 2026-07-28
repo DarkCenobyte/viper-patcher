@@ -13,7 +13,9 @@ Payload offsets in the JSON header are relative to the first byte after the JSON
 header. Readers reject unknown JSON fields, invalid hashes, unsupported or
 inconsistent method metadata, file sizes outside signed 64-bit range, missing
 payloads, out-of-bounds ranges, overlaps, gaps, trailing unreferenced data,
-duplicate or case/Unicode-colliding paths, and inconsistent reverse metadata.
+duplicate or case/Unicode-colliding paths, inconsistent reverse metadata, and
+more than 262,144 file entries. The entry cap is a defensive decode bound above
+the number of fully valid entries that fit in the existing 64 MiB header.
 
 ## Supported version
 
@@ -56,7 +58,9 @@ Frames are concatenated after the descriptor table. Descriptor `i` must begin at
 must equal the remaining output size. The count must be `ceil(outputSize / 8
 MiB)`. Frames and descriptors must consume the payload exactly, without gaps or
 trailing bytes. These canonical boundaries are the same boundaries used by the
-file identity tree.
+file identity tree. Readers validate the descriptor table without materializing
+an array proportional to its untrusted count, then stream it through a bounded
+worker queue.
 
 ## Sparse stream
 
@@ -70,7 +74,10 @@ A zero gap followed by a zero length terminates the stream. The remaining source
 tail is copied unchanged. Every operation is checked against the declared file
 size. Application validates records sequentially and dispatches bounded 8 MiB
 plans through a finite worker queue, without retaining the complete replacement
-stream in memory.
+stream in memory. BLAKE3 digest tables remain direct arrays on the normal path
+and spill to private temporary storage only if a table exceeds 64 MiB on 64-bit
+targets or 16 MiB on 32-bit targets. This does not impose a source/target size
+ratio or logical file-size cap.
 
 ## COPY/ADD stream
 

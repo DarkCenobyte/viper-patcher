@@ -10,10 +10,20 @@ import (
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
 
-func applyZstdPayload(ctx context.Context, patch, output *os.File, offset, length uint64, expectedOutput fileState, callback progress.Callback, event progress.Event, decoders *decoderPool) error {
-	outputHash := hashutil.NewAccumulator()
-	decoder := decoders.acquire()
-	err := decoder.DecompressSegmentToFile(ctx, patch, offset, length, output, expectedOutput.size, func(processed, total uint64) {
+func applyZstdPayload(ctx context.Context, patch, output *os.File, offset, length uint64, expectedOutput fileState, callback progress.Callback, event progress.Event, decoders *decoderPool) (resultError error) {
+	outputHash, err := hashutil.NewSizedAccumulator(expectedOutput.size)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultError = errors.Join(resultError, outputHash.Close())
+	}()
+	decoder, releaseDecoder, err := decoders.acquire(ctx, patch, offset, length)
+	if err != nil {
+		return err
+	}
+	defer releaseDecoder()
+	err = decoder.DecompressToFile(ctx, output, expectedOutput.size, func(processed, total uint64) {
 		eventCopy := event
 		eventCopy.ProcessedBytes = processed
 		eventCopy.TotalBytes = total
@@ -22,7 +32,6 @@ func applyZstdPayload(ctx context.Context, patch, output *os.File, offset, lengt
 		_, writeError := outputHash.Write(block)
 		return writeError
 	})
-	decoders.release(decoder)
 	if err != nil {
 		return err
 	}
