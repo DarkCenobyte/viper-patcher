@@ -36,12 +36,15 @@ The test suite covers:
 - Independent forward/reverse readiness, including identical source and target
   states, permission-independent matching, missing files, non-regular files,
   mixed states, and unknown content.
-- Transaction preparation, replacement, cancellation, rollback, cleanup, and
-  injected rename, remove, and Unix permission-preservation failures.
+- Replacement preparation, generated-file synchronization, cancellation,
+  best-effort rollback, cleanup, parent-directory synchronization before backup
+  removal, and injected rename, remove, synchronization, and Unix
+  permission-preservation failures.
 - GUI state locking and captured selections during active operations.
 - Serialized byte-level progress callbacks, monotone weighted overall progress,
   and distinct prepared and committed stages.
-- Creator disk estimates, selected work directories, and worker-target behavior.
+- Creator disk estimates, selected work directories, centralized automatic worker
+  targets, `--workers 0`, and atomic multi-unit COPY/ADD index-memory budgeting.
 - Fuzzing of VIPR decoding, patch opening, and secure path joining.
 
 CI runs the complete test suite with the Go race detector. It also rebuilds the

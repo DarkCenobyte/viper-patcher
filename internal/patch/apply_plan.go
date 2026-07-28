@@ -1,10 +1,10 @@
 package patch
 
 import (
-	"runtime"
 	"sort"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
+	"github.com/DarkCenobyte/viper-patcher/internal/workerbudget"
 )
 
 type applicationPlan struct {
@@ -14,17 +14,7 @@ type applicationPlan struct {
 }
 
 func newApplicationPlan(requestedWorkers int, entries []patchformat.FileEntry, direction Direction) applicationPlan {
-	workerBudget := requestedWorkers
-	if workerBudget <= 0 {
-		workerBudget = runtime.NumCPU()
-	}
-	if workerBudget > runtime.NumCPU() {
-		workerBudget = runtime.NumCPU()
-	}
-	if workerBudget < 1 {
-		workerBudget = 1
-	}
-
+	workerBudget := workerbudget.Effective(requestedWorkers)
 	fileWorkers, perFileWorkers := workerAllocation(workerBudget, len(entries))
 	return applicationPlan{
 		fileWorkers:    fileWorkers,

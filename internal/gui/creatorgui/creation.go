@@ -11,6 +11,7 @@ import (
 
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
+	"github.com/DarkCenobyte/viper-patcher/internal/workerbudget"
 )
 
 func (controller *creatorController) createPatch() {
@@ -104,8 +105,8 @@ func selectedWorkerBudget(selected string) (int, error) {
 		return 0, nil
 	}
 	workerBudget, err := strconv.Atoi(selected)
-	if err != nil || workerBudget < 1 {
-		return 0, fmt.Errorf("invalid worker target")
+	if err != nil || workerBudget < 1 || !workerbudget.IsValid(workerBudget) {
+		return 0, fmt.Errorf("invalid worker target; select Auto or a value between 1 and %d", workerbudget.Maximum())
 	}
 	return workerBudget, nil
 }

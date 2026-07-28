@@ -170,7 +170,7 @@ func createChunkedReplace(request chunkedReplaceCreationRequest) (createdDiffere
 	committed = true
 	return createdDifferential{
 		method:         patchformat.MethodChunkedReplace,
-		path:           outputPath,
+		path:           request.outputPath,
 		compressedSize: compressedSize,
 	}, nil
 }

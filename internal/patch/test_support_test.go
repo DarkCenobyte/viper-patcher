@@ -14,9 +14,10 @@ var defaultTransactionOperations = transactionOperations{
 		}
 		return file, file.Name(), nil
 	},
-	rename: os.Rename,
-	remove: os.Remove,
-	verify: verifyFileExpectation,
+	rename:        os.Rename,
+	remove:        os.Remove,
+	verify:        verifyFileExpectation,
+	syncDirectory: func(string) error { return nil },
 }
 
 func verifyFileExpectation(path string, expected fileExpectation) error {

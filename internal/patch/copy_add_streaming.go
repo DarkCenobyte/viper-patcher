@@ -20,6 +20,10 @@ var (
 )
 
 func createCopyAddStreamOptimized(ctx context.Context, sourcePath, targetPath, outputPath string, targetSize uint64) (copyAddStats, bool, error) {
+	return createCopyAddStreamOptimizedWithBudget(ctx, sourcePath, targetPath, outputPath, targetSize, nil)
+}
+
+func createCopyAddStreamOptimizedWithBudget(ctx context.Context, sourcePath, targetPath, outputPath string, targetSize uint64, indexBudget *copyAddIndexBudget) (copyAddStats, bool, error) {
 	if targetSize == 0 {
 		return copyAddStats{}, false, nil
 	}
@@ -49,7 +53,14 @@ func createCopyAddStreamOptimized(ctx context.Context, sourcePath, targetPath, o
 		return copyAddStats{}, false, nil
 	}
 
-	index := newCopyAddIndex(copyAddIndexCapacity(uint64(sourceInfo.Size()), profile))
+	indexCapacity := copyAddIndexCapacity(uint64(sourceInfo.Size()), profile)
+	releaseIndexBudget, err := indexBudget.acquire(ctx, copyAddIndexAllocationBytes(indexCapacity))
+	if err != nil {
+		return copyAddStats{}, false, err
+	}
+	defer releaseIndexBudget()
+
+	index := newCopyAddIndex(indexCapacity)
 	if err := forEachContentChunk(ctx, source, profile, func(chunk contentChunk) error {
 		digest := hashutil.ChunkDigestBytes(chunk.data)
 		return index.add(digest, indexedChunk{offset: chunk.offset, length: uint32(len(chunk.data))})

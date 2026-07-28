@@ -15,7 +15,8 @@ func TestRunHelp(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run(context.Background(), []string{"--help"}, &stdout, &stderr)
-	if code != 0 || !strings.Contains(stdout.String(), "--patch-file") || !strings.Contains(stdout.String(), "--workers") {
+	if code != 0 || !strings.Contains(stdout.String(), "--patch-file") || !strings.Contains(stdout.String(), "--workers") ||
+		!strings.Contains(stdout.String(), "0 (automatic)") {
 		t.Fatalf("code = %d, stdout = %s", code, stdout.String())
 	}
 }
@@ -67,7 +68,7 @@ func TestRunAppliesForwardAndReversePatch(t *testing.T) {
 		{name: "reverse", extraArgs: []string{"--reverse"}, wantData: oldData, message: "reverse patch applied successfully"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			arguments := []string{"--headless", "--patch-file", patchPath, "--workers", "1"}
+			arguments := []string{"--headless", "--patch-file", patchPath, "--workers", "0"}
 			arguments = append(arguments, test.extraArgs...)
 			arguments = append(arguments, installRoot)
 			var stdout bytes.Buffer

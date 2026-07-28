@@ -10,23 +10,26 @@ import (
 )
 
 type transactionOperations struct {
-	createTemp func(string, string) (*os.File, string, error)
-	rename     func(string, string) error
-	remove     func(string) error
-	verify     func(string, fileExpectation) error
+	createTemp    func(string, string) (*os.File, string, error)
+	rename        func(string, string) error
+	remove        func(string) error
+	verify        func(string, fileExpectation) error
+	syncDirectory func(string) error
 }
 
 type transactionFile struct {
-	target      string
-	temporary   string
-	backup      string
-	expectation fileExpectation
-	backedUp    bool
-	committed   bool
+	target         string
+	temporary      string
+	backup         string
+	expectation    fileExpectation
+	backedUp       bool
+	committed      bool
+	directoryDirty bool
 }
 
 // Transaction replaces a group of prepared files and performs a best-effort
-// rollback when a later replacement fails.
+// rollback when a later handled replacement fails. It does not provide
+// crash-consistent multi-file transactions across power loss or kernel failure.
 type Transaction struct {
 	files      []transactionFile
 	operations transactionOperations
@@ -42,6 +45,9 @@ func newRootTransaction(root *os.Root) *Transaction {
 		remove: root.Remove,
 		verify: func(path string, expectation fileExpectation) error {
 			return verifyRootFileExpectation(root, path, expectation)
+		},
+		syncDirectory: func(path string) error {
+			return syncRootDirectory(root, path)
 		},
 	})
 }
@@ -91,6 +97,7 @@ func (transaction *Transaction) Commit() error {
 			return transaction.fail(index-1, fmt.Errorf("backup %q: %w", file.target, err))
 		}
 		file.backedUp = true
+		file.directoryDirty = true
 		if err := transaction.operations.rename(file.temporary, file.target); err != nil {
 			return transaction.fail(index, fmt.Errorf("replace %q: %w", file.target, err))
 		}
@@ -98,8 +105,13 @@ func (transaction *Transaction) Commit() error {
 		file.temporary = ""
 	}
 
+	if syncError := transaction.syncDirectories(); syncError != nil {
+		transaction.finished = true
+		return committedWarning("file replacement", syncError)
+	}
+	cleanupError := transaction.removeBackups()
 	transaction.finished = true
-	return committedWarning("file replacement", transaction.removeBackups())
+	return committedWarning("file replacement", cleanupError)
 }
 
 // Cleanup removes prepared files when a transaction is abandoned before commit.
@@ -134,11 +146,13 @@ func (transaction *Transaction) reserveBackup(file *transactionFile) error {
 func (transaction *Transaction) fail(lastIndex int, operationError error) error {
 	rollbackError := transaction.rollback(lastIndex)
 	cleanupError := transaction.cleanupPreparedFiles()
+	syncError := transaction.syncDirectories()
 	transaction.finished = true
 	return errors.Join(
 		operationError,
 		wrapJoinedError("rollback failed", rollbackError),
 		wrapJoinedError("cleanup after failed transaction", cleanupError),
+		wrapJoinedError("sync directories after rollback", syncError),
 	)
 }
 
@@ -205,6 +219,29 @@ func (transaction *Transaction) removeBackups() error {
 		file.backedUp = false
 	}
 	return errors.Join(cleanupErrors...)
+}
+
+func (transaction *Transaction) syncDirectories() error {
+	if transaction.operations.syncDirectory == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(transaction.files))
+	var syncErrors []error
+	for index := range transaction.files {
+		file := &transaction.files[index]
+		if !file.directoryDirty {
+			continue
+		}
+		directory := filepath.Clean(filepath.Dir(file.target))
+		if _, exists := seen[directory]; exists {
+			continue
+		}
+		seen[directory] = struct{}{}
+		if err := transaction.operations.syncDirectory(directory); err != nil {
+			syncErrors = append(syncErrors, fmt.Errorf("sync committed directory %q: %w", directory, err))
+		}
+	}
+	return errors.Join(syncErrors...)
 }
 
 func wrapRemoveError(operation, path string, err error) error {

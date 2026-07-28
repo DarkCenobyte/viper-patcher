@@ -2,6 +2,7 @@ package patch
 
 import (
 	"bytes"
+	"slices"
 	"sort"
 	"unsafe"
 )
@@ -35,8 +36,8 @@ func (index *copyAddIndex) add(digest [32]byte, chunk indexedChunk) error {
 }
 
 func (index *copyAddIndex) finalize() {
-	sort.SliceStable(index.entries, func(left, right int) bool {
-		return bytes.Compare(index.entries[left].digest[:], index.entries[right].digest[:]) < 0
+	slices.SortStableFunc(index.entries, func(left, right copyAddIndexEntry) int {
+		return bytes.Compare(left.digest[:], right.digest[:])
 	})
 	writeIndex := 0
 	for readIndex := range index.entries {

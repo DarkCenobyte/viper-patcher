@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 	"github.com/DarkCenobyte/viper-patcher/internal/pathutil"
+	"github.com/DarkCenobyte/viper-patcher/internal/workerbudget"
 	"github.com/DarkCenobyte/viper-patcher/internal/zstd"
 )
 
@@ -110,8 +110,8 @@ func validateCreateOptions(options CreateOptions) error {
 	if options.CompressionLevel < minimum || options.CompressionLevel > maximum {
 		return fmt.Errorf("compression level must be between %d and %d", minimum, maximum)
 	}
-	if options.WorkerBudget < 0 || options.WorkerBudget > runtime.NumCPU() {
-		return fmt.Errorf("worker target must be 0 (automatic) or between 1 and %d", runtime.NumCPU())
+	if !workerbudget.IsValid(options.WorkerBudget) {
+		return fmt.Errorf("worker target must be 0 (automatic) or between 1 and %d", workerbudget.Maximum())
 	}
 	if strings.TrimSpace(options.WorkDirectory) != "" {
 		if _, err := resolveWorkDirectory(options.WorkDirectory); err != nil {
@@ -122,21 +122,7 @@ func validateCreateOptions(options CreateOptions) error {
 }
 
 func effectiveWorkerBudget(value int) int {
-	if value <= 0 {
-		return defaultWorkerBudget()
-	}
-	return value
-}
-
-func defaultWorkerBudget() int {
-	workers := runtime.GOMAXPROCS(0)
-	if workers < 1 {
-		workers = 1
-	}
-	if maximum := runtime.NumCPU(); workers > maximum {
-		workers = maximum
-	}
-	return workers
+	return workerbudget.Effective(value)
 }
 
 func resolveRegularInput(path string) (resolvedInput, error) {

@@ -13,11 +13,23 @@ version before the first retained tag.
 - Bounded sparse application memory with a producer/consumer queue whose retained
   plans scale with the worker target instead of the complete file size.
 - Aggregated concurrent file and byte progress into one monotonic overall value.
+- Synchronized prepared application outputs before replacement, then synchronized
+  each affected parent directory before removing committed backups on Unix-like
+  systems. Windows keeps the file flush and intentionally skips directory flushes.
+- Made COPY/ADD index-budget reservations atomic so concurrent multi-unit requests
+  cannot deadlock after partially consuming the shared 128 MiB budget.
 
 ### Changed
 
 - Renamed the CLI `--parallel` option and public option fields to a `--workers`
   logical scheduling target, with matching GUI and documentation wording.
+- Centralized automatic worker selection on process-aware `GOMAXPROCS`, made
+  `--workers 0` consistent across both CLIs, and bounded concurrently live
+  COPY/ADD index arrays with a creator-wide 128 MiB budget.
+- Replaced reflective COPY/ADD index sorting with typed stable sorting while
+  retaining BLAKE3-256 keys and deterministic candidate order.
+- Clarified that replacement rollback covers handled errors and does not provide
+  crash-consistent multi-file transactions.
 - Made BLAKE3 tree accumulation incremental so hashing no longer reserves one
   8 MiB pending buffer per active accumulator.
 - Simplified the native zstd boundary to standalone compression and decompression.
@@ -83,7 +95,7 @@ version before the first retained tag.
 - Handle-based reusable native zstd decoders and positional patch reads that are
   safe for parallel workers.
 - Parallel output preparation in the patcher with an optional CLI `--parallel`
-  limit, followed by sequential transactional commits.
+  limit, followed by sequential rollback-capable commits.
 - Graduated Creator warnings for compression levels 10-19 and stronger warnings
   for ultra levels 20-22.
 - Visible installed-file verification progress and asynchronous GUI validation.
@@ -176,7 +188,7 @@ version before the first retained tag.
 ### Added
 
 - Traversal-resistant installation access through `os.Root`, including secure
-  temporary-output creation and root-relative transactional renames.
+  temporary-output creation and root-relative rollback-capable renames.
 - Conservative creator disk-space estimates displayed before GUI operations.
 - Optional creator work-directory selection without changing the VIPR format or
   patcher behavior.
@@ -255,7 +267,7 @@ version before the first retained tag.
 - Forward and optional reverse differentials using libzstd 1.5.7 patch-from
   semantics.
 - SHA-256 preflight and post-generation integrity checks.
-- Transactional patch application with rollback.
+- Rollback-capable patch application for handled replacement failures.
 - Fyne desktop interfaces and progress reporting.
 - Cross-platform release workflows for Windows, Linux, and macOS targets.
 

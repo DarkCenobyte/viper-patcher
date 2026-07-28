@@ -23,10 +23,10 @@ immediately hashing every generated file again.
 4. otherwise build a deterministic content-defined COPY/ADD candidate and use
    it when enough target bytes can be reused, falling back to `zstd-replace` or
    `zstd-chunked-replace` for large standalone replacements;
-5. divide the requested worker target between files and large chunks while
-   preserving deterministic archive order;
-6. assemble a format 3 container in a same-directory temporary file and commit
-   it atomically.
+5. resolve `0` to the process-aware `GOMAXPROCS` target, divide that target
+   between files and large chunks, and preserve deterministic archive order;
+6. assemble a format 3 container in a same-directory temporary file, replace
+   the destination by rename, and synchronize the containing directory.
 
 Creator snapshots do not perform a redundant second full content hash or an
 `fsync` on disposable temporary files. Identity, size, modification time, and
@@ -47,13 +47,16 @@ method permits it:
    eagerly prepared decoder pool sized to the maximum concurrent decode demand;
 4. compute BLAKE3 chunk digests while bytes are produced and assemble file roots
    without a final sequential reread;
-5. commit prepared files sequentially through the rollback-capable transaction.
+5. synchronize each prepared output, commit files sequentially through
+   rollback-capable per-file renames, synchronize each affected parent directory
+   once on Unix-like systems, and only then remove committed backups.
 
-The worker option is a scheduling target, not a strict process-wide goroutine
-limit. Source verification may overlap output generation, and small coordination
-goroutines may temporarily run in addition to the requested workers. CPU-heavy
-compression and decompression remain bounded by the allocated file/chunk workers
-and decoder pool.
+The worker option accepts `0` for the process-aware automatic `GOMAXPROCS` value,
+or an explicit value from 1 through the logical CPU count. It is a scheduling
+target, not a strict process-wide goroutine limit. Source verification may
+overlap output generation, and small coordination goroutines may temporarily run
+in addition to the requested workers. CPU-heavy compression and decompression
+remain bounded by the allocated file/chunk workers and decoder pool.
 
 Patch payload reads are positional (`pread` on POSIX and overlapped `ReadFile` on
 Windows), so parallel workers never share a file cursor. Neither the patch nor
@@ -67,8 +70,11 @@ installed files are copied into application snapshots.
   not to the complete file size.
 - `zstd-copy-add` verifies the source in parallel while executing bounds-checked
   COPY ranges and literal ADD data from the compressed operation stream. Its
-  source index is a compact sorted array with an exact backing-memory budget.
-  Content-defined chunks keep matches stable across insertions and deletions.
+  source index is a compact BLAKE3-256-keyed sorted array with an exact per-index
+  backing-memory budget. Concurrently live index arrays share an additional
+  128 MiB creator-wide budget. Reservations are atomic, so one request never
+  holds a partial allocation while waiting for the rest. Content-defined chunks
+  keep matches stable across insertions and deletions.
 - `zstd-replace` verifies the installed source with parallel BLAKE3 chunk reads
   concurrently with standalone zstd decompression and output hashing.
 - `zstd-chunked-replace` decompresses canonical fixed-size independent frames
@@ -79,11 +85,21 @@ Progress is aggregated by weighted per-file phases in the core. Callbacks are
 serialized and receive a monotone `Overall` value, so concurrent file events do
 not make GUI or CLI progress move backwards.
 
-The fast path intentionally avoids disposable-file `fsync` calls and content
-rehashing immediately before rename. The transaction still verifies source
-identity, size, and modification time before replacement, renames originals to
-backups, commits prepared files, and performs best-effort rollback if a later
-rename fails. This is the only application mode.
+The fast path avoids `fsync` on disposable creator snapshots and intermediate
+compression files, as well as content rehashing immediately before rename.
+Prepared application outputs are different: they become the installed files, so
+Viper Patcher synchronizes each one after validation and before closing it. It then
+verifies source identity, size, and modification time, renames originals to
+backups, commits prepared files, and synchronizes each affected parent directory
+before backup removal on Unix-like systems. Windows performs the output-file flush
+but intentionally treats directory synchronization as a no-op because
+`FlushFileBuffers` does not provide the same portable directory-entry durability
+primitive. Backup deletion is not followed by a second directory sync, so a crash
+may leave a stale hidden backup rather than adding another synchronous write to
+the normal path. Best-effort rollback covers handled replacement failures. This
+is not crash consistency: power loss or a kernel failure can interrupt a
+multi-file commit and leave a partially applied installation. This
+performance-oriented behavior is the only application mode.
 
 ## Native boundary
 

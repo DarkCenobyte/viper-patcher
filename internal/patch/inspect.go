@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"runtime"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/hashutil"
 	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
+	"github.com/DarkCenobyte/viper-patcher/internal/workerbudget"
 )
 
 const maxInspectionWorkers = 16
@@ -45,12 +45,9 @@ func InspectContext(ctx context.Context, rootPath string, parsed patchformat.Pat
 		}
 	}()
 
-	workerBudget := runtime.NumCPU()
+	workerBudget := workerbudget.Automatic()
 	if workerBudget > maxInspectionWorkers {
 		workerBudget = maxInspectionWorkers
-	}
-	if workerBudget < 1 {
-		workerBudget = 1
 	}
 	fileWorkers, hashWorkers := workerAllocation(workerBudget, len(parsed.Header.Files))
 	inspected := make([]inspectedApplicationFile, len(parsed.Header.Files))

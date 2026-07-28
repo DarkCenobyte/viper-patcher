@@ -39,6 +39,7 @@ type differentialCreationRequest struct {
 	index         int
 	fileCount     int
 	chunkWorkers  int
+	copyAddBudget *copyAddIndexBudget
 	callback      progress.Callback
 }
 
@@ -51,6 +52,7 @@ type replacementCreationRequest struct {
 	direction        string
 	compressionLevel int
 	chunkWorkers     int
+	copyAddBudget    *copyAddIndexBudget
 	callback         zstd.ProgressFunc
 }
 
@@ -66,6 +68,7 @@ type payloadCompressionRequest struct {
 
 func compressCreationInputs(ctx context.Context, options CreateOptions, snapshots []creationSnapshot, workDirectory string, workerBudget int, callback progress.Callback) (patchformat.Header, []differentialBlobs, error) {
 	compressed := make([]compressedCreationFile, len(snapshots))
+	copyAddBudget := newCopyAddIndexBudget(copyAddConcurrentIndexMemoryBudget)
 	fileWorkers, perFileWorkers := workerAllocation(workerBudget, len(snapshots))
 	err := parallelFor(ctx, len(snapshots), fileWorkers, func(ctx context.Context, index int) error {
 		snapshot := snapshots[index]
@@ -90,6 +93,7 @@ func compressCreationInputs(ctx context.Context, options CreateOptions, snapshot
 			index:         index,
 			fileCount:     len(snapshots),
 			chunkWorkers:  chunkWorkers,
+			copyAddBudget: copyAddBudget,
 			callback:      callback,
 		})
 		if err != nil {
@@ -212,6 +216,7 @@ func createPreferredDifferential(request differentialCreationRequest) (createdDi
 		direction:        "forward",
 		compressionLevel: request.options.CompressionLevel,
 		chunkWorkers:     request.chunkWorkers,
+		copyAddBudget:    request.copyAddBudget,
 		callback:         compressionProgress(request.callback, request.index, request.fileCount, snapshot.pair.relativePath, progress.StageCompressingForward, snapshot.target.Size),
 	})
 	if err != nil {
@@ -229,6 +234,7 @@ func createPreferredDifferential(request differentialCreationRequest) (createdDi
 			direction:        "reverse",
 			compressionLevel: request.options.CompressionLevel,
 			chunkWorkers:     request.chunkWorkers,
+			copyAddBudget:    request.copyAddBudget,
 			callback:         compressionProgress(request.callback, request.index, request.fileCount, snapshot.pair.relativePath, progress.StageCompressingReverse, snapshot.source.Size),
 		})
 		if err != nil {
@@ -240,7 +246,7 @@ func createPreferredDifferential(request differentialCreationRequest) (createdDi
 
 func createCopyAddOrReplace(request replacementCreationRequest) (createdDifferential, error) {
 	copyAddRaw := filepath.Join(request.workDirectory, fmt.Sprintf("%06d.%s.copy-add", request.index, request.direction))
-	stats, usable, err := createCopyAddStreamOptimized(request.ctx, request.source.SnapshotPath, request.target.SnapshotPath, copyAddRaw, request.target.Size)
+	stats, usable, err := createCopyAddStreamOptimizedWithBudget(request.ctx, request.source.SnapshotPath, request.target.SnapshotPath, copyAddRaw, request.target.Size, request.copyAddBudget)
 	if err != nil {
 		return createdDifferential{}, err
 	}

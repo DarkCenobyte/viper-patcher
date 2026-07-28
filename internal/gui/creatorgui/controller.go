@@ -1,7 +1,6 @@
 package creatorgui
 
 import (
-	"runtime"
 	"strconv"
 
 	"fyne.io/fyne/v2"
@@ -14,6 +13,7 @@ import (
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/branding"
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/nativedialog"
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/windowsizing"
+	"github.com/DarkCenobyte/viper-patcher/internal/workerbudget"
 )
 
 const (
@@ -59,7 +59,7 @@ func newCreatorController(application fyne.App) *creatorController {
 	controller.compressionWarning.Hide()
 	controller.levelSelect = widget.NewSelect(integerOptions(1, 22), controller.updateCompressionWarning)
 	controller.levelSelect.SetSelected("3")
-	workerOptions := append([]string{automaticWorkerOption}, integerOptions(1, runtime.NumCPU())...)
+	workerOptions := append([]string{automaticWorkerOption}, integerOptions(1, workerbudget.Maximum())...)
 	controller.workerSelect = widget.NewSelect(workerOptions, nil)
 	controller.workerSelect.SetSelected(automaticWorkerOption)
 	controller.comment = widget.NewMultiLineEntry()

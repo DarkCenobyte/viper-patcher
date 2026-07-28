@@ -5,11 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"runtime"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/buildinfo"
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
+	"github.com/DarkCenobyte/viper-patcher/internal/workerbudget"
 )
 
 // Run executes patcher CLI mode and returns a process exit code.
@@ -23,7 +23,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	var version bool
 	flags.StringVar(&patchFile, "patch-file", "", "input .vipr patch")
 	flags.BoolVar(&reverse, "reverse", false, "apply reverse differentials")
-	flags.IntVar(&workerBudget, "workers", runtime.NumCPU(), "logical worker target")
+	flags.IntVar(&workerBudget, "workers", 0, "logical worker target; 0 selects the automatic process-aware default")
 	flags.Bool("headless", false, "force command-line mode")
 	flags.BoolVar(&help, "help", false, "show help")
 	flags.BoolVar(&version, "version", false, "show version")
@@ -51,8 +51,8 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		printUsage(stderr)
 		return 2
 	}
-	if workerBudget < 1 || workerBudget > runtime.NumCPU() {
-		fmt.Fprintf(stderr, "Error: --workers must be between 1 and %d.\n", runtime.NumCPU())
+	if !workerbudget.IsValid(workerBudget) {
+		fmt.Fprintf(stderr, "Error: --workers must be 0 (automatic) or between 1 and %d.\n", workerbudget.Maximum())
 		return 2
 	}
 
@@ -88,7 +88,7 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  --patch-file <file.vipr>       Required.")
 	fmt.Fprintln(writer, "  <target-directory>            Required positional argument.")
 	fmt.Fprintln(writer, "  [--reverse]                   Default: false.")
-	fmt.Fprintln(writer, "  [--workers <count>]           Logical worker target. Default: logical CPU count.")
+	fmt.Fprintln(writer, "  [--workers <count>]           0 (automatic) or 1..logical CPU count. Default: 0.")
 	fmt.Fprintln(writer, "  [--headless]                  Force CLI mode.")
 	fmt.Fprintln(writer, "  [--version]                   Show version information.")
 	fmt.Fprintln(writer, "  [--help]                      Show this help.")

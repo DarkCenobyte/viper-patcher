@@ -16,11 +16,27 @@ const portablePermissionMask uint32 = 0o777
 
 type applyOperations struct {
 	chmod func(*os.File, os.FileMode) error
+	sync  func(*os.File) error
 }
 
-var defaultApplyOperations = applyOperations{chmod: func(file *os.File, mode os.FileMode) error {
-	return file.Chmod(mode)
-}}
+var defaultApplyOperations = applyOperations{
+	chmod: func(file *os.File, mode os.FileMode) error {
+		return file.Chmod(mode)
+	},
+	sync: func(file *os.File) error {
+		return file.Sync()
+	},
+}
+
+func (operations applyOperations) withDefaults() applyOperations {
+	if operations.chmod == nil {
+		operations.chmod = defaultApplyOperations.chmod
+	}
+	if operations.sync == nil {
+		operations.sync = defaultApplyOperations.sync
+	}
+	return operations
+}
 
 // ApplyOptions configures one patch application operation.
 type ApplyOptions struct {
@@ -103,6 +119,7 @@ func applyPreparedWithOperations(ctx context.Context, prepared *PreparedPatch, o
 }
 
 func applyOpenedPatchWithOperations(ctx context.Context, opened *openedPatch, releasePatch func() error, rootPath string, direction Direction, workerBudget int, callback progress.Callback, operations applyOperations) error {
+	operations = operations.withDefaults()
 	root, err := openInstallationRoot(rootPath)
 	if err != nil {
 		return errors.Join(err, wrapJoinedError("release patch", releasePatch()))
@@ -284,6 +301,9 @@ func (preparer applicationFilePreparer) prepare(ctx context.Context, index int, 
 	}
 	if !outputModeMatches(uint32(outputInfo.Mode().Perm()), uint32(identity.Mode().Perm())) {
 		return preparedApplicationFile{}, fmt.Errorf("generated file %q does not preserve the installed permissions", entry.Path)
+	}
+	if err := preparer.operations.sync(temporary); err != nil {
+		return preparedApplicationFile{}, fmt.Errorf("sync generated file %q: %w", entry.Path, err)
 	}
 	if err := temporary.Close(); err != nil {
 		return preparedApplicationFile{}, fmt.Errorf("close generated file %q: %w", entry.Path, err)

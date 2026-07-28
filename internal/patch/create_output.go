@@ -115,6 +115,9 @@ func replaceRootOutput(root *os.Root, source, destination string) error {
 		if err := root.Rename(source, destination); err != nil {
 			return fmt.Errorf("commit patch output: %w", err)
 		}
+		if err := syncRootDirectory(root, filepath.Dir(destination)); err != nil {
+			return committedWarning("patch output", fmt.Errorf("sync committed output directory: %w", err))
+		}
 		return nil
 	}
 	if err != nil {

@@ -129,7 +129,7 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  [--comment <text>]             Default: Created with Viper-Patcher.")
 	fmt.Fprintln(writer, "  [--create-reverse]             Default: false.")
 	fmt.Fprintln(writer, "  [--work-directory <directory>] Optional creator temporary-data parent.")
-	fmt.Fprintln(writer, "  [--workers <count>]            Logical worker target. Default: 0 (automatic).")
+	fmt.Fprintln(writer, "  [--workers <count>]            0 (automatic) or 1..logical CPU count. Default: 0.")
 	fmt.Fprintln(writer, "  [--headless]                   Force CLI mode.")
 	fmt.Fprintln(writer, "  [--version]                    Show version information.")
 	fmt.Fprintln(writer, "  [--help]                       Show this help.")

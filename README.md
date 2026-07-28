@@ -33,7 +33,9 @@ available, the application prints a warning and falls back to CLI mode.
 - Immutable creator snapshots and handle-based fast application.
 - Adaptive worker allocation across files and large chunks with positional patch reads.
 - Traversal-resistant installation access with `os.Root`.
-- Transactional file replacement with best-effort rollback and explicit post-commit warnings.
+- Rollback-capable file replacement for handled errors, with generated-file
+  syncs and one parent-directory sync before backup cleanup on Unix-like systems.
+- No claim of crash-consistent multi-file transactions after power loss or kernel failure.
 - File-level, byte-level, and monotonic overall progress reporting.
 - Fyne GUI plus deterministic CLI behavior.
 - MIT-licensed Go code.
@@ -73,9 +75,9 @@ The creator interface provides:
 - A dedicated comment section.
 - A collapsed **Settings** section containing compression levels 1 through 22,
   optional reverse-patch generation, creator-only work-directory selection, and
-  a worker target. It defaults to **Auto**, follows the process CPU limit, and
-  cannot exceed the logical CPU count; overlapping verification and decoding may
-  use helper goroutines.
+  a worker target. It defaults to **Auto**, follows the current process CPU limit
+  through `GOMAXPROCS`, and cannot exceed the logical CPU count; overlapping
+  verification and decoding may use helper goroutines.
 - An output directory and `.vipr` filename.
 - A conservative peak temporary-disk estimate shown before creation starts.
 - Progress by file and by processed bytes.
@@ -113,7 +115,7 @@ Supported parameters:
 [--comment <text>]             Default: Created with Viper-Patcher.
 [--create-reverse]             Default: false.
 [--work-directory <directory>] Optional creator temporary-data parent.
-[--workers <count>]            Logical worker target. Default: 0 (automatic).
+[--workers <count>]            0 (automatic) or 1..logical CPU count. Default: 0.
 [--headless]                   Force CLI mode.
 [--version]                    Show version information.
 [--help]                       Show help.
@@ -121,9 +123,12 @@ Supported parameters:
 ```
 
 The `::` delimiter belongs to the option syntax. Source and target paths are
-parsed together, so their association cannot become misaligned. The CLI accepts
-libzstd's complete compression-level range, including negative fast levels and
-ultra levels. The GUI deliberately presents the conventional 1–22 range.
+parsed together, so their association cannot become misaligned. `--workers 0`
+selects the current process-aware `GOMAXPROCS` value, capped by the logical CPU
+count; explicit values from 1 through that logical CPU count are accepted. The
+CLI accepts libzstd's complete compression-level range, including negative fast
+levels and ultra levels. The GUI deliberately presents the conventional 1–22
+range.
 
 ## Patcher GUI
 
@@ -171,11 +176,15 @@ Supported parameters:
 --patch-file <file.vipr>      Required.
 <target-directory>            Required positional argument.
 [--reverse]                   Default: false.
-[--workers <count>]           Logical worker target. Default: logical CPU count.
+[--workers <count>]           0 (automatic) or 1..logical CPU count. Default: 0.
 [--headless]                  Force CLI mode.
 [--version]                   Show version information.
 [--help]                      Show help.
 ```
+
+`--workers 0` uses the same process-aware automatic policy as the creator.
+Explicit values from 1 through the logical CPU count are accepted. The value is
+a scheduling target rather than a strict process-wide goroutine limit.
 
 The CLI parses the patch without a redundant whole-file fingerprint pass and does
 not run a separate full-file inspection before application.
@@ -201,7 +210,12 @@ standalone frames, and bounded 1 MiB buffers. Creator snapshots retain their
 solely for hashing. Output digests are calculated while blocks are written.
 Sparse application uses a bounded producer/consumer queue, reads each source chunk
 once, overlays replacements in memory, and assembles source and target BLAKE3 tree
-roots. Generated files are committed atomically only after all workers finish.
+roots. Each prepared output is synchronized before atomic per-file renames begin.
+On Unix-like systems, affected parent directories are synchronized once before
+committed backups are removed; Windows intentionally relies on the output-file
+flush because portable directory flushing is unavailable. The rollback path handles
+reported replacement failures, but a sudden system crash can still leave a
+multi-file patch partially committed.
 
 Only format 3 patches are accepted. Older `.vipr` files must be applied with a
 compatible Viper-Patcher 0.4.1-or-earlier release. Format 3 is documented in

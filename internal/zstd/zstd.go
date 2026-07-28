@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"runtime"
 	"runtime/cgo"
 	"unsafe"
 
@@ -133,6 +134,9 @@ func CompressFileSegment(input *os.File, offset, length uint64, outputPath strin
 		(*C.char)(errorBuffer),
 		errorBufferSize,
 	)
+	// C receives only the numeric handle, so keep its Go owner reachable until
+	// the native operation has finished using it.
+	runtime.KeepAlive(input)
 	if result != 0 {
 		return fmt.Errorf("zstd segment compression failed: %s", C.GoString((*C.char)(errorBuffer)))
 	}
@@ -239,6 +243,10 @@ func (decoder *Decoder) decompressSegment(ctx context.Context, patch *os.File, o
 		(*C.char)(errorBuffer),
 		errorBufferSize,
 	)
+	// The cgo call only sees integer handles and cannot keep the owning files
+	// reachable on the Go side while native code is reading or writing them.
+	runtime.KeepAlive(patch)
+	runtime.KeepAlive(output)
 	if callbacks.err != nil {
 		return callbacks.err
 	}

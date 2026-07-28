@@ -11,5 +11,6 @@ private vulnerability reporting feature for this repository. Include a minimal
 reproduction, the affected platform, and the expected impact.
 
 Patch files are untrusted input. Reports involving path traversal, malformed
-container ranges, decompression bombs, hash bypasses, or transactional rollback
-failures are especially valuable.
+container ranges, decompression bombs, hash bypasses, or best-effort replacement
+rollback failures are especially valuable. The rollback mechanism covers handled
+errors; it is not a crash-consistent multi-file transaction.

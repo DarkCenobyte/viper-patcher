@@ -351,6 +351,18 @@ func TestApplyReportsChmodFailure(t *testing.T) {
 	assertFile(t, fixture.installedPath, fixture.sourceData)
 }
 
+func TestApplyReportsSyncFailure(t *testing.T) {
+	fixture := newSingleFileFixture(t, false)
+	expected := errors.New("file sync failed")
+	err := applyWithOperations(context.Background(), ApplyOptions{PatchPath: fixture.patchPath, Root: fixture.installRoot, Direction: Forward}, nil, applyOperations{
+		sync: func(*os.File) error { return expected },
+	})
+	if !errors.Is(err, expected) {
+		t.Fatalf("error = %v", err)
+	}
+	assertFile(t, fixture.installedPath, fixture.sourceData)
+}
+
 func TestTransactionRollsBackCompletedReplacements(t *testing.T) {
 	workspace := t.TempDir()
 	targetOne := filepath.Join(workspace, "one.bin")
@@ -913,6 +925,117 @@ func TestCreateWithParallelFileProcessing(t *testing.T) {
 		name := fmt.Sprintf("file-%d.bin", index)
 		expected := []byte(strings.Repeat(fmt.Sprintf("new-%d-", index), 1024))
 		assertFile(t, filepath.Join(installRoot, name), expected)
+	}
+}
+
+func TestTransactionSyncsEachCommittedDirectoryOnce(t *testing.T) {
+	workspace := t.TempDir()
+	firstDirectory := filepath.Join(workspace, "first")
+	secondDirectory := filepath.Join(workspace, "second")
+	for _, directory := range []string{firstDirectory, secondDirectory} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	targets := []string{
+		filepath.Join(firstDirectory, "one.bin"),
+		filepath.Join(firstDirectory, "two.bin"),
+		filepath.Join(secondDirectory, "three.bin"),
+	}
+	temporaries := []string{
+		filepath.Join(firstDirectory, "one.new"),
+		filepath.Join(firstDirectory, "two.new"),
+		filepath.Join(secondDirectory, "three.new"),
+	}
+	for index := range targets {
+		writeFile(t, targets[index], []byte("old"))
+		writeFile(t, temporaries[index], []byte("new"))
+	}
+
+	synced := make(map[string]int)
+	operations := defaultTransactionOperations
+	operations.syncDirectory = func(path string) error {
+		synced[filepath.Clean(path)]++
+		return nil
+	}
+	transaction := newTransactionWithOperations(operations)
+	for index := range targets {
+		if err := transaction.Add(targets[index], temporaries[index], expectationFor(t, targets[index])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{firstDirectory, secondDirectory} {
+		if synced[filepath.Clean(directory)] != 1 {
+			t.Fatalf("directory %q sync count = %d", directory, synced[filepath.Clean(directory)])
+		}
+	}
+}
+
+func TestTransactionSyncsBeforeRemovingBackups(t *testing.T) {
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "target.bin")
+	temporary := filepath.Join(workspace, "replacement.bin")
+	writeFile(t, target, []byte("old"))
+	writeFile(t, temporary, []byte("new"))
+
+	var events []string
+	renameCalls := 0
+	operations := defaultTransactionOperations
+	operations.rename = func(oldPath, newPath string) error {
+		renameCalls++
+		return os.Rename(oldPath, newPath)
+	}
+	operations.syncDirectory = func(string) error {
+		events = append(events, "sync-directory")
+		return nil
+	}
+	operations.remove = func(path string) error {
+		if renameCalls >= 2 && strings.Contains(filepath.Base(path), ".viper-patcher-backup-") {
+			events = append(events, "remove-backup")
+		}
+		return os.Remove(path)
+	}
+	transaction := newTransactionWithOperations(operations)
+	if err := transaction.Add(target, temporary, expectationFor(t, target)); err != nil {
+		t.Fatal(err)
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0] != "sync-directory" || events[1] != "remove-backup" {
+		t.Fatalf("commit events = %v, want directory sync before backup removal", events)
+	}
+}
+
+func TestTransactionReturnsCommittedWarningForDirectorySync(t *testing.T) {
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "target.bin")
+	temporary := filepath.Join(workspace, "replacement.bin")
+	writeFile(t, target, []byte("old"))
+	writeFile(t, temporary, []byte("new"))
+
+	expected := errors.New("directory sync failed")
+	operations := defaultTransactionOperations
+	operations.syncDirectory = func(string) error { return expected }
+	transaction := newTransactionWithOperations(operations)
+	if err := transaction.Add(target, temporary, expectationFor(t, target)); err != nil {
+		t.Fatal(err)
+	}
+	err := transaction.Commit()
+	if !IsCommittedWarning(err) || !errors.Is(err, expected) {
+		t.Fatalf("error = %v, want committed directory-sync warning", err)
+	}
+	assertFile(t, target, []byte("new"))
+	backups, globError := filepath.Glob(filepath.Join(workspace, ".viper-patcher-backup-*"))
+	if globError != nil {
+		t.Fatal(globError)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("backup count after failed directory sync = %d, want 1", len(backups))
 	}
 }
 
