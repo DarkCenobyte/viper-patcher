@@ -12,6 +12,16 @@
 
 #ifdef _WIN32
 #include <winioctl.h>
+
+typedef struct {
+    HANDLE FileHandle;
+    LARGE_INTEGER SourceFileOffset;
+    LARGE_INTEGER TargetFileOffset;
+    LARGE_INTEGER ByteCount;
+} vipr_duplicate_extents_data;
+
+#define VIPR_FSCTL_DUPLICATE_EXTENTS_TO_FILE \
+    CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 209, METHOD_BUFFERED, FILE_WRITE_DATA)
 #endif
 
 #ifndef _WIN32
@@ -347,7 +357,8 @@ vipr_status vipr_clone_output(vipr_io_session *session, uint64_t size,
     while (offset < size) {
         uint64_t length = size - offset;
         if (length > (1ULL << 30)) length = 1ULL << 30;
-        DUPLICATE_EXTENTS_DATA data;
+        vipr_duplicate_extents_data data;
+        memset(&data, 0, sizeof(data));
         data.FileHandle = session->source;
         data.SourceFileOffset.QuadPart = (LONGLONG)offset;
         data.TargetFileOffset.QuadPart = (LONGLONG)offset;
@@ -358,7 +369,7 @@ vipr_status vipr_clone_output(vipr_io_session *session, uint64_t size,
         HANDLE event = CreateEventW(NULL, TRUE, FALSE, NULL);
         if (event == NULL) return VIPR_STATUS_UNSUPPORTED;
         overlapped.hEvent = event;
-        BOOL ok = DeviceIoControl(session->output, FSCTL_DUPLICATE_EXTENTS_TO_FILE,
+        BOOL ok = DeviceIoControl(session->output, VIPR_FSCTL_DUPLICATE_EXTENTS_TO_FILE,
                                   &data, sizeof(data), NULL, 0, &returned, &overlapped);
         if (!ok && GetLastError() == ERROR_IO_PENDING) {
             ok = GetOverlappedResult(session->output, &overlapped, &returned, TRUE);
