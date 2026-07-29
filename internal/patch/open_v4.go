@@ -1,6 +1,7 @@
 package patch
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync"
@@ -159,7 +160,7 @@ func openPatch(path, expectedDigest string, calculateDigest bool) (*openedPatch,
 		if err != nil {
 			return closeErr(err)
 		}
-		value, err := session.HashFile(nil, false, size)
+		value, err := session.HashFile(context.Background(), false, size)
 		session.Close()
 		if err != nil {
 			return closeErr(err)
