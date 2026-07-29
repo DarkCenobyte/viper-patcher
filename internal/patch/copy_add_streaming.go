@@ -103,24 +103,16 @@ func createCopyAddStreamOptimizedWithBudget(ctx context.Context, sourcePath, tar
 		}
 		processed += chunkSize
 		digest := hashutil.ChunkDigestBytes(chunk.data)
-		matched := false
-		candidates := index.candidates(digest)
-		for candidateIndex := 0; candidateIndex < int(candidates.count); candidateIndex++ {
-			candidate := candidates.chunks[candidateIndex]
-			if int(candidate.length) != len(chunk.data) {
-				continue
-			}
+		candidate, matched := selectCopyAddCandidate(index.candidates(digest), len(chunk.data), stream)
+		if matched {
 			// The immutable source index and target chunk use the same exact
-			// length and BLAKE3-256 digest. Re-reading every match would nearly
-			// double source I/O without strengthening the existing hash boundary.
+			// length and BLAKE3-256 digest. Prefer a duplicate occurrence that
+			// extends the pending COPY so adjacent ranges share one instruction.
 			if err := stream.copy(candidate.offset, chunkSize); err != nil {
 				return err
 			}
 			stats.copiedBytes += chunkSize
-			matched = true
-			break
-		}
-		if !matched {
+		} else {
 			if err := stream.add(chunk.data); err != nil {
 				return err
 			}

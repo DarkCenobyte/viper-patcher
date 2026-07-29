@@ -5,7 +5,7 @@ uses Semantic Versioning. Release sections from `0.2.0` onward follow the Git
 tags currently present in the repository; `0.1.0` records the initial project
 version before the first retained tag.
 
-## [Unreleased]
+## [0.5.1] - 2026-07-29
 
 ### Fixed
 
@@ -36,6 +36,8 @@ version before the first retained tag.
   COPY/ADD index arrays with a creator-wide 128 MiB budget.
 - Replaced reflective COPY/ADD index sorting with typed stable sorting while
   retaining BLAKE3-256 keys and deterministic candidate order.
+- Skipped Gear hashing before the first possible COPY/ADD cut point and preferred
+  duplicate source chunks that merge with the pending COPY instruction.
 - Clarified that replacement rollback covers handled errors and does not provide
   crash-consistent multi-file transactions.
 - Made BLAKE3 tree accumulation incremental so hashing no longer reserves one

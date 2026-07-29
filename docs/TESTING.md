@@ -33,9 +33,12 @@ The test suite covers:
   handles, positional compression and decompression above 2 GiB, and bounded
   segment decompression through cgo.
 - Immediate termination before decompressed output can exceed its declared size.
-- Canonical chunked-replace descriptor boundaries and per-frame BLAKE3 checks.
+- Canonical chunked-replace descriptor boundaries, the two-identity-chunk
+  selection threshold, and per-frame BLAKE3 checks.
 - Sparse parser cancellation, malformed streams, bounded producer/consumer
   application, and multi-chunk round trips.
+- COPY/ADD cut-point skipping equivalence across chunk profiles and deterministic
+  preference for duplicate source chunks that extend the pending COPY.
 - Immutable creator source/target snapshots and stable installed-file and patch
   identity checks, including optimized parsing without redundant creator-side
   full-file rehashes.

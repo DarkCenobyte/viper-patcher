@@ -18,7 +18,10 @@ import (
 var chunkedReplaceMagic = [8]byte{'V', 'C', 'R', 'P', '\r', '\n', 0x1a, 0x01}
 
 const (
-	chunkedReplaceThreshold uint64 = 16 << 20
+	// Format 3 binds each compressed frame to one canonical 8 MiB identity
+	// chunk. Two full chunks are the smallest useful parallel replacement;
+	// finer compression granularity requires a future format version.
+	chunkedReplaceThreshold uint64 = 2 * hashutil.ChunkSize
 	chunkedDescriptorSize   uint64 = 56
 	chunkedHeaderSize       uint64 = 12
 )

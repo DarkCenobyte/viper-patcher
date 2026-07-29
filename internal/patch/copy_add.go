@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"math/bits"
 	"os"
 )
 
@@ -127,6 +128,17 @@ func copyAddIndexCapacity(size uint64, profile copyAddChunkProfile) int {
 	return int(count)
 }
 
+// copyAddHashStart returns the first byte that can affect a legal cut decision.
+// The cut mask observes log2(average) low bits, and those bits only depend on
+// that many trailing Gear hash inputs. Profiles keep average power-of-two.
+func copyAddHashStart(profile copyAddChunkProfile) int {
+	hashWindow := bits.TrailingZeros(uint(profile.average))
+	if hashWindow >= profile.minimum {
+		return 0
+	}
+	return profile.minimum - hashWindow
+}
+
 type copyAddStreamWriter struct {
 	writer       *bufio.Writer
 	expandedSize uint64
@@ -143,6 +155,7 @@ func forEachContentChunk(ctx context.Context, file *os.File, profile copyAddChun
 	chunk := make([]byte, 0, profile.maximum)
 	var offset uint64
 	var gearHash uint64
+	hashStart := copyAddHashStart(profile)
 	emit := func() error {
 		if len(chunk) == 0 {
 			return nil
@@ -160,17 +173,30 @@ func forEachContentChunk(ctx context.Context, file *os.File, profile copyAddChun
 			return err
 		}
 		count, readError := file.Read(readBuffer)
-		for _, value := range readBuffer[:count] {
-			chunk = append(chunk, value)
-			gearHash = (gearHash << 1) + copyAddGearTable[value]
-			if len(chunk) < profile.minimum {
-				continue
+		for index := 0; index < count; {
+			if len(chunk) < hashStart {
+				skipped := min(hashStart-len(chunk), count-index)
+				chunk = append(chunk, readBuffer[index:index+skipped]...)
+				index += skipped
+				if index == count {
+					break
+				}
 			}
-			if len(chunk) < profile.maximum && gearHash&uint64(profile.average-1) != 0 {
-				continue
-			}
-			if err := emit(); err != nil {
-				return err
+			for index < count {
+				value := readBuffer[index]
+				index++
+				chunk = append(chunk, value)
+				gearHash = (gearHash << 1) + copyAddGearTable[value]
+				if len(chunk) < profile.minimum {
+					continue
+				}
+				if len(chunk) < profile.maximum && gearHash&uint64(profile.average-1) != 0 {
+					continue
+				}
+				if err := emit(); err != nil {
+					return err
+				}
+				break
 			}
 		}
 		if readError == io.EOF {
@@ -198,6 +224,36 @@ func (stream *copyAddStreamWriter) add(data []byte) error {
 		return stream.flushAdd()
 	}
 	return nil
+}
+
+func (stream *copyAddStreamWriter) preferredCopyOffset() (uint64, bool) {
+	if stream == nil || stream.copyLength == 0 || stream.copyOffset > ^uint64(0)-stream.copyLength {
+		return 0, false
+	}
+	return stream.copyOffset + stream.copyLength, true
+}
+
+// selectCopyAddCandidate keeps the deterministic first-match fallback while
+// preferring a source occurrence that extends the COPY currently pending in the
+// stream writer. The latter is emitted as one merged instruction.
+func selectCopyAddCandidate(candidates indexedChunkCandidates, chunkLength int, stream *copyAddStreamWriter) (indexedChunk, bool) {
+	preferredOffset, hasPreferred := stream.preferredCopyOffset()
+	var fallback indexedChunk
+	found := false
+	for candidateIndex := 0; candidateIndex < int(candidates.count); candidateIndex++ {
+		candidate := candidates.chunks[candidateIndex]
+		if int(candidate.length) != chunkLength {
+			continue
+		}
+		if !found {
+			fallback = candidate
+			found = true
+		}
+		if hasPreferred && candidate.offset == preferredOffset {
+			return candidate, true
+		}
+	}
+	return fallback, found
 }
 
 func (stream *copyAddStreamWriter) copy(offset, length uint64) error {

@@ -94,13 +94,18 @@ x64 keep the same 64-bit range.
   backing-memory budget. Concurrently live index arrays share an additional
   128 MiB creator-wide budget. Reservations are atomic, so one request never
   holds a partial allocation while waiting for the rest. Content-defined chunks
-  keep matches stable across insertions and deletions.
+  keep matches stable across insertions and deletions, avoid Gear hashing across
+  the minimum prefix that cannot influence a cut, and prefer duplicate source
+  occurrences that extend the pending COPY instruction.
 - `zstd-replace` verifies the installed source with parallel BLAKE3 chunk reads
   concurrently with standalone zstd decompression and output hashing.
 - `zstd-chunked-replace` validates its compact 56-byte descriptor table without
   retaining it, streams the table a second time through a bounded worker queue,
   decompresses independent frames concurrently, verifies each output chunk, and
-  assembles the final BLAKE3 tree root in chunk order.
+  assembles the final BLAKE3 tree root in chunk order. Format 3 binds every frame
+  to one canonical 8 MiB identity chunk, so the 16 MiB selection threshold is the
+  smallest one that guarantees two full compression tasks. Finer frame
+  granularity requires a future format version.
 
 Progress is aggregated by weighted per-file phases in the core. Callbacks are
 serialized and receive a monotone `Overall` value, so concurrent file events do
