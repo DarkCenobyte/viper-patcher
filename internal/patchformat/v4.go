@@ -684,6 +684,9 @@ func decodeIndex(payload []byte) (Header, error) {
 	if err != nil {
 		return Header{}, err
 	}
+	if flags&^uint32(1) != 0 {
+		return Header{}, fmt.Errorf("V4 index contains unsupported flags")
+	}
 	created, err := reader.i64()
 	if err != nil {
 		return Header{}, err
