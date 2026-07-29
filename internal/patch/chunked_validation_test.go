@@ -130,7 +130,7 @@ func TestStandaloneReplaceVerifiesAndAppliesConcurrently(t *testing.T) {
 	defer output.Close()
 	sourceHash, _, _ := hashutil.Reader(bytes.NewReader(sourceData))
 	targetHash, _, _ := hashutil.Reader(bytes.NewReader(targetData))
-	decoders, err := newDecoderPool(2, newZstdWindowBudget(processZstdWindowBudgetLimit()))
+	decoders, err := newDecoderPool(2, newZstdWindowBudget(processZstdWindowBudgetLimit()), patch)
 	if err != nil {
 		t.Fatal(err)
 	}

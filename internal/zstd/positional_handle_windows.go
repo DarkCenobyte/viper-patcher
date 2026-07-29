@@ -11,9 +11,11 @@ import (
 
 var reOpenFileProc = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReOpenFile")
 
-// acquirePositionalReadHandle reopens a private synchronous handle. ReadFile
-// may update that handle's cursor while honoring the supplied OVERLAPPED
-// offset, but the cursor owned by the caller's Go file remains untouched.
+// acquirePositionalReadHandle reopens a reusable private synchronous handle.
+// ReadFile may update that handle's cursor while honoring the supplied
+// OVERLAPPED offset, but the caller's Go file cursor remains untouched. Decoder
+// pools keep one such handle per slot, so payload reads performed by different
+// workers are not serialized through one shared synchronous Windows handle.
 func acquirePositionalReadHandle(file *os.File) (uintptr, func(), error) {
 	if file == nil {
 		return 0, nil, fmt.Errorf("positional input file is required")

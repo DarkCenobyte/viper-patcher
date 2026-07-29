@@ -44,9 +44,11 @@ method permits it:
 2. open each installed source through `os.Root`, prepare and validate its output,
    then close the source before the multi-file commit begins;
 3. split the worker target between independent files and large chunks, with an
-   eagerly prepared decoder pool sized to the maximum concurrent decode demand;
-   inspect each bounded zstd frame header before use and reserve its actual window
-   against one process-wide decoder-memory budget;
+   eagerly prepared decoder pool sized to the maximum concurrent decode demand.
+   Each slot pairs one reusable decoder with one reusable positional patch input;
+   a separate positional input inspects each bounded zstd frame header before slot
+   acquisition, and its actual window is reserved against one process-wide
+   decoder-memory budget;
 4. compute BLAKE3 chunk digests while bytes are produced and assemble file roots
    without a final sequential reread. Digest tables stay as direct arrays on the
    normal path and spill to private temporary files only beyond 64 MiB on 64-bit
@@ -62,9 +64,12 @@ overlap output generation, and small coordination goroutines may temporarily run
 in addition to the requested workers. CPU-heavy compression and decompression
 remain bounded by the allocated file/chunk workers and decoder pool.
 
-Patch payload reads are positional (`pread` on POSIX and overlapped `ReadFile` on
-Windows), so parallel workers never share a file cursor. Neither the patch nor
-installed files are copied into application snapshots.
+Patch payload reads are positional. POSIX workers reuse the opened descriptor and
+read with `pread`. Windows decoder slots each own a private synchronous handle
+created with `ReOpenFile`; this preserves the caller cursor and prevents parallel
+payload reads from being serialized through one shared synchronous handle. A
+separate reusable handle performs the small frame-header inspections. Neither the
+patch nor installed files are copied into application snapshots.
 
 ### Method-specific behavior
 
@@ -123,9 +128,12 @@ The native API no longer exposes reference files or zstd `patch-from` state.
 Sparse and COPY/ADD reuse is represented explicitly by format 3 instruction
 streams before standalone zstd compression.
 
-Each decoder owns one `ZSTD_DCtx` and reusable 1 MiB input/output buffers. Before
-acquisition, a positional read inspects only the bounded frame header. The actual
-frame window is reserved atomically against one process-wide budget: 512 MiB on
+Each decoder slot owns one `ZSTD_DCtx`, reusable 1 MiB input/output buffers, and
+one reusable positional patch input. On Windows that input is a private synchronous
+`ReOpenFile` handle; on POSIX it references the original descriptor and native
+code uses `pread`. Before slot acquisition, a separate positional input inspects
+only the bounded frame header. The actual frame window is reserved atomically
+against one process-wide budget: 512 MiB on
 64-bit targets and at least one architecture-specific maximum window on 32-bit
 targets. Large declared output sizes with small windows therefore keep their
 normal parallelism; only simultaneous large-window frames are throttled. Output blocks

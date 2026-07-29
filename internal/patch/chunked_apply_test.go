@@ -77,7 +77,7 @@ func TestChunkedReplaceRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoders, err := newDecoderPool(2, newZstdWindowBudget(processZstdWindowBudgetLimit()))
+	decoders, err := newDecoderPool(2, newZstdWindowBudget(processZstdWindowBudgetLimit()), patchFile)
 	if err != nil {
 		t.Fatal(err)
 	}

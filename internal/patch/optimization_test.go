@@ -254,7 +254,7 @@ func TestLargeInstructionStreamUsesBoundedStreamingPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer output.Close()
-	decoders, err := newDecoderPool(1, newZstdWindowBudget(processZstdWindowBudgetLimit()))
+	decoders, err := newDecoderPool(1, newZstdWindowBudget(processZstdWindowBudgetLimit()), compressed)
 	if err != nil {
 		t.Fatal(err)
 	}

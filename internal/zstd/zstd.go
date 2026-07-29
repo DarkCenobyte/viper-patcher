@@ -55,51 +55,107 @@ func DecoderWindowLimit() uint64 {
 	return uint64(C.vipr_zstd_decoder_window_limit())
 }
 
-// PreparedSegment owns one positional handle for a bounded compressed segment.
-// The same private Windows handle is used for frame inspection and decompression,
-// so neither operation can move the cursor of the caller's Go file.
-type PreparedSegment struct {
+// PreparedInput owns one positional patch handle that can prepare multiple
+// bounded compressed segments. On Windows the handle is private and synchronous;
+// on POSIX it reuses the caller's descriptor and native reads use pread.
+type PreparedInput struct {
 	owner   *os.File
 	handle  uintptr
-	offset  uint64
-	length  uint64
 	release func()
 }
 
-// PrepareSegment acquires one positional handle that remains valid until Close.
-func PrepareSegment(patch *os.File, offset, length uint64) (*PreparedSegment, error) {
+// PrepareInput acquires one positional handle that remains valid until Close.
+func PrepareInput(patch *os.File) (*PreparedInput, error) {
 	if patch == nil {
 		return nil, fmt.Errorf("patch file is required")
-	}
-	if length == 0 {
-		return nil, fmt.Errorf("empty compressed segment")
-	}
-	if offset > math.MaxInt64 || length > math.MaxInt64-offset {
-		return nil, fmt.Errorf("compressed segment exceeds the supported signed 64-bit range")
 	}
 	handle, release, err := acquirePositionalReadHandle(patch)
 	if err != nil {
 		return nil, err
 	}
-	return &PreparedSegment{owner: patch, handle: handle, offset: offset, length: length, release: release}, nil
+	return &PreparedInput{owner: patch, handle: handle, release: release}, nil
 }
 
 // Close releases the positional handle. It is safe to call more than once after
-// all reads using the segment have completed.
-func (segment *PreparedSegment) Close() error {
-	if segment == nil || segment.release == nil {
+// every segment borrowing the input has completed.
+func (input *PreparedInput) Close() error {
+	if input == nil || input.release == nil {
 		return nil
 	}
-	segment.release()
+	input.release()
+	input.release = nil
+	input.owner = nil
+	input.handle = 0
+	return nil
+}
+
+// Segment prepares one bounded compressed segment without reopening the input.
+// The returned segment borrows input and must not outlive it.
+func (input *PreparedInput) Segment(offset, length uint64) (*PreparedSegment, error) {
+	if input == nil || input.owner == nil || input.release == nil {
+		return nil, fmt.Errorf("prepared zstd input is closed")
+	}
+	if err := validateSegmentBounds(offset, length); err != nil {
+		return nil, err
+	}
+	return &PreparedSegment{input: input, offset: offset, length: length}, nil
+}
+
+func validateSegmentBounds(offset, length uint64) error {
+	if length == 0 {
+		return fmt.Errorf("empty compressed segment")
+	}
+	if offset > math.MaxInt64 || length > math.MaxInt64-offset {
+		return fmt.Errorf("compressed segment exceeds the supported signed 64-bit range")
+	}
+	return nil
+}
+
+// PreparedSegment describes one bounded compressed segment. It either borrows a
+// reusable PreparedInput or owns a short-lived input created by PrepareSegment.
+type PreparedSegment struct {
+	input   *PreparedInput
+	offset  uint64
+	length  uint64
+	release func()
+}
+
+// PrepareSegment acquires a short-lived positional input for one segment.
+func PrepareSegment(patch *os.File, offset, length uint64) (*PreparedSegment, error) {
+	if patch == nil {
+		return nil, fmt.Errorf("patch file is required")
+	}
+	if err := validateSegmentBounds(offset, length); err != nil {
+		return nil, err
+	}
+	input, err := PrepareInput(patch)
+	if err != nil {
+		return nil, err
+	}
+	segment := &PreparedSegment{input: input, offset: offset, length: length}
+	segment.release = func() {
+		_ = input.Close()
+	}
+	return segment, nil
+}
+
+// Close releases any positional input owned by this segment. Borrowed inputs
+// remain available for subsequent segments.
+func (segment *PreparedSegment) Close() error {
+	if segment == nil || segment.input == nil {
+		return nil
+	}
+	if segment.release != nil {
+		segment.release()
+	}
 	segment.release = nil
-	segment.owner = nil
-	segment.handle = 0
+	segment.input = nil
 	return nil
 }
 
 // WindowSize inspects only the bounded zstd frame header.
 func (segment *PreparedSegment) WindowSize() (uint64, error) {
-	if segment == nil || segment.owner == nil || segment.release == nil {
+	if segment == nil || segment.input == nil || segment.input.owner == nil || segment.input.release == nil {
 		return 0, fmt.Errorf("prepared zstd segment is closed")
 	}
 	errorBuffer, err := nativeErrorBuffer()
@@ -110,14 +166,14 @@ func (segment *PreparedSegment) WindowSize() (uint64, error) {
 
 	var windowSize C.uint64_t
 	result := C.vipr_zstd_frame_window_size(
-		C.uintptr_t(segment.handle),
+		C.uintptr_t(segment.input.handle),
 		C.uint64_t(segment.offset),
 		C.uint64_t(segment.length),
 		&windowSize,
 		(*C.char)(errorBuffer),
 		errorBufferSize,
 	)
-	runtime.KeepAlive(segment.owner)
+	runtime.KeepAlive(segment.input.owner)
 	if result != 0 {
 		return 0, fmt.Errorf("inspect zstd frame: %s", C.GoString((*C.char)(errorBuffer)))
 	}
@@ -341,7 +397,7 @@ func (decoder *Decoder) decompressSegment(ctx context.Context, segment *Prepared
 	if decoder == nil || decoder.native == nil {
 		return fmt.Errorf("zstd decoder is closed")
 	}
-	if segment == nil || segment.owner == nil || segment.release == nil {
+	if segment == nil || segment.input == nil || segment.input.owner == nil || segment.input.release == nil {
 		return fmt.Errorf("prepared zstd segment is closed")
 	}
 	if output == nil && outputCallback == nil {
@@ -368,7 +424,7 @@ func (decoder *Decoder) decompressSegment(ctx context.Context, segment *Prepared
 	}
 	result := C.vipr_decoder_decompress_segment(
 		decoder.native,
-		C.uintptr_t(segment.handle),
+		C.uintptr_t(segment.input.handle),
 		C.uint64_t(segment.offset),
 		C.uint64_t(segment.length),
 		writeOutput,
@@ -381,7 +437,7 @@ func (decoder *Decoder) decompressSegment(ctx context.Context, segment *Prepared
 	)
 	// The cgo call only sees integer handles and cannot keep the owning files
 	// reachable on the Go side while native code is reading or writing them.
-	runtime.KeepAlive(segment.owner)
+	runtime.KeepAlive(segment.input.owner)
 	runtime.KeepAlive(output)
 	if callbacks.err != nil {
 		return callbacks.err

@@ -31,7 +31,8 @@ available, the application prints a warning and falls back to CLI mode.
 - Optional reverse differential for every file.
 - Strict, bounds-checked `.vipr` format 3 container; versions 1 and 2 are rejected.
 - Immutable creator snapshots and handle-based fast application.
-- Adaptive worker allocation across files and large chunks with positional patch reads.
+- Adaptive worker allocation across files and large chunks with positional patch reads
+  and independent per-decoder Windows handles.
 - Traversal-resistant installation access with `os.Root`.
 - Rollback-capable file replacement for handled errors, with generated-file
   syncs and one parent-directory sync before backup cleanup on Unix-like systems.

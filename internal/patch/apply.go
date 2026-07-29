@@ -134,7 +134,7 @@ func applyOpenedPatchWithOperations(ctx context.Context, opened *openedPatch, re
 	}
 	callback = newApplicationProgress(callback, parsed.Header.Files, direction)
 	plan := newApplicationPlan(workerBudget, parsed.Header.Files, direction)
-	decoders, err := newDecoderPool(plan.decoderCount, processApplicationResources.zstdWindowBudget)
+	decoders, err := newDecoderPool(plan.decoderCount, processApplicationResources.zstdWindowBudget, opened.file)
 	if err != nil {
 		return errors.Join(err, wrapJoinedError("close target root", root.Close()), wrapJoinedError("release patch", releasePatch()))
 	}
