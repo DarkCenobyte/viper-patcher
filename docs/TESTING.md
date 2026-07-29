@@ -13,6 +13,8 @@ make check
 The test suite covers:
 
 - GUI/CLI mode selection helpers.
+- CLI signal-context cancellation, parent propagation, idempotent shutdown, and
+  notification cleanup.
 - Atomic creator file-pair parsing, required final positional arguments, help,
   version, failure, and success paths, including the `--workers` option.
 - BLAKE3 streaming, chunked, and parallel hashing, accumulator finalization,

@@ -18,6 +18,9 @@ version before the first retained tag.
   systems. Windows keeps the file flush and intentionally skips directory flushes.
 - Made COPY/ADD index-budget reservations atomic so concurrent multi-unit requests
   cannot deadlock after partially consuming the shared 128 MiB budget.
+- Connected Creator and Patcher CLI operations to Ctrl+C and SIGTERM so in-flight
+  work follows the existing cancellation and cleanup paths instead of terminating
+  immediately.
 
 ### Changed
 

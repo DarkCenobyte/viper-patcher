@@ -14,11 +14,17 @@ func main() {
 	arguments := os.Args[1:]
 	guiAvailable := appmode.GUIAvailable()
 	if appmode.HeadlessRequested(arguments) || appmode.CLIRequested(arguments) || !guiAvailable {
-		if !guiAvailable && !appmode.HeadlessRequested(arguments) {
-			fmt.Fprintln(os.Stderr, "Warning: no graphical environment detected; falling back to command-line mode.")
-		}
-		os.Exit(creatorcli.Run(context.Background(), arguments, os.Stdout, os.Stderr))
+		os.Exit(runCLI(arguments, guiAvailable))
 	}
 	appmode.PrepareGUI()
 	creatorgui.Run()
+}
+
+func runCLI(arguments []string, guiAvailable bool) int {
+	if !guiAvailable && !appmode.HeadlessRequested(arguments) {
+		fmt.Fprintln(os.Stderr, "Warning: no graphical environment detected; falling back to command-line mode.")
+	}
+	ctx, stop := appmode.CommandContext(context.Background())
+	defer stop()
+	return creatorcli.Run(ctx, arguments, os.Stdout, os.Stderr)
 }

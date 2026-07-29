@@ -6,6 +6,11 @@
 all patch logic to `internal/patch`; `internal/patchformat` owns the container and
 `internal/zstd` is the only cgo boundary.
 
+In CLI mode, both executables translate Ctrl+C and SIGTERM into context
+cancellation. Signal handling is restored before cancellation is propagated, so
+normal cleanup can complete after the first signal while later signals retain
+the platform-default behavior. GUI operations are unchanged.
+
 The patcher CLI applies directly through one application session instead of
 performing a complete inspection pass followed by a second validation pass. The
 GUI uses a bounded parallel `Inspect` pass to present readiness before the user
