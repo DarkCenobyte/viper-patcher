@@ -19,11 +19,17 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	var patchFile string
 	var reverse bool
 	var workerBudget int
+	var verifyValue string
+	var durabilityValue string
+	var ioProfileValue string
 	var help bool
 	var version bool
 	flags.StringVar(&patchFile, "patch-file", "", "input .vipr patch")
 	flags.BoolVar(&reverse, "reverse", false, "apply reverse differentials")
 	flags.IntVar(&workerBudget, "workers", 0, "logical worker target; 0 selects the automatic process-aware default")
+	flags.StringVar(&verifyValue, "verify", "referenced", "referenced, strict, or output")
+	flags.StringVar(&durabilityValue, "durability", "buffered", "buffered or durable")
+	flags.StringVar(&ioProfileValue, "io-profile", "auto", "auto, hdd, ssd, or nvme")
 	flags.Bool("headless", false, "force command-line mode")
 	flags.BoolVar(&help, "help", false, "show help")
 	flags.BoolVar(&version, "version", false, "show version")
@@ -55,6 +61,21 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "Error: --workers must be 0 (automatic) or between 1 and %d.\n", workerbudget.Maximum())
 		return 2
 	}
+	verifyMode, err := patch.ParseVerifyMode(verifyValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 2
+	}
+	durabilityMode, err := patch.ParseDurabilityMode(durabilityValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 2
+	}
+	ioProfile, err := patch.ParseIOProfile(ioProfileValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 2
+	}
 
 	direction := patch.Forward
 	if reverse {
@@ -66,6 +87,9 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		Root:         flags.Arg(0),
 		Direction:    direction,
 		WorkerBudget: workerBudget,
+		Verify:       verifyMode,
+		Durability:   durabilityMode,
+		IOProfile:    ioProfile,
 	}, reporter.Report)
 	reporter.Finish()
 	if applyError != nil && !patch.IsCommittedWarning(applyError) {
@@ -89,6 +113,9 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  <target-directory>            Required positional argument.")
 	fmt.Fprintln(writer, "  [--reverse]                   Default: false.")
 	fmt.Fprintln(writer, "  [--workers <count>]           0 (automatic) or 1..logical CPU count. Default: 0.")
+	fmt.Fprintln(writer, "  [--verify <mode>]             referenced, strict, or output. Default: referenced.")
+	fmt.Fprintln(writer, "  [--durability <mode>]         buffered or durable. Default: buffered.")
+	fmt.Fprintln(writer, "  [--io-profile <profile>]      auto, hdd, ssd, or nvme. Default: auto.")
 	fmt.Fprintln(writer, "  [--headless]                  Force CLI mode.")
 	fmt.Fprintln(writer, "  [--version]                   Show version information.")
 	fmt.Fprintln(writer, "  [--help]                      Show this help.")

@@ -5,6 +5,24 @@ uses Semantic Versioning. Release sections from `0.2.0` onward follow the Git
 tags currently present in the repository; `0.1.0` records the initial project
 version before the first retained tag.
 
+## [Unreleased]
+
+### Added
+
+- Replaced the container with V4: a binary trailing index, canonical 8 MiB
+  digest groups, configurable output windows, and adaptive per-window methods.
+- Added a coarse-grained native C data plane covering BLAKE3, zstd, compact
+  instruction decoding, positional I/O, source verification, and output writes.
+- Added `--window-size`, `--optimize`, `--verify`, `--durability`, and
+  `--io-profile` policies.
+- Added Linux `FICLONE`, macOS `fcopyfile` clone, and Windows block-clone fast paths
+  with automatic reconstruction fallback.
+- Added V4 fuzz coverage and ASan/UBSan CI.
+
+### Removed
+
+- Removed V3 from the default build and removed the Go BLAKE3 implementation.
+
 ## [0.5.1] - 2026-07-29
 
 ### Fixed

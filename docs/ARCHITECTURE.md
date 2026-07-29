@@ -1,5 +1,9 @@
 # Architecture
 
+> **V4-only implementation:** see [ARCHITECTURE-V4.md](ARCHITECTURE-V4.md) for
+> the active Go control-plane/native C data-plane architecture. The remaining
+> V3 notes are historical and excluded from the default build.
+
 ## Executables
 
 `cmd/creator` and `cmd/patcher` are thin entry points. CLI and GUI layers delegate

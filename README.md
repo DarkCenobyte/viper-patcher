@@ -24,15 +24,16 @@ available, the application prints a warning and falls back to CLI mode.
 ## Key properties
 
 - Exact libzstd **1.5.7** dependency, statically linked in release builds.
-- VIPR format version 3 with sparse, COPY/ADD, replacement, and chunked replacement methods.
+- VIPR format version 4 with a binary trailing index and independent adaptive windows.
+- Per-window SAME, COPY, compact delta, raw/zstd replacement, ZERO, and RUN strategies.
 - Content-defined chunking keeps COPY/ADD patches effective across insertions and deletions.
 - Ordered multi-file patches with explicit source/target file pairs.
-- BLAKE3 tree source and target validation plus BLAKE3 patch fingerprints.
+- A single native C BLAKE3 implementation for source, target, index, and patch identities.
 - Optional reverse differential for every file.
-- Strict, bounds-checked `.vipr` format 3 container; versions 1 and 2 are rejected.
+- Strict, bounds-checked `.vipr` format 4 container; every earlier version is rejected.
 - Immutable creator snapshots and handle-based fast application.
-- Adaptive worker allocation across files and large chunks with positional patch reads
-  and independent per-decoder Windows handles.
+- Adaptive worker allocation across files and 8 MiB output groups, with native positional
+  I/O and clone-on-write fast paths where the operating system supports them.
 - Traversal-resistant installation access with `os.Root`.
 - Rollback-capable file replacement for handled errors, with generated-file
   syncs and one parent-directory sync before backup cleanup on Unix-like systems.
@@ -104,6 +105,8 @@ creator --headless \
   --comment "Version 1.1 update" \
   --create-reverse \
   --workers 2 \
+  --window-size auto \
+  --optimize balanced \
   --work-directory /path/to/temporary-storage \
   update.vipr
 ```
@@ -117,6 +120,8 @@ Supported parameters:
 [--create-reverse]             Default: false.
 [--work-directory <directory>] Optional creator temporary-data parent.
 [--workers <count>]            0 (automatic) or 1..logical CPU count. Default: 0.
+[--window-size <size>]         auto|256K|512K|1M|2M|4M|8M. Default: auto.
+[--optimize <profile>]         balanced|apply-speed|patch-size. Default: balanced.
 [--headless]                   Force CLI mode.
 [--version]                    Show version information.
 [--help]                       Show help.

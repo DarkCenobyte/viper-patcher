@@ -1,0 +1,25 @@
+name: Native sanitizers
+on:
+  push:
+    branches: [master]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  asan-ubsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y libzstd-dev clang
+      - name: Native and integration tests
+        env:
+          CC: clang
+          CGO_ENABLED: "1"
+          CGO_CFLAGS: "-O2 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+          CGO_LDFLAGS: "-fsanitize=address,undefined"
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: go test -count=1 ./internal/nativev4 ./internal/patchformat ./internal/patch

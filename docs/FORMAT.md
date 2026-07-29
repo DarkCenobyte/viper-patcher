@@ -1,5 +1,9 @@
 # VIPR file format
 
+> **V4-only implementation:** the authoritative current specification is
+> [FORMAT-V4.md](FORMAT-V4.md). The legacy V3 description below is retained only
+> as historical design context and is not accepted by the default build.
+
 All integer fields outside JSON use little-endian byte order.
 
 | Offset | Size | Description |

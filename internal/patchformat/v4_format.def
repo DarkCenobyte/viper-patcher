@@ -1,0 +1,34 @@
+{
+  "format_version": 4,
+  "prefix_size": 16,
+  "footer_size": 64,
+  "window_descriptor_size": 88,
+  "identity_chunk_size": 8388608,
+  "window_kinds": {
+    "same": 1,
+    "copy": 2,
+    "delta_raw": 3,
+    "delta_zstd": 4,
+    "replace_raw": 5,
+    "replace_zstd": 6,
+    "zero": 7,
+    "run": 8
+  },
+  "codecs": {
+    "none": 0,
+    "zstd": 1
+  },
+  "opcodes": {
+    "end": 0,
+    "copy_same_short": 1,
+    "copy_local_short": 2,
+    "copy_local_long": 3,
+    "copy_delta_short": 4,
+    "copy_absolute": 5,
+    "add_short": 6,
+    "add_long": 7,
+    "run_byte": 8,
+    "zero": 9,
+    "copy_add_pair": 10
+  }
+}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/DarkCenobyte/viper-patcher/internal/buildinfo"
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
+	"github.com/DarkCenobyte/viper-patcher/internal/patchformat"
 	"github.com/DarkCenobyte/viper-patcher/internal/progress"
 )
 
@@ -43,6 +44,8 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	var reverse bool
 	var workDirectory string
 	var workerBudget int
+	var windowSize string
+	var optimization string
 	var help bool
 	var version bool
 	flags.Var(&pairs, "file-pair", "source and target pair; repeat for each file")
@@ -51,6 +54,8 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.BoolVar(&reverse, "create-reverse", false, "include reverse differentials")
 	flags.StringVar(&workDirectory, "work-directory", "", "parent directory for temporary creator data")
 	flags.IntVar(&workerBudget, "workers", 0, "logical worker target; 0 selects the automatic system-aware default")
+	flags.StringVar(&windowSize, "window-size", "auto", "auto, 256K, 512K, 1M, 2M, 4M, or 8M")
+	flags.StringVar(&optimization, "optimize", "balanced", "balanced, apply-speed, or patch-size")
 	flags.Bool("headless", false, "force command-line mode")
 	flags.BoolVar(&help, "help", false, "show help")
 	flags.BoolVar(&version, "version", false, "show version")
@@ -97,8 +102,18 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	}
 
 	output := flags.Arg(0)
+	windowSizeBytes, err := patch.ParseWindowSize(windowSize)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 2
+	}
+	optimizationMode, err := patchformat.ParseOptimizationMode(optimization)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 2
+	}
 	reporter := newTerminalProgress(stderr)
-	err := patch.Create(ctx, patch.CreateOptions{
+	err = patch.Create(ctx, patch.CreateOptions{
 		Files:            pairs,
 		OutputPath:       output,
 		CompressionLevel: level,
@@ -106,6 +121,8 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		CreateReverse:    reverse,
 		WorkDirectory:    workDirectory,
 		WorkerBudget:     workerBudget,
+		WindowSize:       windowSizeBytes,
+		Optimization:     optimizationMode,
 	}, reporter.Report)
 	reporter.Finish()
 	if err != nil && !patch.IsCommittedWarning(err) {
@@ -130,6 +147,8 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  [--create-reverse]             Default: false.")
 	fmt.Fprintln(writer, "  [--work-directory <directory>] Optional creator temporary-data parent.")
 	fmt.Fprintln(writer, "  [--workers <count>]            0 (automatic) or 1..logical CPU count. Default: 0.")
+	fmt.Fprintln(writer, "  [--window-size <size>]         auto, 256K, 512K, 1M, 2M, 4M, or 8M. Default: auto.")
+	fmt.Fprintln(writer, "  [--optimize <profile>]         balanced, apply-speed, or patch-size. Default: balanced.")
 	fmt.Fprintln(writer, "  [--headless]                   Force CLI mode.")
 	fmt.Fprintln(writer, "  [--version]                    Show version information.")
 	fmt.Fprintln(writer, "  [--help]                       Show this help.")
