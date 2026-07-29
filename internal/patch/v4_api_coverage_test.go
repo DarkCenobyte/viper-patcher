@@ -118,7 +118,7 @@ func TestV4OpenPrepareInspectAndApplyAPIs(t *testing.T) {
 		t.Fatalf("source inspection = %+v", inspection)
 	}
 
-	if err := Apply(nil, fixture.patchPath, installRoot, Forward, nil); err != nil {
+	if err := Apply(context.Background(), fixture.patchPath, installRoot, Forward, nil); err != nil {
 		t.Fatal(err)
 	}
 	actual, err := os.ReadFile(installed)
@@ -128,7 +128,7 @@ func TestV4OpenPrepareInspectAndApplyAPIs(t *testing.T) {
 	if !bytes.Equal(actual, fixture.target) {
 		t.Fatal("Apply did not produce the target")
 	}
-	inspection, err = InspectContext(nil, installRoot, parsed)
+	inspection, err = InspectContext(context.Background(), installRoot, parsed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestV4OpenPrepareInspectAndApplyAPIs(t *testing.T) {
 		t.Fatalf("target inspection = %+v", inspection)
 	}
 
-	if err := ApplyPreparedWithOptions(nil, prepared, PreparedApplyOptions{
+	if err := ApplyPreparedWithOptions(context.Background(), prepared, PreparedApplyOptions{
 		Root:         installRoot,
 		Direction:    Reverse,
 		WorkerBudget: 2,

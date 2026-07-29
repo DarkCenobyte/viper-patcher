@@ -97,7 +97,7 @@ func TestV4CreateReplacesExistingPatchAndCleansWork(t *testing.T) {
 		WindowSize:       256 << 10,
 		Optimization:     OptimizePatchSize,
 	}
-	if err := Create(nil, options, nil); err != nil {
+	if err := Create(context.Background(), options, nil); err != nil {
 		t.Fatal(err)
 	}
 	first, err := os.ReadFile(output)
