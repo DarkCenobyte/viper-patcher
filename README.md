@@ -183,6 +183,9 @@ Supported parameters:
 <target-directory>            Required positional argument.
 [--reverse]                   Default: false.
 [--workers <count>]           0 (automatic) or 1..logical CPU count. Default: 0.
+[--verify <mode>]             referenced|strict|output. Default: referenced.
+[--durability <mode>]         buffered|durable. Default: buffered.
+[--io-profile <profile>]      auto|hdd|ssd|nvme. Default: auto.
 [--headless]                  Force CLI mode.
 [--version]                   Show version information.
 [--help]                      Show help.
@@ -195,37 +198,29 @@ a scheduling target rather than a strict process-wide goroutine limit.
 The CLI parses the patch without a redundant whole-file fingerprint pass and does
 not run a separate full-file inspection before application.
 
-## Format 3 implementation
+## Format 4 implementation
 
-Viper Patcher does not invoke an external `zstd` executable. Format 3 selects a
-method independently for each file and direction:
+Viper Patcher does not invoke an external `zstd` executable. VIPR V4 stores
+contiguous payloads followed by a binary trailing index and a fixed footer, so
+application can seek directly to metadata without scanning payloads.
 
-- `zstd-sparse` stores a compressed replacement instruction stream for equal-size
-  files with relatively few changes.
-- `zstd-replace` stores a standalone frame for equal-size files with little
-  useful similarity.
-- `zstd-copy-add` handles insertions, deletions, and moved reusable regions.
-- `zstd-chunked-replace` splits large standalone replacements into independent
-  frames that can be decoded and verified concurrently.
+Each file uses one bounded window size, while every window independently selects
+SAME, COPY, compact delta, raw/zstd replacement, ZERO, or RUN. Go owns policy,
+path safety, scheduling, temporary files, and rollback-capable commit. Coarse
+cgo calls delegate BLAKE3, zstd, positional I/O, instruction decoding, output
+writes, and window/group verification to the native C data plane.
 
-Application opens the patch and each installed source only for the preparation
-of that file, closing source handles before the multi-file commit. Native workers
-use positional reads, a decoder pool sized to actual concurrent demand,
-standalone frames, and bounded 1 MiB buffers. Creator snapshots retain their
-32-byte BLAKE3 chunk digests so chunked replacement does not reread target chunks
-solely for hashing. Output digests are calculated while blocks are written.
-Sparse application uses a bounded producer/consumer queue, reads each source chunk
-once, overlays replacements in memory, and assembles source and target BLAKE3 tree
-roots. Each prepared output is synchronized before atomic per-file renames begin.
-On Unix-like systems, affected parent directories are synchronized once before
-committed backups are removed; Windows intentionally relies on the output-file
-flush because portable directory flushing is unavailable. The rollback path handles
-reported replacement failures, but a sudden system crash can still leave a
-multi-file patch partially committed.
+Application distributes work across independent files and canonical 8 MiB output
+groups. When an equal-size output contains at least 90% SAME windows, Viper
+attempts a copy-on-write clone and reconstructs only changed windows; unsupported
+filesystems transparently fall back to normal reconstruction. `referenced`,
+`strict`, and `output` verification profiles control source validation without
+weakening index, window, group, or output integrity checks.
 
-Only format 3 patches are accepted. Older `.vipr` files must be applied with a
-compatible Viper-Patcher 0.4.1-or-earlier release. Format 3 is documented in
-[VIPR format](docs/FORMAT.md).
+Only format 4 patches are accepted. Earlier `.vipr` files remain usable through
+their tagged historical releases. See [VIPR format V4](docs/FORMAT-V4.md),
+[V4 architecture](docs/ARCHITECTURE-V4.md), and
+[native V4 implementation](docs/NATIVE-V4.md).
 
 ## Building
 
@@ -270,13 +265,13 @@ make check
 
 The repository includes unit, integration, race, fuzz, native sanitizer,
 Staticcheck, and vulnerability-reachability checks for path normalization,
-container parsing,
-format 3 validation, rejection of older formats, malformed sparse and COPY/ADD streams,
-CLI validation, zstd streaming, parallel positional reads, transaction rollback,
-GUI state models, patch creation, forward application, reverse application,
-preflight states, output replacement, and BLAKE3 integrity. CI enforces at
-least 80% statement coverage across the non-GUI core and compiles the complete
-GUI executables. See [Testing strategy](docs/TESTING.md).
+container parsing, format 4 validation, rejection of earlier formats, malformed
+binary indexes, window descriptors, and native instruction streams, CLI validation,
+zstd streaming, parallel positional reads, transaction rollback, GUI state models,
+patch creation, forward application, reverse application, preflight states, output
+replacement, and BLAKE3 integrity. CI enforces at least 80% statement coverage
+across the non-GUI core and compiles the complete GUI executables. See
+[Testing strategy](docs/TESTING.md).
 
 ## GitHub Actions
 
@@ -301,14 +296,15 @@ release tags, and future code-signing insertion points.
 | Linux | arm64 | Yes |
 | macOS | arm64 | Yes |
 
-A 32-bit process has a much smaller virtual address space. Large files therefore
-benefit most from chunked replacement, which keeps each independent work unit
-bounded. Sparse, COPY/ADD, and replacement methods do not map a reference file.
+A 32-bit process has a much smaller virtual address space. V4 keeps work bounded
+through independently encoded windows, canonical 8 MiB application groups,
+positional I/O, and native memory limits; it never maps an entire source or patch.
 
 ## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [VIPR format](docs/FORMAT.md)
+- [V4 architecture](docs/ARCHITECTURE-V4.md)
+- [VIPR format V4](docs/FORMAT-V4.md)
+- [Native V4 implementation](docs/NATIVE-V4.md)
 - [Building](docs/BUILDING.md)
 - [Testing strategy](docs/TESTING.md)
 - [GitHub Actions CI/CD](docs/CI-CD.md)
