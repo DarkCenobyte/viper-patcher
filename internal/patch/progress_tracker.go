@@ -21,11 +21,13 @@ type trackedFileProgress struct {
 }
 
 type operationProgressTracker struct {
-	mutex       sync.Mutex
-	callback    progress.Callback
-	files       []trackedFileProgress
-	totalWeight float64
-	lastOverall float64
+	mutex           sync.Mutex
+	callback        progress.Callback
+	files           []trackedFileProgress
+	totalWeight     float64
+	completedWeight float64
+	completed       bool
+	lastOverall     float64
 }
 
 func newCreationProgress(callback progress.Callback, pairs []plannedPair, includeReverse bool) progress.Callback {
@@ -122,11 +124,11 @@ func (tracker *operationProgressTracker) report(event progress.Event) {
 	defer tracker.mutex.Unlock()
 
 	if event.Stage == progress.StageCompleted {
-		for index := range tracker.files {
-			completeFile(&tracker.files[index])
-		}
-	} else if event.FileIndex > 0 && event.FileIndex <= len(tracker.files) {
+		tracker.completedWeight = tracker.totalWeight
+		tracker.completed = true
+	} else if !tracker.completed && event.FileIndex > 0 && event.FileIndex <= len(tracker.files) {
 		file := &tracker.files[event.FileIndex-1]
+		previousWeight := file.completedWeight()
 		fraction := eventFraction(event)
 		switch event.Stage {
 		case progress.StageSnapshotting:
@@ -142,15 +144,12 @@ func (tracker *operationProgressTracker) report(event progress.Event) {
 		case progress.StageFilePrepared, progress.StageFileCompleted:
 			completeFile(file)
 		}
+		tracker.completedWeight += file.completedWeight() - previousWeight
 	}
 
-	completed := 0.0
-	for index := range tracker.files {
-		completed += tracker.files[index].completedWeight()
-	}
 	overall := 0.0
 	if tracker.totalWeight > 0 {
-		overall = completed / tracker.totalWeight
+		overall = tracker.completedWeight / tracker.totalWeight
 	}
 	if event.Stage == progress.StageCompleted {
 		overall = 1

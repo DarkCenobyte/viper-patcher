@@ -36,11 +36,11 @@ func snapshotCreationInputs(ctx context.Context, plan createPlan, workDirectory 
 			})
 		}
 		report(0)
-		source, err := snapshotRegularFile(pair.sourcePath, filepath.Join(workDirectory, fmt.Sprintf("%06d.source", index)), report)
+		source, err := snapshotRegularFile(ctx, pair.sourcePath, filepath.Join(workDirectory, fmt.Sprintf("%06d.source", index)), report)
 		if err != nil {
 			return fmt.Errorf("snapshot source file %q: %w", pair.relativePath, err)
 		}
-		target, err := snapshotRegularFile(pair.targetPath, filepath.Join(workDirectory, fmt.Sprintf("%06d.target", index)), func(processed uint64) {
+		target, err := snapshotRegularFile(ctx, pair.targetPath, filepath.Join(workDirectory, fmt.Sprintf("%06d.target", index)), func(processed uint64) {
 			report(pair.sourceSize + processed)
 		})
 		if err != nil {

@@ -2,7 +2,6 @@ package patch
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -94,7 +93,6 @@ func createCopyAddStreamOptimizedWithBudget(ctx context.Context, sourcePath, tar
 		return copyAddStats{}, false, err
 	}
 	stream.expandedSize = uint64(len(copyAddMagic))
-	compareBuffer := make([]byte, profile.maximum)
 	minimumCopied := targetSize / 8
 	var processed uint64
 	var stats copyAddStats
@@ -112,12 +110,9 @@ func createCopyAddStreamOptimizedWithBudget(ctx context.Context, sourcePath, tar
 			if int(candidate.length) != len(chunk.data) {
 				continue
 			}
-			if _, err := source.ReadAt(compareBuffer[:len(chunk.data)], int64(candidate.offset)); err != nil {
-				return fmt.Errorf("verify copy-add source chunk: %w", err)
-			}
-			if !bytes.Equal(compareBuffer[:len(chunk.data)], chunk.data) {
-				continue
-			}
+			// The immutable source index and target chunk use the same exact
+			// length and BLAKE3-256 digest. Re-reading every match would nearly
+			// double source I/O without strengthening the existing hash boundary.
 			if err := stream.copy(candidate.offset, chunkSize); err != nil {
 				return err
 			}

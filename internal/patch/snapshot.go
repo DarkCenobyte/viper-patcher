@@ -1,6 +1,7 @@
 package patch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -47,7 +48,7 @@ func (writer *snapshotProgressWriter) Write(data []byte) (int, error) {
 	return count, err
 }
 
-func snapshotRegularFile(sourcePath, destinationPath string, onProgress func(uint64)) (fileSnapshot, error) {
+func snapshotRegularFile(ctx context.Context, sourcePath, destinationPath string, onProgress func(uint64)) (fileSnapshot, error) {
 	source := stableFileSource{
 		display: sourcePath,
 		open: func() (*os.File, os.FileInfo, error) {
@@ -57,10 +58,16 @@ func snapshotRegularFile(sourcePath, destinationPath string, onProgress func(uin
 			return os.Lstat(sourcePath)
 		},
 	}
-	return snapshotStableFile(source, destinationPath, onProgress)
+	return snapshotStableFile(ctx, source, destinationPath, onProgress)
 }
 
-func snapshotStableFile(source stableFileSource, destinationPath string, onProgress func(uint64)) (snapshot fileSnapshot, resultError error) {
+func snapshotStableFile(ctx context.Context, source stableFileSource, destinationPath string, onProgress func(uint64)) (snapshot fileSnapshot, resultError error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return fileSnapshot{}, err
+	}
 	file, identity, err := source.open()
 	if err != nil {
 		return fileSnapshot{}, err
@@ -95,7 +102,7 @@ func snapshotStableFile(source stableFileSource, destinationPath string, onProgr
 		onProgress: onProgress,
 		total:      uint64(identity.Size()),
 	}
-	written, err := io.Copy(copyWriter, file)
+	written, err := copyContext(ctx, copyWriter, file)
 	if err != nil {
 		return fileSnapshot{}, fmt.Errorf("snapshot %q: %w", source.display, err)
 	}

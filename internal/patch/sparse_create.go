@@ -96,14 +96,11 @@ func createSparseStreamsOptimized(ctx context.Context, sourcePath, targetPath, f
 		}
 
 		for index := 0; index < sourceCount; {
-			if sourceBuffer[index] == targetBuffer[index] {
-				index++
-				continue
+			start, end, found := nextSparseDifference(sourceBuffer[:sourceCount], targetBuffer[:targetCount], index)
+			if !found {
+				break
 			}
-			start := index
-			for index < sourceCount && sourceBuffer[index] != targetBuffer[index] {
-				index++
-			}
+			index = end
 			length := index - start
 			startOffset := absoluteOffset + uint64(start)
 			gap := startOffset - previousEnd

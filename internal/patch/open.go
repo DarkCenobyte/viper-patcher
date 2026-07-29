@@ -186,7 +186,10 @@ func decodeAndHashPatch(reader io.Reader) (patchformat.Patch, string, error) {
 	if err != nil {
 		return patchformat.Patch{}, "", err
 	}
-	if _, err := io.Copy(io.Discard, hashingReader); err != nil {
+	// Decode consumes exactly the prefix without read-ahead. Hash the remaining
+	// payload directly with the explicit one MiB copy buffer instead of the small
+	// io.Discard ReaderFrom buffer or an os.File WriterTo fallback.
+	if _, err := copyBuffered(hash, reader); err != nil {
 		return patchformat.Patch{}, "", fmt.Errorf("hash patch payload: %w", err)
 	}
 	return parsed, hex.EncodeToString(hash.Sum(nil)), nil
