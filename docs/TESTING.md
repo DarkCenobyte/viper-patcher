@@ -30,7 +30,8 @@ The test suite covers:
 - Differential-range validation and unreferenced-data rejection.
 - Standalone libzstd compression, frame-window inspection, process-wide weighted
   window budgeting, reusable positional inputs, distinct per-decoder Windows
-  handles, and bounded segment decompression through cgo.
+  handles, positional compression and decompression above 2 GiB, and bounded
+  segment decompression through cgo.
 - Immediate termination before decompressed output can exceed its declared size.
 - Canonical chunked-replace descriptor boundaries and per-frame BLAKE3 checks.
 - Sparse parser cancellation, malformed streams, bounded producer/consumer

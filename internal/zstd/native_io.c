@@ -1,5 +1,12 @@
-#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#if !defined(_WIN32)
+#if !defined(_FILE_OFFSET_BITS)
+#define _FILE_OFFSET_BITS 64
+#elif _FILE_OFFSET_BITS != 64
+#error "Viper-Patcher requires 64-bit POSIX file offsets"
+#endif
+#if !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
+#endif
 #endif
 
 #include "native_internal.h"
@@ -20,6 +27,12 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
+
+#if !defined(_WIN32)
+_Static_assert(
+    sizeof(off_t) >= sizeof(int64_t),
+    "Viper-Patcher requires 64-bit POSIX file offsets");
 #endif
 
 #if defined(_WIN32)

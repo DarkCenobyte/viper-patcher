@@ -69,7 +69,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	}, reporter.Report)
 	reporter.Finish()
 	if applyError != nil && !patch.IsCommittedWarning(applyError) {
-		fmt.Fprintf(stderr, "Patch validation failed: %v\n", applyError)
+		fmt.Fprintf(stderr, "Patch application failed: %v\n", applyError)
 		return 1
 	}
 	fmt.Fprintf(stdout, "%s patch applied successfully.\n", direction)

@@ -74,7 +74,11 @@ read with `pread`. Windows decoder slots each own a private synchronous handle
 created with `ReOpenFile`; this preserves the caller cursor and prevents parallel
 payload reads from being serialized through one shared synchronous handle. A
 separate reusable handle performs the small frame-header inspections. Neither the
-patch nor installed files are copied into application snapshots.
+patch nor installed files are copied into application snapshots. POSIX native I/O
+forces a 64-bit `off_t` before including system headers and checks it at compile
+time, including on Linux 386. Windows represents positional offsets with the low
+and high halves of `OVERLAPPED` and file sizes with `ULARGE_INTEGER`, so x86 and
+x64 keep the same 64-bit range.
 
 ### Method-specific behavior
 

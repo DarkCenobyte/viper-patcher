@@ -129,7 +129,7 @@ func TestRunRejectsInvalidPatch(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run(context.Background(), []string{"--patch-file", patchPath, root}, &stdout, &stderr)
-	if code != 1 || !strings.Contains(stderr.String(), "Patch validation failed") {
+	if code != 1 || !strings.Contains(stderr.String(), "Patch application failed") {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
 }

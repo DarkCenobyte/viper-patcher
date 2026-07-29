@@ -21,6 +21,11 @@ version before the first retained tag.
 - Connected Creator and Patcher CLI operations to Ctrl+C and SIGTERM so in-flight
   work follows the existing cancellation and cleanup paths instead of terminating
   immediately.
+- Enforced 64-bit native POSIX file offsets and added positional compression and
+  decompression coverage above 2 GiB, including Linux and Windows 386 CI targets.
+- Reported generic Patcher CLI failures as application failures instead of
+  incorrectly labeling decompression, write, or transaction errors as validation
+  failures.
 
 ### Changed
 
