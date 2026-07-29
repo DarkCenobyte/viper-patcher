@@ -16,6 +16,54 @@ static void vipr_yield_cpu(void) {
 #endif
 }
 
+// Decode the stable 88-byte V4 wire descriptor instead of sharing a C struct
+// array with Go. This keeps the cgo boundary independent of ABI padding and
+// uint64 alignment on 32-bit targets.
+static uint16_t load_le16(const uint8_t *value) {
+    return (uint16_t)value[0] | ((uint16_t)value[1] << 8);
+}
+
+static uint32_t load_le32(const uint8_t *value) {
+    return (uint32_t)value[0] |
+           ((uint32_t)value[1] << 8) |
+           ((uint32_t)value[2] << 16) |
+           ((uint32_t)value[3] << 24);
+}
+
+static uint64_t load_le64(const uint8_t *value) {
+    return (uint64_t)load_le32(value) | ((uint64_t)load_le32(value + 4) << 32);
+}
+
+static vipr_status decode_window_descriptor(const uint8_t *encoded,
+                                            vipr_window *window,
+                                            char *error_buffer,
+                                            size_t error_buffer_size) {
+    if (encoded == NULL || window == NULL) {
+        vipr_set_error(error_buffer, error_buffer_size, "missing V4 window descriptor");
+        return VIPR_STATUS_INVALID_ARGUMENT;
+    }
+    if (load_le32(encoded + 84) != 0) {
+        vipr_set_error(error_buffer, error_buffer_size, "V4 window descriptor reserved field is non-zero");
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
+    memset(window, 0, sizeof(*window));
+    window->output_offset = load_le64(encoded + 0);
+    window->output_size = load_le32(encoded + 8);
+    window->kind = encoded[12];
+    window->codec = encoded[13];
+    window->flags = load_le16(encoded + 14);
+    window->payload_offset = load_le64(encoded + 16);
+    window->payload_size = load_le32(encoded + 24);
+    window->expanded_size = load_le32(encoded + 28);
+    window->source_offset = load_le64(encoded + 32);
+    window->source_size = load_le32(encoded + 40);
+    window->source_first_chunk = load_le32(encoded + 44);
+    window->source_chunk_count = load_le16(encoded + 48);
+    window->instruction_count = load_le16(encoded + 50);
+    memcpy(window->digest, encoded + 52, sizeof(window->digest));
+    return VIPR_STATUS_OK;
+}
+
 static int digest_equal(const uint8_t left[32], const uint8_t right[32]) {
     uint8_t diff = 0;
     for (size_t i = 0; i < 32; ++i) diff |= left[i] ^ right[i];
@@ -429,7 +477,7 @@ static vipr_status materialize_window(vipr_io_session *session,
 }
 
 vipr_status vipr_apply_group(vipr_io_session *session,
-                             const vipr_window *windows, uint32_t window_count,
+                             const uint8_t *encoded_windows, uint32_t window_count,
                              uint64_t group_offset, uint32_t group_size,
                              uint64_t source_file_size,
                              const uint8_t *source_chunk_digests, uint32_t source_chunk_count,
@@ -438,7 +486,7 @@ vipr_status vipr_apply_group(vipr_io_session *session,
                              volatile uint32_t *cancel,
                              vipr_group_result *result,
                              char *error_buffer, size_t error_buffer_size) {
-    if (session == NULL || windows == NULL || window_count == 0 || group_size == 0 || expected_group_digest == NULL) {
+    if (session == NULL || encoded_windows == NULL || window_count == 0 || group_size == 0 || expected_group_digest == NULL) {
         vipr_set_error(error_buffer, error_buffer_size, "invalid V4 group arguments");
         return VIPR_STATUS_INVALID_ARGUMENT;
     }
@@ -452,7 +500,11 @@ vipr_status vipr_apply_group(vipr_io_session *session,
     vipr_status status = VIPR_STATUS_OK;
     uint64_t expected_offset = group_offset;
     for (uint32_t index = 0; index < window_count; ++index) {
-        const vipr_window *window = &windows[index];
+        vipr_window decoded_window;
+        status = decode_window_descriptor(encoded_windows + (size_t)index * VIPR_V4_WINDOW_DESCRIPTOR_SIZE,
+                                          &decoded_window, error_buffer, error_buffer_size);
+        if (status != VIPR_STATUS_OK) break;
+        const vipr_window *window = &decoded_window;
         if (window->output_offset != expected_offset || window->output_offset < group_offset ||
             window->output_size > group_size - (uint32_t)(window->output_offset - group_offset)) {
             status = VIPR_STATUS_INVALID_WINDOW;
@@ -486,24 +538,29 @@ vipr_status vipr_apply_group(vipr_io_session *session,
     return status;
 }
 
-vipr_status vipr_apply_changed_window(vipr_io_session *session, const vipr_window *window,
+vipr_status vipr_apply_changed_window(vipr_io_session *session, const uint8_t *encoded_window,
                                       uint64_t source_file_size,
                                       const uint8_t *source_chunk_digests, uint32_t source_chunk_count,
                                       volatile uint32_t *source_chunk_states,
                                       volatile uint32_t *cancel,
                                       vipr_group_result *result,
                                       char *error_buffer, size_t error_buffer_size) {
-    if (session == NULL || window == NULL) {
+    if (session == NULL || encoded_window == NULL) {
         vipr_set_error(error_buffer, error_buffer_size, "invalid V4 changed-window arguments");
         return VIPR_STATUS_INVALID_ARGUMENT;
     }
+    vipr_window decoded_window;
+    vipr_status status = decode_window_descriptor(encoded_window, &decoded_window,
+                                                  error_buffer, error_buffer_size);
+    if (status != VIPR_STATUS_OK) return status;
+    const vipr_window *window = &decoded_window;
     if (result != NULL) memset(result, 0, sizeof(*result));
     uint8_t *buffer = (uint8_t *)malloc(window->output_size);
     if (buffer == NULL) {
         vipr_set_error(error_buffer, error_buffer_size, "allocate V4 window output");
         return VIPR_STATUS_MEMORY_LIMIT;
     }
-    vipr_status status = materialize_window(session, window, source_file_size, source_chunk_digests,
+    status = materialize_window(session, window, source_file_size, source_chunk_digests,
                                             source_chunk_count, source_chunk_states, buffer, 1, cancel, result,
                                             error_buffer, error_buffer_size);
     if (status == VIPR_STATUS_OK && window->kind != VIPR_WINDOW_SAME) {

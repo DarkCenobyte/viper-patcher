@@ -618,22 +618,50 @@ func encodeFileEntry(buffer *bytes.Buffer, entry *FileEntry, reverse bool) error
 	return nil
 }
 
+func encodeWindowBytes(destination []byte, window WindowDescriptor) {
+	if len(destination) < WindowDescriptorSize {
+		panic("short V4 window descriptor destination")
+	}
+	binary.LittleEndian.PutUint64(destination[0:8], window.OutputOffset)
+	binary.LittleEndian.PutUint32(destination[8:12], window.OutputSize)
+	destination[12] = byte(window.Kind)
+	destination[13] = byte(window.Codec)
+	binary.LittleEndian.PutUint16(destination[14:16], window.Flags)
+	binary.LittleEndian.PutUint64(destination[16:24], window.PayloadOffset)
+	binary.LittleEndian.PutUint32(destination[24:28], window.PayloadSize)
+	binary.LittleEndian.PutUint32(destination[28:32], window.ExpandedSize)
+	binary.LittleEndian.PutUint64(destination[32:40], window.SourceOffset)
+	binary.LittleEndian.PutUint32(destination[40:44], window.SourceSize)
+	binary.LittleEndian.PutUint32(destination[44:48], window.SourceFirstChunk)
+	binary.LittleEndian.PutUint16(destination[48:50], window.SourceChunkCount)
+	binary.LittleEndian.PutUint16(destination[50:52], window.InstructionCount)
+	copy(destination[52:84], window.Digest[:])
+	clear(destination[84:WindowDescriptorSize])
+}
+
+// MarshalWindowDescriptor encodes one descriptor in its canonical V4 wire
+// representation for the native data plane.
+func MarshalWindowDescriptor(window WindowDescriptor) [WindowDescriptorSize]byte {
+	var encoded [WindowDescriptorSize]byte
+	encodeWindowBytes(encoded[:], window)
+	return encoded
+}
+
+// MarshalWindowDescriptors encodes descriptors in their canonical V4 wire
+// representation for the native data plane. Passing the stable wire layout
+// instead of a C struct array avoids architecture-dependent ABI padding.
+func MarshalWindowDescriptors(windows []WindowDescriptor) []byte {
+	encoded := make([]byte, len(windows)*WindowDescriptorSize)
+	for index := range windows {
+		start := index * WindowDescriptorSize
+		encodeWindowBytes(encoded[start:start+WindowDescriptorSize], windows[index])
+	}
+	return encoded
+}
+
 func encodeWindow(buffer *bytes.Buffer, window WindowDescriptor) {
-	writeU64(buffer, window.OutputOffset)
-	writeU32(buffer, window.OutputSize)
-	buffer.WriteByte(byte(window.Kind))
-	buffer.WriteByte(byte(window.Codec))
-	writeU16(buffer, window.Flags)
-	writeU64(buffer, window.PayloadOffset)
-	writeU32(buffer, window.PayloadSize)
-	writeU32(buffer, window.ExpandedSize)
-	writeU64(buffer, window.SourceOffset)
-	writeU32(buffer, window.SourceSize)
-	writeU32(buffer, window.SourceFirstChunk)
-	writeU16(buffer, window.SourceChunkCount)
-	writeU16(buffer, window.InstructionCount)
-	buffer.Write(window.Digest[:])
-	writeU32(buffer, 0)
+	encoded := MarshalWindowDescriptor(window)
+	buffer.Write(encoded[:])
 }
 
 func decodeIndex(payload []byte) (Header, error) {

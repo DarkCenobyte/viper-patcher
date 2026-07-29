@@ -123,3 +123,43 @@ func FuzzDecodeV4(f *testing.F) {
 	f.Add([]byte("VIPR4\r\n\x1a"))
 	f.Fuzz(func(t *testing.T, data []byte) { _, _ = DecodeAt(bytes.NewReader(data), uint64(len(data)), nil) })
 }
+
+func TestMarshalWindowDescriptorsUsesCanonicalLayout(t *testing.T) {
+	window := WindowDescriptor{
+		OutputOffset:     0x0102030405060708,
+		OutputSize:       0x11121314,
+		Kind:             WindowDeltaZstd,
+		Codec:            CodecZstd,
+		Flags:            0x1516,
+		PayloadOffset:    0x1718191a1b1c1d1e,
+		PayloadSize:      0x21222324,
+		ExpandedSize:     0x25262728,
+		SourceOffset:     0x3132333435363738,
+		SourceSize:       0x41424344,
+		SourceFirstChunk: 0x45464748,
+		SourceChunkCount: 0x5152,
+		InstructionCount: 0x5354,
+	}
+	for index := range window.Digest {
+		window.Digest[index] = byte(index + 1)
+	}
+	encoded := MarshalWindowDescriptors([]WindowDescriptor{window})
+	if len(encoded) != WindowDescriptorSize {
+		t.Fatalf("encoded descriptor size = %d, want %d", len(encoded), WindowDescriptorSize)
+	}
+	if got := binary.LittleEndian.Uint64(encoded[0:8]); got != window.OutputOffset {
+		t.Fatalf("output offset = %#x, want %#x", got, window.OutputOffset)
+	}
+	if got := binary.LittleEndian.Uint64(encoded[16:24]); got != window.PayloadOffset {
+		t.Fatalf("payload offset = %#x, want %#x", got, window.PayloadOffset)
+	}
+	if got := binary.LittleEndian.Uint64(encoded[32:40]); got != window.SourceOffset {
+		t.Fatalf("source offset = %#x, want %#x", got, window.SourceOffset)
+	}
+	if !bytes.Equal(encoded[52:84], window.Digest[:]) {
+		t.Fatal("encoded descriptor digest mismatch")
+	}
+	if !bytes.Equal(encoded[84:88], []byte{0, 0, 0, 0}) {
+		t.Fatal("encoded descriptor reserved field is not zero")
+	}
+}

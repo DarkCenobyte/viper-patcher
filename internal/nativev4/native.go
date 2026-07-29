@@ -2,7 +2,6 @@ package nativev4
 
 /*
 #include <stdlib.h>
-#include <string.h>
 #include "native.h"
 */
 import "C"
@@ -265,12 +264,6 @@ func NewSourceVerification(digests []patchformat.Digest, preverified bool) *Sour
 	return &SourceVerification{Digests: digests, States: states}
 }
 
-func cWindow(value patchformat.WindowDescriptor) C.vipr_window {
-	result := C.vipr_window{output_offset: C.uint64_t(value.OutputOffset), output_size: C.uint32_t(value.OutputSize), kind: C.uint8_t(value.Kind), codec: C.uint8_t(value.Codec), flags: C.uint16_t(value.Flags), payload_offset: C.uint64_t(value.PayloadOffset), payload_size: C.uint32_t(value.PayloadSize), expanded_size: C.uint32_t(value.ExpandedSize), source_offset: C.uint64_t(value.SourceOffset), source_size: C.uint32_t(value.SourceSize), source_first_chunk: C.uint32_t(value.SourceFirstChunk), source_chunk_count: C.uint16_t(value.SourceChunkCount), instruction_count: C.uint16_t(value.InstructionCount)}
-	C.memcpy(unsafe.Pointer(&result.digest[0]), unsafe.Pointer(&value.Digest[0]), 32)
-	return result
-}
-
 func verificationPointers(verification *SourceVerification) (*C.uint8_t, C.uint32_t, *C.uint32_t) {
 	if verification == nil || len(verification.Digests) == 0 {
 		return nil, 0, nil
@@ -286,33 +279,31 @@ func (s *Session) ApplyGroup(ctx context.Context, windows []patchformat.WindowDe
 	if len(windows) == 0 {
 		return GroupResult{}, fmt.Errorf("empty window group")
 	}
-	cwindows := make([]C.vipr_window, len(windows))
-	for i := range windows {
-		cwindows[i] = cWindow(windows[i])
-	}
+	encodedWindows := patchformat.MarshalWindowDescriptors(windows)
 	digests, count, states := verificationPointers(verification)
 	cancel, stop := newCancelWord(ctx)
 	defer stop()
 	var result C.vipr_group_result
 	err := withErrorBuffer(func(buffer unsafe.Pointer) C.vipr_status {
-		return C.vipr_apply_group(s.native, &cwindows[0], C.uint32_t(len(cwindows)), C.uint64_t(groupOffset), C.uint32_t(groupSize), C.uint64_t(sourceSize), digests, count, states, (*C.uint8_t)(unsafe.Pointer(&expected[0])), cancel.pointer(), &result, (*C.char)(buffer), errorBufferSize)
+		return C.vipr_apply_group(s.native, (*C.uint8_t)(unsafe.Pointer(&encodedWindows[0])), C.uint32_t(len(windows)), C.uint64_t(groupOffset), C.uint32_t(groupSize), C.uint64_t(sourceSize), digests, count, states, (*C.uint8_t)(unsafe.Pointer(&expected[0])), cancel.pointer(), &result, (*C.char)(buffer), errorBufferSize)
 	})
 	runtime.KeepAlive(s)
-	runtime.KeepAlive(cwindows)
+	runtime.KeepAlive(encodedWindows)
 	runtime.KeepAlive(verification)
 	return resultFromC(result), err
 }
 
 func (s *Session) ApplyChangedWindow(ctx context.Context, window patchformat.WindowDescriptor, sourceSize uint64, verification *SourceVerification) (GroupResult, error) {
-	cwindow := cWindow(window)
+	encodedWindow := patchformat.MarshalWindowDescriptor(window)
 	digests, count, states := verificationPointers(verification)
 	cancel, stop := newCancelWord(ctx)
 	defer stop()
 	var result C.vipr_group_result
 	err := withErrorBuffer(func(buffer unsafe.Pointer) C.vipr_status {
-		return C.vipr_apply_changed_window(s.native, &cwindow, C.uint64_t(sourceSize), digests, count, states, cancel.pointer(), &result, (*C.char)(buffer), errorBufferSize)
+		return C.vipr_apply_changed_window(s.native, (*C.uint8_t)(unsafe.Pointer(&encodedWindow[0])), C.uint64_t(sourceSize), digests, count, states, cancel.pointer(), &result, (*C.char)(buffer), errorBufferSize)
 	})
 	runtime.KeepAlive(s)
+	runtime.KeepAlive(encodedWindow)
 	runtime.KeepAlive(verification)
 	return resultFromC(result), err
 }

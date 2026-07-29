@@ -13,7 +13,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: sudo apt-get update && sudo apt-get install -y libzstd-dev clang
+      - run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build pinned libzstd 1.5.7
+        run: bash scripts/fetch-zstd.sh
       - name: Native and integration tests
         env:
           CC: clang
@@ -22,4 +24,4 @@ jobs:
           CGO_LDFLAGS: "-fsanitize=address,undefined"
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: go test -count=1 ./internal/nativev4 ./internal/patchformat ./internal/patch
+        run: go test -count=1 -tags vipr_static_zstd ./internal/nativev4 ./internal/patchformat ./internal/patch

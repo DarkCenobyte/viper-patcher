@@ -95,7 +95,7 @@ vipr_status vipr_build_window(vipr_io_session *session,
 void vipr_window_result_free(vipr_window_result *result);
 
 vipr_status vipr_apply_group(vipr_io_session *session,
-                             const vipr_window *windows, uint32_t window_count,
+                             const uint8_t *encoded_windows, uint32_t window_count,
                              uint64_t group_offset, uint32_t group_size,
                              uint64_t source_file_size,
                              const uint8_t *source_chunk_digests, uint32_t source_chunk_count,
@@ -105,7 +105,7 @@ vipr_status vipr_apply_group(vipr_io_session *session,
                              vipr_group_result *result,
                              char *error_buffer, size_t error_buffer_size);
 
-vipr_status vipr_apply_changed_window(vipr_io_session *session, const vipr_window *window,
+vipr_status vipr_apply_changed_window(vipr_io_session *session, const uint8_t *encoded_window,
                                       uint64_t source_file_size,
                                       const uint8_t *source_chunk_digests, uint32_t source_chunk_count,
                                       volatile uint32_t *source_chunk_states,
