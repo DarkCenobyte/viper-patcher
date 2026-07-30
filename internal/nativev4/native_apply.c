@@ -352,6 +352,21 @@ malformed:
     return VIPR_STATUS_INVALID_WINDOW;
 }
 
+static uint64_t max_zstd_payload_size(uint32_t expanded_size) {
+    uint64_t size = expanded_size;
+    return size + size / 128u + 4096u;
+}
+
+static int window_log_for_size(uint64_t size) {
+    int log = 10;
+    uint64_t capacity = 1u << 10;
+    while (capacity < size && log < 30) {
+        capacity <<= 1;
+        log++;
+    }
+    return log;
+}
+
 static vipr_status read_patch_payload(vipr_io_session *session,
                                       const vipr_window *window,
                                       vipr_scratch_buffer *buffer,
@@ -360,6 +375,11 @@ static vipr_status read_patch_payload(vipr_io_session *session,
                                       char *error_buffer, size_t error_buffer_size) {
     if (window->payload_size == 0) return VIPR_STATUS_OK;
     if (check_cancel(cancel) != VIPR_STATUS_OK) return VIPR_STATUS_CANCELLED;
+    if (window->codec == VIPR_CODEC_ZSTD &&
+        (window->expanded_size == 0 || window->payload_size > max_zstd_payload_size(window->expanded_size))) {
+        vipr_set_error(error_buffer, error_buffer_size, "V4 zstd payload exceeds bounded compressed size");
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
     if (!vipr_scratch_reserve(buffer, window->payload_size)) {
         vipr_set_error(error_buffer, error_buffer_size, "reserve V4 payload buffer");
         return VIPR_STATUS_MEMORY_LIMIT;
@@ -380,6 +400,35 @@ static vipr_status decompress_payload(vipr_io_session *session,
         vipr_set_error(error_buffer, error_buffer_size, "invalid V4 zstd payload metadata");
         return VIPR_STATUS_INVALID_WINDOW;
     }
+    if (window->payload_size > max_zstd_payload_size(window->expanded_size)) {
+        vipr_set_error(error_buffer, error_buffer_size, "V4 zstd payload exceeds compressed size limit");
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
+    ZSTD_frameHeader frame_header;
+    size_t header_status = ZSTD_getFrameHeader(&frame_header, compressed, window->payload_size);
+    if (ZSTD_isError(header_status) || header_status != 0) {
+        vipr_set_error(error_buffer, error_buffer_size, "invalid or incomplete V4 zstd frame header");
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
+    if (frame_header.dictID != 0) {
+        vipr_set_error(error_buffer, error_buffer_size, "V4 zstd dictionaries are not supported");
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
+    if (frame_header.frameContentSize != ZSTD_CONTENTSIZE_UNKNOWN &&
+        frame_header.frameContentSize != output_size) {
+        vipr_set_error(error_buffer, error_buffer_size, "V4 zstd frame content size is inconsistent");
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
+    uint64_t max_window = output_size < (1u << 10) ? (1u << 10) : output_size;
+    if (frame_header.windowSize > max_window) {
+        vipr_set_error(error_buffer, error_buffer_size, "V4 zstd frame window exceeds expanded payload");
+        return VIPR_STATUS_MEMORY_LIMIT;
+    }
+    size_t frame_size = ZSTD_findFrameCompressedSize(compressed, window->payload_size);
+    if (ZSTD_isError(frame_size) || frame_size != window->payload_size) {
+        vipr_set_error(error_buffer, error_buffer_size, "V4 zstd payload is not exactly one frame");
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
     if (session->decompress_context == NULL) {
         session->decompress_context = ZSTD_createDCtx();
         if (session->decompress_context == NULL) {
@@ -390,6 +439,17 @@ static vipr_status decompress_payload(vipr_io_session *session,
     size_t reset = ZSTD_DCtx_reset(session->decompress_context, ZSTD_reset_session_only);
     if (ZSTD_isError(reset)) {
         vipr_set_zstd_error(error_buffer, error_buffer_size, "reset V4 decoder", reset);
+        return VIPR_STATUS_ZSTD_ERROR;
+    }
+    size_t parameter = ZSTD_DCtx_setParameter(session->decompress_context, ZSTD_d_windowLogMax,
+                                              window_log_for_size(max_window));
+    if (ZSTD_isError(parameter)) {
+        vipr_set_zstd_error(error_buffer, error_buffer_size, "bound V4 decoder window", parameter);
+        return VIPR_STATUS_ZSTD_ERROR;
+    }
+    parameter = ZSTD_DCtx_setParameter(session->decompress_context, ZSTD_d_format, ZSTD_f_zstd1);
+    if (ZSTD_isError(parameter)) {
+        vipr_set_zstd_error(error_buffer, error_buffer_size, "configure V4 decoder format", parameter);
         return VIPR_STATUS_ZSTD_ERROR;
     }
     size_t decoded = ZSTD_decompressDCtx(session->decompress_context, output, output_size,

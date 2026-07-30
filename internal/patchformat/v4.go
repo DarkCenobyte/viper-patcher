@@ -522,6 +522,13 @@ func validateWindowSet(windows []WindowDescriptor, outputSize, inputSize uint64,
 	return nil
 }
 
+func maxZstdPayloadSize(expanded uint32) uint64 {
+	// This deliberately exceeds ZSTD_compressBound for the supported V4
+	// window sizes while preventing a tiny output from declaring a GiB payload.
+	size := uint64(expanded)
+	return size + size/128 + 4096
+}
+
 func validateWindow(window WindowDescriptor, inputSize uint64) error {
 	if window.Flags != 0 {
 		return fmt.Errorf("unsupported window flags")
@@ -546,7 +553,8 @@ func validateWindow(window WindowDescriptor, inputSize uint64) error {
 		}
 	case WindowDeltaZstd:
 		hasSource = true
-		if window.Codec != CodecZstd || window.PayloadSize == 0 || window.ExpandedSize == 0 || window.InstructionCount == 0 || uint64(window.ExpandedSize) > maxInstructionSize || window.SourceSize == 0 {
+		if window.Codec != CodecZstd || window.PayloadSize == 0 || window.ExpandedSize == 0 || window.InstructionCount == 0 || uint64(window.ExpandedSize) > maxInstructionSize ||
+			uint64(window.PayloadSize) > maxZstdPayloadSize(window.ExpandedSize) || window.SourceSize == 0 {
 			return fmt.Errorf("invalid zstd delta metadata")
 		}
 	case WindowReplaceRaw:
@@ -554,7 +562,8 @@ func validateWindow(window WindowDescriptor, inputSize uint64) error {
 			return fmt.Errorf("invalid raw replacement metadata")
 		}
 	case WindowReplaceZstd:
-		if window.Codec != CodecZstd || window.PayloadSize == 0 || window.ExpandedSize != window.OutputSize || window.SourceSize != 0 || window.InstructionCount != 0 {
+		if window.Codec != CodecZstd || window.PayloadSize == 0 || window.ExpandedSize != window.OutputSize ||
+			uint64(window.PayloadSize) > maxZstdPayloadSize(window.ExpandedSize) || window.SourceSize != 0 || window.InstructionCount != 0 {
 			return fmt.Errorf("invalid zstd replacement metadata")
 		}
 	case WindowZero:
