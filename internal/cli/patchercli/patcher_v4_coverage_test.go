@@ -143,15 +143,19 @@ func TestV4PatcherTerminalProgress(t *testing.T) {
 	reporter.Report(progress.Event{FileIndex: 1, FileCount: 2, Path: "a.bin", Stage: progress.StageFilePrepared})
 	reporter.Report(progress.Event{FileIndex: 1, FileCount: 2, Path: "a.bin", Stage: progress.StageFileCompleted})
 	reporter.Report(progress.Event{FileIndex: 1, FileCount: 2, Path: "a.bin", Stage: progress.StageFileCompleted})
+	reporter.Report(progress.Event{Stage: progress.StagePreparing, Overall: 0.95})
 	reporter.Report(progress.Event{Stage: progress.StageCompleted})
 	reporter.Finish()
 	text := output.String()
-	for _, want := range []string{"Before: a.bin", "Applying:", "Verifying:", "Prepared: a.bin", "Committed: a.bin"} {
+	for _, want := range []string{"Before: a.bin", "Applying:", "Verifying:", "Prepared: a.bin", "Committed: a.bin", "Committing prepared replacements..."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("progress output %q does not contain %q", text, want)
 		}
 	}
 	if strings.Count(text, "Committed: a.bin") != 1 {
 		t.Fatalf("duplicate commit line in %q", text)
+	}
+	if strings.Contains(text, "[0/0] Before:") {
+		t.Fatalf("commit phase was rendered as an empty file event in %q", text)
 	}
 }

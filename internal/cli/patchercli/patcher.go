@@ -143,6 +143,11 @@ func (reporter *terminalProgress) Report(event progress.Event) {
 		reporter.finishLocked()
 		return
 	}
+	if event.Stage == progress.StagePreparing {
+		reporter.finishLocked()
+		fmt.Fprintln(reporter.writer, "Committing prepared replacements...")
+		return
+	}
 	if event.Stage == progress.StageFilePrepared {
 		reporter.finishLocked()
 		fmt.Fprintf(reporter.writer, "  Prepared: %s\n", event.Path)

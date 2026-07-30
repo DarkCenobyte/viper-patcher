@@ -91,14 +91,17 @@ func applyOpened(ctx context.Context, opened *openedPatch, release func() error,
 	token := nativev4.NewCancelToken(ctx)
 	defer token.Close()
 	prepared := make([]preparedFile, len(opened.parsed.Header.Files))
+	applyProgress := newApplyProgress(callback, opened.parsed.Header.Files, direction)
 	fileWorkers, perFileWorkers := applicationWorkers(profile, effectiveWorkers(workers), len(prepared))
 	operationErr := parallelFor(ctx, len(prepared), fileWorkers, func(ctx context.Context, index int) error {
 		entry := opened.parsed.Header.Files[index]
-		item, err := prepareApplicationFile(ctx, token, opened, root, entry, direction, perFileWorkers, verify, durability, profile, index, len(prepared), callback)
+		fileCallback := applyProgress.callbackForFile(index)
+		item, err := prepareApplicationFile(ctx, token, opened, root, entry, direction, perFileWorkers, verify, durability, profile, index, len(prepared), fileCallback)
 		if err != nil {
 			return fmt.Errorf("prepare %q: %w", entry.Path, err)
 		}
 		prepared[index] = item
+		applyProgress.markPrepared(index, len(prepared), entry.Path)
 		return nil
 	})
 	if operationErr != nil {
