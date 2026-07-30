@@ -587,7 +587,6 @@ vipr_status vipr_apply_group(vipr_io_session *session,
         return VIPR_STATUS_MEMORY_LIMIT;
     }
     uint8_t *buffer = session->group_buffer.data;
-    memset(buffer, 0, group_size);
     vipr_status status = VIPR_STATUS_OK;
     uint64_t expected_offset = group_offset;
     for (uint32_t index = 0; index < window_count; ++index) {
