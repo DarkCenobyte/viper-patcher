@@ -2,16 +2,15 @@ package patch
 
 import (
 	"context"
-	"runtime"
 	"sync"
+
+	"github.com/DarkCenobyte/viper-patcher/internal/workerbudget"
 )
 
 func effectiveWorkers(requested int) int {
-	if requested > 0 {
-		return requested
-	}
-	return max(1, runtime.GOMAXPROCS(0))
+	return workerbudget.Effective(requested)
 }
+
 func parallelFor(ctx context.Context, count, workers int, fn func(context.Context, int) error) error {
 	if count == 0 {
 		return nil
