@@ -83,7 +83,6 @@ func stableRootUnchanged(root *installationRoot, file *os.File, name string, ide
 
 type preparedFile struct {
 	path, temp, backup string
-	source             *os.File
 	identity           fs.FileInfo
 }
 
@@ -121,12 +120,6 @@ func commitPrepared(root *installationRoot, files []preparedFile, durability Dur
 			if err := root.root.Remove(files[i].temp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("remove abandoned output %q: %w", files[i].temp, err))
 			}
-			if files[i].source != nil {
-				if err := files[i].source.Close(); err != nil {
-					rollbackErrors = append(rollbackErrors, fmt.Errorf("close abandoned source %q: %w", files[i].path, err))
-				}
-				files[i].source = nil
-			}
 		}
 		if rollbackErr := errors.Join(rollbackErrors...); rollbackErr != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("rollback after failed V4 commit: %w", rollbackErr))
@@ -135,13 +128,22 @@ func commitPrepared(root *installationRoot, files []preparedFile, durability Dur
 
 	for i := range files {
 		item := &files[i]
-		if err := stableRootUnchanged(root, item.source, item.path, item.identity); err != nil {
+		current, _, currentName, err := root.openStableRegularFile(item.path)
+		if err != nil {
+			return fmt.Errorf("reopen %q before replacement: %w", item.path, err)
+		}
+		if currentName != item.path {
+			_ = current.Close()
+			return fmt.Errorf("reopened path changed from %q to %q", item.path, currentName)
+		}
+		verifyErr := stableRootUnchanged(root, current, item.path, item.identity)
+		closeErr := current.Close()
+		if err := errors.Join(
+			wrapOperationError("verify installed source before replacement", item.path, verifyErr),
+			wrapOperationError("close installed source before replacement", item.path, closeErr),
+		); err != nil {
 			return err
 		}
-		if err := item.source.Close(); err != nil {
-			return err
-		}
-		item.source = nil
 
 		backup, err := reserveRootPath(root, filepath.Dir(item.path), ".viper-v4-backup-")
 		if err != nil {
@@ -152,8 +154,14 @@ func commitPrepared(root *installationRoot, files []preparedFile, durability Dur
 			return fmt.Errorf("backup %q: %w", item.path, err)
 		}
 		if err := root.root.Rename(item.temp, item.path); err != nil {
-			_ = root.root.Rename(item.backup, item.path)
-			return fmt.Errorf("replace %q: %w", item.path, err)
+			replaceErr := fmt.Errorf("replace %q: %w", item.path, err)
+			if restoreErr := root.root.Rename(item.backup, item.path); restoreErr != nil {
+				return errors.Join(
+					replaceErr,
+					fmt.Errorf("restore %q from retained backup %q: %w", item.path, item.backup, restoreErr),
+				)
+			}
+			return replaceErr
 		}
 		committed++
 		if durability == DurabilityDurable {

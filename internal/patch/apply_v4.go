@@ -102,9 +102,6 @@ func applyOpened(ctx context.Context, opened *openedPatch, release func() error,
 	})
 	if operationErr != nil {
 		for i := range prepared {
-			if prepared[i].source != nil {
-				_ = prepared[i].source.Close()
-			}
 			if prepared[i].temp != "" {
 				_ = root.root.Remove(prepared[i].temp)
 			}
@@ -174,6 +171,7 @@ func prepareApplicationFile(ctx context.Context, token *nativev4.CancelToken, op
 	if err != nil {
 		return preparedFile{}, err
 	}
+	defer source.Close()
 	inputSize, outputSize, inputRoot, _, inputChunks, outputChunks, windows := directionData(entry, direction)
 	if identity.Size() < 0 || uint64(identity.Size()) != inputSize {
 		source.Close()
@@ -291,7 +289,7 @@ func prepareApplicationFile(ctx context.Context, token *nativev4.CancelToken, op
 		return preparedFile{}, err
 	}
 	cleanup = false
-	return preparedFile{path: targetName, temp: temporaryName, source: source, identity: identity}, nil
+	return preparedFile{path: targetName, temp: temporaryName, identity: identity}, nil
 }
 
 func shouldPreallocateOutput(durability DurabilityMode, profile IOProfile) bool {
