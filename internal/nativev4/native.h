@@ -69,6 +69,7 @@ typedef struct {
 
 const char *vipr_status_name(vipr_status status);
 const char *vipr_zstd_version(void);
+const char *vipr_blake3_backend(void);
 
 vipr_io_session *vipr_session_create(uintptr_t source_handle, uintptr_t patch_handle, uintptr_t output_handle,
                                      int need_source, int need_patch, int need_output, int io_profile,
@@ -92,7 +93,10 @@ vipr_status vipr_build_window(vipr_io_session *session,
                               uint32_t window_size, int compression_level, uint8_t optimization_mode,
                               volatile uint32_t *cancel, vipr_window_result *result,
                               char *error_buffer, size_t error_buffer_size);
-void vipr_window_result_free(vipr_window_result *result);
+vipr_status vipr_write_window_payload(vipr_io_session *session, const vipr_window_result *result,
+                                      uint64_t output_offset,
+                                      char *error_buffer, size_t error_buffer_size);
+void vipr_window_result_release(vipr_io_session *session, vipr_window_result *result);
 
 vipr_status vipr_apply_group(vipr_io_session *session,
                              const uint8_t *encoded_windows, uint32_t window_count,
@@ -113,7 +117,7 @@ vipr_status vipr_apply_changed_window(vipr_io_session *session, const uint8_t *e
                                       vipr_group_result *result,
                                       char *error_buffer, size_t error_buffer_size);
 
-vipr_status vipr_set_file_size(vipr_io_session *session, uint64_t size,
+vipr_status vipr_set_file_size(vipr_io_session *session, uint64_t size, int preallocate,
                                char *error_buffer, size_t error_buffer_size);
 vipr_status vipr_flush_output(vipr_io_session *session, char *error_buffer, size_t error_buffer_size);
 

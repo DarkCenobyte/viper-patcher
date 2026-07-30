@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -72,20 +73,18 @@ func checkStatus(status C.vipr_status, errorBuffer unsafe.Pointer) error {
 	return &NativeError{Status: Status(status), Detail: detail}
 }
 
-func withErrorBuffer(call func(unsafe.Pointer) C.vipr_status) error {
-	buffer := C.calloc(1, errorBufferSize)
-	if buffer == nil {
-		return fmt.Errorf("allocate native error buffer")
-	}
-	defer C.free(buffer)
-	return checkStatus(call(buffer), buffer)
+func withErrorBuffer(call func(*C.char) C.vipr_status) error {
+	var buffer [errorBufferSize]byte
+	pointer := (*C.char)(unsafe.Pointer(&buffer[0]))
+	return checkStatus(call(pointer), unsafe.Pointer(pointer))
 }
 
 type Session struct {
-	native *C.vipr_io_session
-	source *os.File
-	patch  *os.File
-	output *os.File
+	native            *C.vipr_io_session
+	source            *os.File
+	patch             *os.File
+	output            *os.File
+	windowDescriptors []byte
 }
 
 type IOProfile uint8
@@ -111,14 +110,14 @@ func NewSessionWithProfile(source, patch, output *os.File, profile IOProfile) (*
 		}
 		return C.uintptr_t(file.Fd())
 	}
-	buffer := C.calloc(1, errorBufferSize)
-	if buffer == nil {
-		return nil, fmt.Errorf("allocate native error buffer")
-	}
-	defer C.free(buffer)
-	native := C.vipr_session_create(raw(source), raw(patch), raw(output), boolInt(source != nil), boolInt(patch != nil), boolInt(output != nil), C.int(profile), (*C.char)(buffer), errorBufferSize)
+	var buffer [errorBufferSize]byte
+	pointer := (*C.char)(unsafe.Pointer(&buffer[0]))
+	native := C.vipr_session_create(raw(source), raw(patch), raw(output), boolInt(source != nil), boolInt(patch != nil), boolInt(output != nil), C.int(profile), pointer, errorBufferSize)
+	runtime.KeepAlive(source)
+	runtime.KeepAlive(patch)
+	runtime.KeepAlive(output)
 	if native == nil {
-		return nil, &NativeError{Status: StatusInternal, Detail: C.GoString((*C.char)(buffer))}
+		return nil, &NativeError{Status: StatusInternal, Detail: C.GoString(pointer)}
 	}
 	return &Session{native: native, source: source, patch: patch, output: output}, nil
 }
@@ -140,7 +139,8 @@ func (s *Session) Close() error {
 	return nil
 }
 
-func ZstdVersion() string { return C.GoString(C.vipr_zstd_version()) }
+func ZstdVersion() string   { return C.GoString(C.vipr_zstd_version()) }
+func BLAKE3Backend() string { return C.GoString(C.vipr_blake3_backend()) }
 
 func HashBytes(data []byte) (patchformat.Digest, error) {
 	var result patchformat.Digest
@@ -165,8 +165,17 @@ func TreeRoot(size, chunkSize uint64, digests []patchformat.Digest) (patchformat
 }
 
 func (s *Session) HashFileTree(ctx context.Context, usePatch bool, size, chunkSize uint64) (patchformat.Digest, []patchformat.Digest, error) {
+	token := NewCancelToken(ctx)
+	defer token.Close()
+	return s.HashFileTreeWithToken(token, usePatch, size, chunkSize)
+}
+
+func (s *Session) HashFileTreeWithToken(token *CancelToken, usePatch bool, size, chunkSize uint64) (patchformat.Digest, []patchformat.Digest, error) {
 	if s == nil || s.native == nil {
 		return patchformat.Digest{}, nil, fmt.Errorf("native session is unavailable")
+	}
+	if chunkSize == 0 {
+		return patchformat.Digest{}, nil, fmt.Errorf("chunk size must be positive")
 	}
 	count := 0
 	if size != 0 {
@@ -174,74 +183,154 @@ func (s *Session) HashFileTree(ctx context.Context, usePatch bool, size, chunkSi
 	}
 	digests := make([]patchformat.Digest, count)
 	var root patchformat.Digest
-	cancel, stop := newCancelWord(ctx)
-	defer stop()
 	var pointer *C.uint8_t
 	if len(digests) != 0 {
 		pointer = (*C.uint8_t)(unsafe.Pointer(&digests[0][0]))
 	}
-	err := withErrorBuffer(func(buffer unsafe.Pointer) C.vipr_status {
-		return C.vipr_hash_file_tree(s.native, boolInt(usePatch), C.uint64_t(size), C.uint64_t(chunkSize), pointer, C.uint32_t(len(digests)), (*C.uint8_t)(unsafe.Pointer(&root[0])), cancel.pointer(), (*C.char)(buffer), errorBufferSize)
+	err := withErrorBuffer(func(buffer *C.char) C.vipr_status {
+		return C.vipr_hash_file_tree(s.native, boolInt(usePatch), C.uint64_t(size), C.uint64_t(chunkSize), pointer, C.uint32_t(len(digests)), (*C.uint8_t)(unsafe.Pointer(&root[0])), token.pointer(), buffer, errorBufferSize)
 	})
 	runtime.KeepAlive(s)
 	runtime.KeepAlive(digests)
+	runtime.KeepAlive(token)
 	return root, digests, err
 }
 
 func (s *Session) HashFile(ctx context.Context, usePatch bool, size uint64) (patchformat.Digest, error) {
+	token := NewCancelToken(ctx)
+	defer token.Close()
+	return s.HashFileWithToken(token, usePatch, size)
+}
+
+func (s *Session) HashFileWithToken(token *CancelToken, usePatch bool, size uint64) (patchformat.Digest, error) {
+	if s == nil || s.native == nil {
+		return patchformat.Digest{}, fmt.Errorf("native session is unavailable")
+	}
 	var result patchformat.Digest
-	cancel, stop := newCancelWord(ctx)
-	defer stop()
-	err := withErrorBuffer(func(buffer unsafe.Pointer) C.vipr_status {
-		return C.vipr_hash_file_standard(s.native, boolInt(usePatch), C.uint64_t(size), (*C.uint8_t)(unsafe.Pointer(&result[0])), cancel.pointer(), (*C.char)(buffer), errorBufferSize)
+	err := withErrorBuffer(func(buffer *C.char) C.vipr_status {
+		return C.vipr_hash_file_standard(s.native, boolInt(usePatch), C.uint64_t(size), (*C.uint8_t)(unsafe.Pointer(&result[0])), token.pointer(), buffer, errorBufferSize)
 	})
 	runtime.KeepAlive(s)
+	runtime.KeepAlive(token)
 	return result, err
 }
 
-type cancelWord struct {
+type CancelToken struct {
 	value uint32
-	done  chan struct{}
+	stop  func() bool
+	once  sync.Once
 }
 
-func newCancelWord(ctx context.Context) (*cancelWord, func()) {
-	word := &cancelWord{done: make(chan struct{})}
+func NewCancelToken(ctx context.Context) *CancelToken {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	go func() {
-		select {
-		case <-ctx.Done():
-			atomic.StoreUint32(&word.value, 1)
-		case <-word.done:
-		}
-	}()
-	return word, func() { close(word.done) }
+	token := &CancelToken{}
+	if ctx.Err() != nil {
+		atomic.StoreUint32(&token.value, 1)
+	}
+	token.stop = context.AfterFunc(ctx, func() {
+		atomic.StoreUint32(&token.value, 1)
+	})
+	return token
 }
-func (w *cancelWord) pointer() *C.uint32_t { return (*C.uint32_t)(unsafe.Pointer(&w.value)) }
+
+func (t *CancelToken) Close() {
+	if t == nil {
+		return
+	}
+	t.once.Do(func() {
+		if t.stop != nil {
+			t.stop()
+		}
+	})
+}
+
+func (t *CancelToken) pointer() *C.uint32_t {
+	if t == nil {
+		return nil
+	}
+	return (*C.uint32_t)(unsafe.Pointer(&t.value))
+}
 
 type BuiltWindow struct {
 	Descriptor patchformat.WindowDescriptor
 	Payload    []byte
 }
 
+type BorrowedWindow struct {
+	session    *Session
+	result     C.vipr_window_result
+	Descriptor patchformat.WindowDescriptor
+	released   bool
+}
+
+func descriptorFromResult(offset uint64, outputSize uint32, result *C.vipr_window_result) patchformat.WindowDescriptor {
+	descriptor := patchformat.WindowDescriptor{
+		OutputOffset:     offset,
+		OutputSize:       outputSize,
+		Kind:             patchformat.WindowKind(result.kind),
+		Codec:            patchformat.Codec(result.codec),
+		Flags:            uint16(result.flags),
+		PayloadSize:      uint32(result.payload_size),
+		ExpandedSize:     uint32(result.expanded_size),
+		SourceOffset:     uint64(result.source_offset),
+		SourceSize:       uint32(result.source_size),
+		SourceFirstChunk: uint32(result.source_first_chunk),
+		SourceChunkCount: uint16(result.source_chunk_count),
+		InstructionCount: uint16(result.instruction_count),
+	}
+	copy(descriptor.Digest[:], unsafe.Slice((*byte)(unsafe.Pointer(&result.digest[0])), len(descriptor.Digest)))
+	return descriptor
+}
+
 func (s *Session) BuildWindow(ctx context.Context, sourceSize, targetSize, offset uint64, outputSize, windowSize uint32, level int, mode patchformat.OptimizationMode) (BuiltWindow, error) {
-	var result C.vipr_window_result
-	cancel, stop := newCancelWord(ctx)
-	defer stop()
-	err := withErrorBuffer(func(buffer unsafe.Pointer) C.vipr_status {
-		return C.vipr_build_window(s.native, C.uint64_t(sourceSize), C.uint64_t(targetSize), C.uint64_t(offset), C.uint32_t(outputSize), C.uint32_t(windowSize), C.int(level), C.uint8_t(mode), cancel.pointer(), &result, (*C.char)(buffer), errorBufferSize)
-	})
+	token := NewCancelToken(ctx)
+	defer token.Close()
+	borrowed, err := s.BuildWindowBorrowed(token, sourceSize, targetSize, offset, outputSize, windowSize, level, mode)
 	if err != nil {
-		C.vipr_window_result_free(&result)
 		return BuiltWindow{}, err
 	}
-	payload := C.GoBytes(unsafe.Pointer(result.payload), C.int(result.payload_size))
-	descriptor := patchformat.WindowDescriptor{OutputOffset: offset, OutputSize: outputSize, Kind: patchformat.WindowKind(result.kind), Codec: patchformat.Codec(result.codec), Flags: uint16(result.flags), PayloadSize: uint32(result.payload_size), ExpandedSize: uint32(result.expanded_size), SourceOffset: uint64(result.source_offset), SourceSize: uint32(result.source_size), SourceFirstChunk: uint32(result.source_first_chunk), SourceChunkCount: uint16(result.source_chunk_count), InstructionCount: uint16(result.instruction_count)}
-	copy(descriptor.Digest[:], C.GoBytes(unsafe.Pointer(&result.digest[0]), 32))
-	C.vipr_window_result_free(&result)
+	defer borrowed.Release()
+	payload := C.GoBytes(unsafe.Pointer(borrowed.result.payload), C.int(borrowed.result.payload_size))
+	return BuiltWindow{Descriptor: borrowed.Descriptor, Payload: payload}, nil
+}
+
+func (s *Session) BuildWindowBorrowed(token *CancelToken, sourceSize, targetSize, offset uint64, outputSize, windowSize uint32, level int, mode patchformat.OptimizationMode) (*BorrowedWindow, error) {
+	if s == nil || s.native == nil {
+		return nil, fmt.Errorf("native session is unavailable")
+	}
+	borrowed := &BorrowedWindow{session: s}
+	err := withErrorBuffer(func(buffer *C.char) C.vipr_status {
+		return C.vipr_build_window(s.native, C.uint64_t(sourceSize), C.uint64_t(targetSize), C.uint64_t(offset), C.uint32_t(outputSize), C.uint32_t(windowSize), C.int(level), C.uint8_t(mode), token.pointer(), &borrowed.result, buffer, errorBufferSize)
+	})
+	if err != nil {
+		return nil, err
+	}
+	borrowed.Descriptor = descriptorFromResult(offset, outputSize, &borrowed.result)
 	runtime.KeepAlive(s)
-	return BuiltWindow{Descriptor: descriptor, Payload: payload}, nil
+	runtime.KeepAlive(token)
+	return borrowed, nil
+}
+
+func (w *BorrowedWindow) WritePayloadAt(offset uint64) error {
+	if w == nil || w.session == nil || w.released {
+		return fmt.Errorf("borrowed V4 window is unavailable")
+	}
+	err := withErrorBuffer(func(buffer *C.char) C.vipr_status {
+		return C.vipr_write_window_payload(w.session.native, &w.result, C.uint64_t(offset), buffer, errorBufferSize)
+	})
+	runtime.KeepAlive(w.session)
+	return err
+}
+
+func (w *BorrowedWindow) Release() {
+	if w == nil || w.released {
+		return
+	}
+	C.vipr_window_result_release(w.session.native, &w.result)
+	w.released = true
+	w.session = nil
 }
 
 type GroupResult struct {
@@ -276,45 +365,81 @@ func resultFromC(value C.vipr_group_result) GroupResult {
 }
 
 func (s *Session) ApplyGroup(ctx context.Context, windows []patchformat.WindowDescriptor, groupOffset uint64, groupSize uint32, sourceSize uint64, verification *SourceVerification, expected patchformat.Digest) (GroupResult, error) {
+	token := NewCancelToken(ctx)
+	defer token.Close()
+	return s.ApplyGroupWithToken(token, windows, groupOffset, groupSize, sourceSize, verification, expected)
+}
+
+func (s *Session) ApplyGroupWithToken(token *CancelToken, windows []patchformat.WindowDescriptor, groupOffset uint64, groupSize uint32, sourceSize uint64, verification *SourceVerification, expected patchformat.Digest) (GroupResult, error) {
+	if s == nil || s.native == nil {
+		return GroupResult{}, fmt.Errorf("native session is unavailable")
+	}
 	if len(windows) == 0 {
 		return GroupResult{}, fmt.Errorf("empty window group")
 	}
-	encodedWindows := patchformat.MarshalWindowDescriptors(windows)
+	required := len(windows) * patchformat.WindowDescriptorSize
+	if cap(s.windowDescriptors) < required {
+		s.windowDescriptors = make([]byte, required)
+	} else {
+		s.windowDescriptors = s.windowDescriptors[:required]
+	}
+	for index, window := range windows {
+		encoded := patchformat.MarshalWindowDescriptor(window)
+		start := index * patchformat.WindowDescriptorSize
+		copy(s.windowDescriptors[start:start+patchformat.WindowDescriptorSize], encoded[:])
+	}
+	encodedWindows := s.windowDescriptors
 	digests, count, states := verificationPointers(verification)
-	cancel, stop := newCancelWord(ctx)
-	defer stop()
 	var result C.vipr_group_result
-	err := withErrorBuffer(func(buffer unsafe.Pointer) C.vipr_status {
-		return C.vipr_apply_group(s.native, (*C.uint8_t)(unsafe.Pointer(&encodedWindows[0])), C.uint32_t(len(windows)), C.uint64_t(groupOffset), C.uint32_t(groupSize), C.uint64_t(sourceSize), digests, count, states, (*C.uint8_t)(unsafe.Pointer(&expected[0])), cancel.pointer(), &result, (*C.char)(buffer), errorBufferSize)
+	err := withErrorBuffer(func(buffer *C.char) C.vipr_status {
+		return C.vipr_apply_group(s.native, (*C.uint8_t)(unsafe.Pointer(&encodedWindows[0])), C.uint32_t(len(windows)), C.uint64_t(groupOffset), C.uint32_t(groupSize), C.uint64_t(sourceSize), digests, count, states, (*C.uint8_t)(unsafe.Pointer(&expected[0])), token.pointer(), &result, buffer, errorBufferSize)
 	})
 	runtime.KeepAlive(s)
 	runtime.KeepAlive(encodedWindows)
 	runtime.KeepAlive(verification)
+	runtime.KeepAlive(token)
 	return resultFromC(result), err
 }
 
 func (s *Session) ApplyChangedWindow(ctx context.Context, window patchformat.WindowDescriptor, sourceSize uint64, verification *SourceVerification) (GroupResult, error) {
+	token := NewCancelToken(ctx)
+	defer token.Close()
+	return s.ApplyChangedWindowWithToken(token, window, sourceSize, verification)
+}
+
+func (s *Session) ApplyChangedWindowWithToken(token *CancelToken, window patchformat.WindowDescriptor, sourceSize uint64, verification *SourceVerification) (GroupResult, error) {
+	if s == nil || s.native == nil {
+		return GroupResult{}, fmt.Errorf("native session is unavailable")
+	}
 	encodedWindow := patchformat.MarshalWindowDescriptor(window)
 	digests, count, states := verificationPointers(verification)
-	cancel, stop := newCancelWord(ctx)
-	defer stop()
 	var result C.vipr_group_result
-	err := withErrorBuffer(func(buffer unsafe.Pointer) C.vipr_status {
-		return C.vipr_apply_changed_window(s.native, (*C.uint8_t)(unsafe.Pointer(&encodedWindow[0])), C.uint64_t(sourceSize), digests, count, states, cancel.pointer(), &result, (*C.char)(buffer), errorBufferSize)
+	err := withErrorBuffer(func(buffer *C.char) C.vipr_status {
+		return C.vipr_apply_changed_window(s.native, (*C.uint8_t)(unsafe.Pointer(&encodedWindow[0])), C.uint64_t(sourceSize), digests, count, states, token.pointer(), &result, buffer, errorBufferSize)
 	})
 	runtime.KeepAlive(s)
 	runtime.KeepAlive(encodedWindow)
 	runtime.KeepAlive(verification)
+	runtime.KeepAlive(token)
 	return resultFromC(result), err
 }
-func (s *Session) SetOutputSize(size uint64) error {
-	return withErrorBuffer(func(buffer unsafe.Pointer) C.vipr_status {
-		return C.vipr_set_file_size(s.native, C.uint64_t(size), (*C.char)(buffer), errorBufferSize)
+
+func (s *Session) SetOutputSize(size uint64, preallocate ...bool) error {
+	if s == nil || s.native == nil {
+		return fmt.Errorf("native session is unavailable")
+	}
+	return withErrorBuffer(func(buffer *C.char) C.vipr_status {
+		enabled := len(preallocate) != 0 && preallocate[0]
+		return C.vipr_set_file_size(s.native, C.uint64_t(size), boolInt(enabled), buffer, errorBufferSize)
 	})
 }
+
 func (s *Session) FlushOutput() error {
-	return withErrorBuffer(func(buffer unsafe.Pointer) C.vipr_status {
-		return C.vipr_flush_output(s.native, (*C.char)(buffer), errorBufferSize)
+	if s == nil || s.native == nil {
+		return fmt.Errorf("native session is unavailable")
+	}
+	return withErrorBuffer(func(buffer *C.char) C.vipr_status {
+		return C.vipr_flush_output(s.native, buffer, errorBufferSize)
 	})
 }
 
@@ -322,9 +447,90 @@ func (s *Session) CloneOutput(size uint64) error {
 	if s == nil || s.native == nil {
 		return fmt.Errorf("native session is unavailable")
 	}
-	err := withErrorBuffer(func(buffer unsafe.Pointer) C.vipr_status {
-		return C.vipr_clone_output(s.native, C.uint64_t(size), (*C.char)(buffer), errorBufferSize)
+	err := withErrorBuffer(func(buffer *C.char) C.vipr_status {
+		return C.vipr_clone_output(s.native, C.uint64_t(size), buffer, errorBufferSize)
 	})
 	runtime.KeepAlive(s)
 	return err
+}
+
+type SessionPool struct {
+	available chan *Session
+	all       []*Session
+	closed    chan struct{}
+	once      sync.Once
+}
+
+func NewSessionPool(count int, source, patch, output *os.File, profile IOProfile) (*SessionPool, error) {
+	if count < 1 {
+		return nil, fmt.Errorf("native session pool size must be positive")
+	}
+	pool := &SessionPool{
+		available: make(chan *Session, count),
+		all:       make([]*Session, 0, count),
+		closed:    make(chan struct{}),
+	}
+	for range count {
+		session, err := NewSessionWithProfile(source, patch, output, profile)
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
+		pool.all = append(pool.all, session)
+		pool.available <- session
+	}
+	return pool, nil
+}
+
+func (p *SessionPool) Acquire(ctx context.Context) (*Session, error) {
+	if p == nil || p.available == nil || p.closed == nil {
+		return nil, fmt.Errorf("native session pool is unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-p.closed:
+		return nil, fmt.Errorf("native session pool is closed")
+	default:
+	}
+	select {
+	case session := <-p.available:
+		select {
+		case <-p.closed:
+			p.available <- session
+			return nil, fmt.Errorf("native session pool is closed")
+		default:
+			return session, nil
+		}
+	case <-p.closed:
+		return nil, fmt.Errorf("native session pool is closed")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (p *SessionPool) Release(session *Session) {
+	if p == nil || session == nil || p.available == nil {
+		return
+	}
+	p.available <- session
+}
+
+func (p *SessionPool) Close() error {
+	if p == nil {
+		return nil
+	}
+	var first error
+	p.once.Do(func() {
+		close(p.closed)
+		for range len(p.all) {
+			session := <-p.available
+			if err := session.Close(); err != nil && first == nil {
+				first = err
+			}
+		}
+		p.all = nil
+	})
+	return first
 }

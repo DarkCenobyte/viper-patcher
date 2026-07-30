@@ -87,11 +87,13 @@ func applyOpened(ctx context.Context, opened *openedPatch, release func() error,
 	}
 	defer func() { resultErr = errors.Join(resultErr, root.Close(), release()) }()
 
+	token := nativev4.NewCancelToken(ctx)
+	defer token.Close()
 	prepared := make([]preparedFile, len(opened.parsed.Header.Files))
 	fileWorkers, perFileWorkers := applicationWorkers(profile, effectiveWorkers(workers), len(prepared))
 	operationErr := parallelFor(ctx, len(prepared), fileWorkers, func(ctx context.Context, index int) error {
 		entry := opened.parsed.Header.Files[index]
-		item, err := prepareApplicationFile(ctx, opened, root, entry, direction, perFileWorkers, verify, durability, profile, index, len(prepared), callback)
+		item, err := prepareApplicationFile(ctx, token, opened, root, entry, direction, perFileWorkers, verify, durability, profile, index, len(prepared), callback)
 		if err != nil {
 			return fmt.Errorf("prepare %q: %w", entry.Path, err)
 		}
@@ -167,7 +169,7 @@ func directionData(entry patchformat.FileEntry, direction Direction) (inputSize,
 	return entry.SourceSize, entry.TargetSize, entry.SourceDigest, entry.TargetDigest, entry.SourceChunks, entry.TargetChunks, entry.ForwardWindows
 }
 
-func prepareApplicationFile(ctx context.Context, opened *openedPatch, root *installationRoot, entry patchformat.FileEntry, direction Direction, workerBudget int, verify VerifyMode, durability DurabilityMode, profile IOProfile, index, count int, callback progress.Callback) (preparedFile, error) {
+func prepareApplicationFile(ctx context.Context, token *nativev4.CancelToken, opened *openedPatch, root *installationRoot, entry patchformat.FileEntry, direction Direction, workerBudget int, verify VerifyMode, durability DurabilityMode, profile IOProfile, index, count int, callback progress.Callback) (preparedFile, error) {
 	source, identity, targetName, err := root.openStableRegularFile(entry.Path)
 	if err != nil {
 		return preparedFile{}, err
@@ -185,7 +187,7 @@ func prepareApplicationFile(ctx context.Context, opened *openedPatch, root *inst
 			source.Close()
 			return preparedFile{}, sessionErr
 		}
-		actual, _, hashErr := session.HashFileTree(ctx, false, inputSize, patchformat.IdentityChunkSize)
+		actual, _, hashErr := session.HashFileTreeWithToken(token, false, inputSize, patchformat.IdentityChunkSize)
 		session.Close()
 		if hashErr != nil {
 			source.Close()
@@ -234,7 +236,7 @@ func prepareApplicationFile(ctx context.Context, opened *openedPatch, root *inst
 	if cloned && !sourceStrictlyVerified {
 		// A clone inherits every unchanged byte from the installed source. Verify
 		// that source once, then skip all SAME windows without rereading them.
-		actual, _, hashErr := patchSession.HashFileTree(ctx, false, inputSize, patchformat.IdentityChunkSize)
+		actual, _, hashErr := patchSession.HashFileTreeWithToken(token, false, inputSize, patchformat.IdentityChunkSize)
 		if hashErr != nil {
 			source.Close()
 			return preparedFile{}, hashErr
@@ -247,15 +249,28 @@ func prepareApplicationFile(ctx context.Context, opened *openedPatch, root *inst
 		sourceStrictlyVerified = true
 	}
 	if !cloned {
-		if err = patchSession.SetOutputSize(outputSize); err != nil {
+		if err = patchSession.SetOutputSize(outputSize, shouldPreallocateOutput(durability, profile)); err != nil {
 			source.Close()
 			return preparedFile{}, err
 		}
 	}
-	if cloned {
-		err = applyClonedWindows(ctx, patchSession, windows, inputSize, verification, workerBudget, index, count, entry.Path, callback)
-	} else {
-		err = applyWindowGroups(ctx, patchSession, windows, inputSize, outputSize, outputChunks, verification, workerBudget, index, count, entry.Path, callback)
+	workCount := applicationWorkCount(cloned, windows, outputSize)
+	if workCount != 0 {
+		poolSize := min(max(1, workerBudget), workCount)
+		pool, poolErr := nativev4.NewSessionPool(poolSize, source, opened.file, output, nativeIOProfile(profile))
+		if poolErr != nil {
+			source.Close()
+			return preparedFile{}, poolErr
+		}
+		if cloned {
+			err = applyClonedWindows(ctx, token, pool, windows, inputSize, verification, workerBudget, index, count, entry.Path, callback)
+		} else {
+			err = applyWindowGroups(ctx, token, pool, windows, inputSize, outputSize, outputChunks, verification, workerBudget, index, count, entry.Path, callback)
+		}
+		poolCloseErr := pool.Close()
+		if err == nil {
+			err = poolCloseErr
+		}
 	}
 	if err != nil {
 		source.Close()
@@ -279,6 +294,23 @@ func prepareApplicationFile(ctx context.Context, opened *openedPatch, root *inst
 	return preparedFile{path: targetName, temp: temporaryName, source: source, identity: identity}, nil
 }
 
+func shouldPreallocateOutput(durability DurabilityMode, profile IOProfile) bool {
+	return durability == DurabilityDurable && (profile == IOSSD || profile == IONVMe)
+}
+
+func applicationWorkCount(cloned bool, windows []patchformat.WindowDescriptor, outputSize uint64) int {
+	if cloned {
+		count := 0
+		for _, window := range windows {
+			if window.Kind != patchformat.WindowSame {
+				count++
+			}
+		}
+		return count
+	}
+	return len(groupWindows(windows, outputSize))
+}
+
 func cloneWorthTrying(windows []patchformat.WindowDescriptor, inputSize, outputSize uint64) bool {
 	if inputSize != outputSize || outputSize < 1<<20 {
 		return false
@@ -291,7 +323,7 @@ func cloneWorthTrying(windows []patchformat.WindowDescriptor, inputSize, outputS
 	}
 	return same*100 >= outputSize*90
 }
-func applyClonedWindows(ctx context.Context, session *nativev4.Session, windows []patchformat.WindowDescriptor, sourceSize uint64, verification *nativev4.SourceVerification, workers, index, count int, path string, callback progress.Callback) error {
+func applyClonedWindows(ctx context.Context, token *nativev4.CancelToken, pool *nativev4.SessionPool, windows []patchformat.WindowDescriptor, sourceSize uint64, verification *nativev4.SourceVerification, workers, index, count int, path string, callback progress.Callback) error {
 	changed := make([]int, 0, len(windows))
 	var unchanged uint64
 	for i := range windows {
@@ -308,7 +340,12 @@ func applyClonedWindows(ctx context.Context, session *nativev4.Session, windows 
 	}
 	return parallelFor(ctx, len(changed), workers, func(ctx context.Context, job int) error {
 		i := changed[job]
-		_, err := session.ApplyChangedWindow(ctx, windows[i], sourceSize, verification)
+		session, err := pool.Acquire(ctx)
+		if err != nil {
+			return err
+		}
+		defer pool.Release(session)
+		_, err = session.ApplyChangedWindowWithToken(token, windows[i], sourceSize, verification)
 		if err == nil {
 			done := completed.Add(uint64(windows[i].OutputSize))
 			progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: done, TotalBytes: sumWindowBytes(windows), Stage: progress.StageApplying})
@@ -316,7 +353,7 @@ func applyClonedWindows(ctx context.Context, session *nativev4.Session, windows 
 		return err
 	})
 }
-func applyWindowGroups(ctx context.Context, session *nativev4.Session, windows []patchformat.WindowDescriptor, sourceSize, outputSize uint64, outputChunks []patchformat.Digest, verification *nativev4.SourceVerification, workers, index, count int, path string, callback progress.Callback) error {
+func applyWindowGroups(ctx context.Context, token *nativev4.CancelToken, pool *nativev4.SessionPool, windows []patchformat.WindowDescriptor, sourceSize, outputSize uint64, outputChunks []patchformat.Digest, verification *nativev4.SourceVerification, workers, index, count int, path string, callback progress.Callback) error {
 	if outputSize == 0 {
 		return nil
 	}
@@ -327,7 +364,12 @@ func applyWindowGroups(ctx context.Context, session *nativev4.Session, windows [
 	var completed atomicCounter
 	return parallelFor(ctx, len(groups), workers, func(ctx context.Context, i int) error {
 		group := groups[i]
-		_, err := session.ApplyGroup(ctx, windows[group.first:group.last], group.offset, group.size, sourceSize, verification, outputChunks[i])
+		session, err := pool.Acquire(ctx)
+		if err != nil {
+			return err
+		}
+		defer pool.Release(session)
+		_, err = session.ApplyGroupWithToken(token, windows[group.first:group.last], group.offset, group.size, sourceSize, verification, outputChunks[i])
 		if err == nil {
 			done := completed.Add(uint64(group.size))
 			progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: done, TotalBytes: outputSize, Stage: progress.StageApplying})

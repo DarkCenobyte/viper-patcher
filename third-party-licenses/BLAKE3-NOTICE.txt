@@ -1,10 +1,10 @@
-BLAKE3 portable implementation
+BLAKE3 implementation
 
 Copyright 2019 Jack O'Connor and Samuel Neves
-Copyright 2026 Viper-Patcher contributors (V4 integration and modifications)
+Copyright 2026 Viper-Patcher contributors (V4 integration and portable fallback)
 
-The portable implementation in internal/nativev4/blake3_portable.c and
-internal/nativev4/blake3_portable.h is based on the BLAKE3 specification and
-reference implementation. It has been adapted for Viper-Patcher's bounded C
-data plane. It is distributed under the Apache License, Version 2.0; see
-BLAKE3-APACHE-2.0.txt.
+Static builds download and link the verified official BLAKE3 1.8.5 C sources
+with runtime SIMD dispatch. Non-static development builds use the portable
+fallback in internal/nativev4/blake3_portable.c and
+internal/nativev4/blake3_portable.h. Both implementations are distributed
+under the Apache License, Version 2.0; see BLAKE3-APACHE-2.0.txt.

@@ -1,3 +1,4 @@
+#ifndef VIPR_STATIC_BLAKE3
 /*
  * Portable BLAKE3 implementation adapted for Viper-Patcher.
  * Copyright 2019 Jack O'Connor and Samuel Neves.
@@ -249,3 +250,4 @@ void vipr_blake3_hash(const void *input, size_t input_len, uint8_t out[VIPR_BLAK
     vipr_blake3_update(&hasher, input, input_len);
     vipr_blake3_finalize(&hasher, out);
 }
+#endif

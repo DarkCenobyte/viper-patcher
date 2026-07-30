@@ -1,6 +1,7 @@
 /build/
 /dist/
 /third_party/zstd/
+/third_party/blake3/
 *.vipr
 *.prof
 *.test

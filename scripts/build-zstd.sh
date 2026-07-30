@@ -22,3 +22,7 @@ mkdir -p "$OUTPUT/include" "$OUTPUT/lib"
 cp "$SOURCE/lib/zstd.h" "$SOURCE/lib/zstd_errors.h" "$SOURCE/lib/zdict.h" "$OUTPUT/include/"
 cp "$SOURCE/lib/libzstd.a" "$OUTPUT/lib/libzstd.a"
 printf 'Built static libzstd at %s.\n' "$OUTPUT/lib/libzstd.a"
+
+# Both static native libraries are mandatory for vipr_static_zstd builds.
+"$ROOT/scripts/fetch-blake3.sh"
+"$ROOT/scripts/build-blake3.sh"

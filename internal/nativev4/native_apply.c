@@ -71,7 +71,7 @@ static int digest_equal(const uint8_t left[32], const uint8_t right[32]) {
 }
 
 static vipr_status check_cancel(volatile uint32_t *cancel) {
-    return cancel != NULL && *cancel != 0 ? VIPR_STATUS_CANCELLED : VIPR_STATUS_OK;
+    return vipr_cancelled(cancel) ? VIPR_STATUS_CANCELLED : VIPR_STATUS_OK;
 }
 
 static vipr_status hash_source_chunk(vipr_io_session *session,
@@ -111,13 +111,13 @@ static vipr_status hash_source_chunk(vipr_io_session *session,
     }
     uint64_t remaining = source_file_size - offset;
     size_t size = remaining > VIPR_V4_IDENTITY_CHUNK_SIZE ? VIPR_V4_IDENTITY_CHUNK_SIZE : (size_t)remaining;
-    uint8_t *buffer = (uint8_t *)malloc(size == 0 ? 1 : size);
-    if (buffer == NULL) {
+    if (!vipr_scratch_reserve(&session->verification_buffer, size == 0 ? 1 : size)) {
         __atomic_store_n(state, 0, __ATOMIC_RELEASE);
-        vipr_set_error(error_buffer, error_buffer_size, "allocate source verification buffer");
+        vipr_set_error(error_buffer, error_buffer_size, "reserve source verification buffer");
         return VIPR_STATUS_MEMORY_LIMIT;
     }
-    vipr_status status = vipr_read_at(session->source, offset, buffer, size, error_buffer, error_buffer_size);
+    uint8_t *buffer = session->verification_buffer.data;
+    vipr_status status = vipr_read_at(session, session->source, offset, buffer, size, error_buffer, error_buffer_size);
     if (status == VIPR_STATUS_OK) {
         uint8_t actual[32];
         vipr_blake3_hash(buffer, size, actual);
@@ -126,7 +126,6 @@ static vipr_status hash_source_chunk(vipr_io_session *session,
             vipr_set_error(error_buffer, error_buffer_size, "source chunk digest mismatch");
         }
     }
-    free(buffer);
     if (status == VIPR_STATUS_OK) {
         if (result != NULL) result->bytes_read_source += size;
         __atomic_store_n(state, 2, __ATOMIC_RELEASE);
@@ -206,7 +205,7 @@ static vipr_status read_copy(vipr_io_session *session,
         if (check_cancel(cancel) != VIPR_STATUS_OK) return VIPR_STATUS_CANCELLED;
         size_t part = (size_t)(length - copied);
         if (part > (1u << 20)) part = 1u << 20;
-        vipr_status status = vipr_read_at(session->source, source_offset + copied, output + *produced, part, error_buffer, error_buffer_size);
+        vipr_status status = vipr_read_at(session, session->source, source_offset + copied, output + *produced, part, error_buffer, error_buffer_size);
         if (status != VIPR_STATUS_OK) return status;
         *produced += (uint32_t)part;
         copied += part;
@@ -342,54 +341,52 @@ malformed:
     return VIPR_STATUS_INVALID_WINDOW;
 }
 
-static vipr_status load_payload(vipr_io_session *session,
-                                const vipr_window *window,
-                                uint8_t **payload,
-                                size_t *payload_size,
-                                volatile uint32_t *cancel,
-                                vipr_group_result *result,
-                                char *error_buffer,
-                                size_t error_buffer_size) {
-    *payload = NULL;
-    *payload_size = 0;
+static vipr_status read_patch_payload(vipr_io_session *session,
+                                      const vipr_window *window,
+                                      vipr_scratch_buffer *buffer,
+                                      volatile uint32_t *cancel,
+                                      vipr_group_result *result,
+                                      char *error_buffer, size_t error_buffer_size) {
     if (window->payload_size == 0) return VIPR_STATUS_OK;
     if (check_cancel(cancel) != VIPR_STATUS_OK) return VIPR_STATUS_CANCELLED;
-    uint8_t *compressed = (uint8_t *)malloc(window->payload_size);
-    if (compressed == NULL) {
-        vipr_set_error(error_buffer, error_buffer_size, "allocate V4 payload buffer");
+    if (!vipr_scratch_reserve(buffer, window->payload_size)) {
+        vipr_set_error(error_buffer, error_buffer_size, "reserve V4 payload buffer");
         return VIPR_STATUS_MEMORY_LIMIT;
     }
-    vipr_status status = vipr_read_at(session->patch, window->payload_offset, compressed, window->payload_size, error_buffer, error_buffer_size);
-    if (status != VIPR_STATUS_OK) {
-        free(compressed);
-        return status;
-    }
-    if (result != NULL) result->bytes_read_patch += window->payload_size;
-    if (window->codec == VIPR_CODEC_NONE) {
-        *payload = compressed;
-        *payload_size = window->payload_size;
-        return VIPR_STATUS_OK;
-    }
-    if (window->codec != VIPR_CODEC_ZSTD || window->expanded_size == 0) {
-        free(compressed);
-        vipr_set_error(error_buffer, error_buffer_size, "invalid V4 payload codec metadata");
+    vipr_status status = vipr_read_at(session, session->patch, window->payload_offset,
+                                      buffer->data, window->payload_size,
+                                      error_buffer, error_buffer_size);
+    if (status == VIPR_STATUS_OK && result != NULL) result->bytes_read_patch += window->payload_size;
+    return status;
+}
+
+static vipr_status decompress_payload(vipr_io_session *session,
+                                      const vipr_window *window,
+                                      const uint8_t *compressed,
+                                      uint8_t *output, size_t output_size,
+                                      char *error_buffer, size_t error_buffer_size) {
+    if (window->codec != VIPR_CODEC_ZSTD || window->expanded_size != output_size) {
+        vipr_set_error(error_buffer, error_buffer_size, "invalid V4 zstd payload metadata");
         return VIPR_STATUS_INVALID_WINDOW;
     }
-    uint8_t *expanded = (uint8_t *)malloc(window->expanded_size);
-    if (expanded == NULL) {
-        free(compressed);
-        vipr_set_error(error_buffer, error_buffer_size, "allocate V4 expanded payload buffer");
-        return VIPR_STATUS_MEMORY_LIMIT;
+    if (session->decompress_context == NULL) {
+        session->decompress_context = ZSTD_createDCtx();
+        if (session->decompress_context == NULL) {
+            vipr_set_error(error_buffer, error_buffer_size, "allocate V4 decompression context");
+            return VIPR_STATUS_MEMORY_LIMIT;
+        }
     }
-    size_t decoded = ZSTD_decompress(expanded, window->expanded_size, compressed, window->payload_size);
-    free(compressed);
-    if (ZSTD_isError(decoded) || decoded != window->expanded_size) {
-        free(expanded);
+    size_t reset = ZSTD_DCtx_reset(session->decompress_context, ZSTD_reset_session_only);
+    if (ZSTD_isError(reset)) {
+        vipr_set_zstd_error(error_buffer, error_buffer_size, "reset V4 decoder", reset);
+        return VIPR_STATUS_ZSTD_ERROR;
+    }
+    size_t decoded = ZSTD_decompressDCtx(session->decompress_context, output, output_size,
+                                         compressed, window->payload_size);
+    if (ZSTD_isError(decoded) || decoded != output_size) {
         vipr_set_zstd_error(error_buffer, error_buffer_size, "decompress V4 payload", decoded);
         return VIPR_STATUS_ZSTD_ERROR;
     }
-    *payload = expanded;
-    *payload_size = decoded;
     return VIPR_STATUS_OK;
 }
 
@@ -414,8 +411,6 @@ static vipr_status materialize_window(vipr_io_session *session,
                                              error_buffer, error_buffer_size);
     if (status != VIPR_STATUS_OK) return status;
 
-    uint8_t *payload = NULL;
-    size_t payload_size = 0;
     switch (window->kind) {
     case VIPR_WINDOW_SAME:
         status = read_copy(session, window->output_offset, source_file_size, output, window->output_size,
@@ -430,39 +425,64 @@ static vipr_status materialize_window(vipr_io_session *session,
         break;
     case VIPR_WINDOW_RUN:
         if (window->payload_size != 1 || window->codec != VIPR_CODEC_NONE) {
-            status = VIPR_STATUS_INVALID_WINDOW;
             vipr_set_error(error_buffer, error_buffer_size, "invalid RUN window payload");
-            break;
+            return VIPR_STATUS_INVALID_WINDOW;
         }
-        status = load_payload(session, window, &payload, &payload_size, cancel, result, error_buffer, error_buffer_size);
-        if (status == VIPR_STATUS_OK) memset(output, payload[0], window->output_size);
+        status = read_patch_payload(session, window, &session->payload_buffer, cancel, result,
+                                    error_buffer, error_buffer_size);
+        if (status == VIPR_STATUS_OK) memset(output, session->payload_buffer.data[0], window->output_size);
         break;
     case VIPR_WINDOW_REPLACE_RAW:
+        if (window->codec != VIPR_CODEC_NONE || window->payload_size != window->output_size) {
+            vipr_set_error(error_buffer, error_buffer_size, "invalid raw replacement metadata");
+            return VIPR_STATUS_INVALID_WINDOW;
+        }
+        if (check_cancel(cancel) != VIPR_STATUS_OK) return VIPR_STATUS_CANCELLED;
+        status = vipr_read_at(session, session->patch, window->payload_offset, output, window->output_size,
+                              error_buffer, error_buffer_size);
+        if (status == VIPR_STATUS_OK && result != NULL) result->bytes_read_patch += window->payload_size;
+        break;
     case VIPR_WINDOW_REPLACE_ZSTD:
-        status = load_payload(session, window, &payload, &payload_size, cancel, result, error_buffer, error_buffer_size);
+        status = read_patch_payload(session, window, &session->payload_buffer, cancel, result,
+                                    error_buffer, error_buffer_size);
         if (status == VIPR_STATUS_OK) {
-            if (payload_size != window->output_size) {
-                status = VIPR_STATUS_INVALID_WINDOW;
-                vipr_set_error(error_buffer, error_buffer_size, "replacement payload size mismatch");
-            } else {
-                memcpy(output, payload, payload_size);
-            }
+            status = decompress_payload(session, window, session->payload_buffer.data,
+                                        output, window->output_size, error_buffer, error_buffer_size);
         }
         break;
     case VIPR_WINDOW_DELTA_RAW:
-    case VIPR_WINDOW_DELTA_ZSTD:
-        status = load_payload(session, window, &payload, &payload_size, cancel, result, error_buffer, error_buffer_size);
+        if (window->codec != VIPR_CODEC_NONE || window->expanded_size != window->payload_size) {
+            vipr_set_error(error_buffer, error_buffer_size, "invalid raw delta metadata");
+            return VIPR_STATUS_INVALID_WINDOW;
+        }
+        status = read_patch_payload(session, window, &session->payload_buffer, cancel, result,
+                                    error_buffer, error_buffer_size);
         if (status == VIPR_STATUS_OK) {
-            status = decode_delta(session, window, payload, payload_size, source_file_size, output, cancel,
-                                  result, error_buffer, error_buffer_size);
+            status = decode_delta(session, window, session->payload_buffer.data, window->payload_size,
+                                  source_file_size, output, cancel, result, error_buffer, error_buffer_size);
+        }
+        break;
+    case VIPR_WINDOW_DELTA_ZSTD:
+        status = read_patch_payload(session, window, &session->payload_buffer, cancel, result,
+                                    error_buffer, error_buffer_size);
+        if (status == VIPR_STATUS_OK) {
+            if (!vipr_scratch_reserve(&session->expanded_buffer, window->expanded_size)) {
+                vipr_set_error(error_buffer, error_buffer_size, "reserve V4 expanded delta buffer");
+                return VIPR_STATUS_MEMORY_LIMIT;
+            }
+            status = decompress_payload(session, window, session->payload_buffer.data,
+                                        session->expanded_buffer.data, window->expanded_size,
+                                        error_buffer, error_buffer_size);
+        }
+        if (status == VIPR_STATUS_OK) {
+            status = decode_delta(session, window, session->expanded_buffer.data, window->expanded_size,
+                                  source_file_size, output, cancel, result, error_buffer, error_buffer_size);
         }
         break;
     default:
-        status = VIPR_STATUS_INVALID_WINDOW;
         vipr_set_error(error_buffer, error_buffer_size, "unsupported V4 window kind");
-        break;
+        return VIPR_STATUS_INVALID_WINDOW;
     }
-    free(payload);
     if (status != VIPR_STATUS_OK) return status;
     if (verify_window_digest) {
         uint8_t digest[32];
@@ -491,11 +511,11 @@ vipr_status vipr_apply_group(vipr_io_session *session,
         return VIPR_STATUS_INVALID_ARGUMENT;
     }
     if (result != NULL) memset(result, 0, sizeof(*result));
-    uint8_t *buffer = (uint8_t *)malloc(group_size);
-    if (buffer == NULL) {
-        vipr_set_error(error_buffer, error_buffer_size, "allocate V4 output group");
+    if (!vipr_scratch_reserve(&session->group_buffer, group_size)) {
+        vipr_set_error(error_buffer, error_buffer_size, "reserve V4 output group");
         return VIPR_STATUS_MEMORY_LIMIT;
     }
+    uint8_t *buffer = session->group_buffer.data;
     memset(buffer, 0, group_size);
     vipr_status status = VIPR_STATUS_OK;
     uint64_t expected_offset = group_offset;
@@ -519,22 +539,22 @@ vipr_status vipr_apply_group(vipr_io_session *session,
         expected_offset += window->output_size;
     }
     if (status == VIPR_STATUS_OK && expected_offset != group_offset + group_size) {
-        status = VIPR_STATUS_INVALID_WINDOW;
         vipr_set_error(error_buffer, error_buffer_size, "V4 group does not cover its declared output range");
+        status = VIPR_STATUS_INVALID_WINDOW;
     }
     if (status == VIPR_STATUS_OK) {
         uint8_t digest[32];
         vipr_blake3_hash(buffer, group_size, digest);
         if (!digest_equal(digest, expected_group_digest)) {
-            status = VIPR_STATUS_OUTPUT_MISMATCH;
             vipr_set_error(error_buffer, error_buffer_size, "V4 output group digest mismatch");
+            status = VIPR_STATUS_OUTPUT_MISMATCH;
         }
     }
     if (status == VIPR_STATUS_OK) {
-        status = vipr_write_at(session->output, group_offset, buffer, group_size, error_buffer, error_buffer_size);
+        status = vipr_write_at(session, session->output, group_offset, buffer, group_size,
+                               error_buffer, error_buffer_size);
         if (status == VIPR_STATUS_OK && result != NULL) result->bytes_written += group_size;
     }
-    free(buffer);
     return status;
 }
 
@@ -555,18 +575,18 @@ vipr_status vipr_apply_changed_window(vipr_io_session *session, const uint8_t *e
     if (status != VIPR_STATUS_OK) return status;
     const vipr_window *window = &decoded_window;
     if (result != NULL) memset(result, 0, sizeof(*result));
-    uint8_t *buffer = (uint8_t *)malloc(window->output_size);
-    if (buffer == NULL) {
-        vipr_set_error(error_buffer, error_buffer_size, "allocate V4 window output");
+    if (!vipr_scratch_reserve(&session->group_buffer, window->output_size)) {
+        vipr_set_error(error_buffer, error_buffer_size, "reserve V4 changed-window output");
         return VIPR_STATUS_MEMORY_LIMIT;
     }
+    uint8_t *buffer = session->group_buffer.data;
     status = materialize_window(session, window, source_file_size, source_chunk_digests,
-                                            source_chunk_count, source_chunk_states, buffer, 1, cancel, result,
-                                            error_buffer, error_buffer_size);
+                                source_chunk_count, source_chunk_states, buffer, 1, cancel, result,
+                                error_buffer, error_buffer_size);
     if (status == VIPR_STATUS_OK && window->kind != VIPR_WINDOW_SAME) {
-        status = vipr_write_at(session->output, window->output_offset, buffer, window->output_size, error_buffer, error_buffer_size);
+        status = vipr_write_at(session, session->output, window->output_offset, buffer, window->output_size,
+                               error_buffer, error_buffer_size);
         if (status == VIPR_STATUS_OK && result != NULL) result->bytes_written += window->output_size;
     }
-    free(buffer);
     return status;
 }

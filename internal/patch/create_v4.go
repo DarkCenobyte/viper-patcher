@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/buildinfo"
@@ -286,12 +287,14 @@ func createFileEntry(ctx context.Context, output *os.File, snapshot snapshotPair
 	if err != nil {
 		return patchformat.FileEntry{}, err
 	}
-	sourceRoot, sourceChunks, err := hashSession.HashFileTree(ctx, false, snapshot.sourceSize, patchformat.IdentityChunkSize)
+	token := nativev4.NewCancelToken(ctx)
+	defer token.Close()
+	sourceRoot, sourceChunks, err := hashSession.HashFileTreeWithToken(token, false, snapshot.sourceSize, patchformat.IdentityChunkSize)
 	if err != nil {
 		hashSession.Close()
 		return patchformat.FileEntry{}, err
 	}
-	targetRoot, targetChunks, err := hashSession.HashFileTree(ctx, true, snapshot.targetSize, patchformat.IdentityChunkSize)
+	targetRoot, targetChunks, err := hashSession.HashFileTreeWithToken(token, true, snapshot.targetSize, patchformat.IdentityChunkSize)
 	hashSession.Close()
 	if err != nil {
 		return patchformat.FileEntry{}, err
@@ -300,25 +303,182 @@ func createFileEntry(ctx context.Context, output *os.File, snapshot snapshotPair
 	if windowSize == 0 {
 		windowSize = automaticWindowSize(max64(snapshot.sourceSize, snapshot.targetSize))
 	}
-	forward, err := buildWindowSet(ctx, source, target, snapshot.sourceSize, snapshot.targetSize, windowSize, options.CompressionLevel, options.Optimization, workers)
+	forward, err := buildWindowSetToOutput(ctx, output, source, target, snapshot.sourceSize, snapshot.targetSize, windowSize, options.CompressionLevel, options.Optimization, workers)
 	if err != nil {
 		return patchformat.FileEntry{}, err
 	}
-	if err = writeWindowPayloads(output, forward); err != nil {
-		return patchformat.FileEntry{}, err
-	}
-	var reverse []builtWindow
+	var reverse []patchformat.WindowDescriptor
 	if options.CreateReverse {
-		reverse, err = buildWindowSet(ctx, target, source, snapshot.targetSize, snapshot.sourceSize, windowSize, options.CompressionLevel, options.Optimization, workers)
+		reverse, err = buildWindowSetToOutput(ctx, output, target, source, snapshot.targetSize, snapshot.sourceSize, windowSize, options.CompressionLevel, options.Optimization, workers)
 		if err != nil {
-			return patchformat.FileEntry{}, err
-		}
-		if err = writeWindowPayloads(output, reverse); err != nil {
 			return patchformat.FileEntry{}, err
 		}
 	}
 	progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: snapshot.path, ProcessedBytes: snapshot.targetSize, TotalBytes: snapshot.targetSize, Stage: progress.StageCompressingForward})
-	return patchformat.FileEntry{Path: snapshot.path, SourceHash: sourceRoot.Hex(), TargetHash: targetRoot.Hex(), SourceSize: snapshot.sourceSize, TargetSize: snapshot.targetSize, SourceDigest: sourceRoot, TargetDigest: targetRoot, WindowSize: windowSize, SourceChunkSize: uint32(patchformat.IdentityChunkSize), SourceChunks: sourceChunks, TargetChunks: targetChunks, ForwardWindows: descriptors(forward), ReverseWindows: descriptors(reverse)}, nil
+	return patchformat.FileEntry{Path: snapshot.path, SourceHash: sourceRoot.Hex(), TargetHash: targetRoot.Hex(), SourceSize: snapshot.sourceSize, TargetSize: snapshot.targetSize, SourceDigest: sourceRoot, TargetDigest: targetRoot, WindowSize: windowSize, SourceChunkSize: uint32(patchformat.IdentityChunkSize), SourceChunks: sourceChunks, TargetChunks: targetChunks, ForwardWindows: forward, ReverseWindows: reverse}, nil
+}
+
+type windowBuildResult struct {
+	index    int
+	borrowed *nativev4.BorrowedWindow
+	ack      chan struct{}
+	err      error
+}
+
+func releaseWindowBuildResult(result windowBuildResult) {
+	if result.borrowed == nil {
+		return
+	}
+	result.borrowed.Release()
+	result.ack <- struct{}{}
+}
+
+func buildWindowSetToOutput(ctx context.Context, output, source, target *os.File, sourceSize, targetSize uint64, windowSize uint32, level int, mode OptimizationMode, workers int) ([]patchformat.WindowDescriptor, error) {
+	if targetSize == 0 {
+		return nil, nil
+	}
+	count := int((targetSize + uint64(windowSize) - 1) / uint64(windowSize))
+	workers = min(max(workers, 1), count)
+	operationCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	token := nativev4.NewCancelToken(operationCtx)
+	defer token.Close()
+
+	sessions := make([]*nativev4.Session, 0, workers)
+	for range workers {
+		session, err := nativev4.NewSession(source, target, output)
+		if err != nil {
+			for _, existing := range sessions {
+				_ = existing.Close()
+			}
+			return nil, err
+		}
+		sessions = append(sessions, session)
+	}
+	defer func() {
+		for _, session := range sessions {
+			_ = session.Close()
+		}
+	}()
+
+	jobs := make(chan int, workers*2)
+	results := make(chan windowBuildResult, workers)
+	var group sync.WaitGroup
+	for _, session := range sessions {
+		group.Add(1)
+		go func(session *nativev4.Session) {
+			defer group.Done()
+			ack := make(chan struct{})
+			for index := range jobs {
+				offset := uint64(index) * uint64(windowSize)
+				size := windowSize
+				if remaining := targetSize - offset; remaining < uint64(size) {
+					size = uint32(remaining)
+				}
+				borrowed, err := session.BuildWindowBorrowed(token, sourceSize, targetSize, offset, size, windowSize, level, mode)
+				result := windowBuildResult{index: index, borrowed: borrowed, err: err}
+				if borrowed != nil {
+					result.ack = ack
+				}
+				results <- result
+				if result.ack != nil {
+					<-result.ack
+				}
+				if err != nil {
+					return
+				}
+			}
+		}(session)
+	}
+	go func() {
+		defer close(jobs)
+		for index := range count {
+			select {
+			case jobs <- index:
+			case <-operationCtx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		group.Wait()
+		close(results)
+	}()
+
+	payloadOffset, err := output.Seek(0, io.SeekCurrent)
+	if err != nil {
+		cancel()
+		for result := range results {
+			releaseWindowBuildResult(result)
+		}
+		return nil, err
+	}
+	descriptors := make([]patchformat.WindowDescriptor, count)
+	pending := make(map[int]windowBuildResult, workers)
+	next := 0
+	var firstErr error
+	for result := range results {
+		if firstErr != nil {
+			releaseWindowBuildResult(result)
+			continue
+		}
+		if result.err != nil {
+			firstErr = result.err
+			cancel()
+			releaseWindowBuildResult(result)
+			for pendingIndex, ready := range pending {
+				releaseWindowBuildResult(ready)
+				delete(pending, pendingIndex)
+			}
+			continue
+		}
+		pending[result.index] = result
+		for {
+			ready, ok := pending[next]
+			if !ok {
+				break
+			}
+			delete(pending, next)
+			descriptor := ready.borrowed.Descriptor
+			if descriptor.PayloadSize != 0 {
+				descriptor.PayloadOffset = uint64(payloadOffset)
+				if err := ready.borrowed.WritePayloadAt(uint64(payloadOffset)); err != nil {
+					firstErr = err
+					cancel()
+				} else {
+					payloadOffset += int64(descriptor.PayloadSize)
+				}
+			}
+			if firstErr == nil {
+				descriptors[next] = descriptor
+				next++
+			}
+			releaseWindowBuildResult(ready)
+			if firstErr != nil {
+				for pendingIndex, pendingResult := range pending {
+					releaseWindowBuildResult(pendingResult)
+					delete(pending, pendingIndex)
+				}
+				break
+			}
+		}
+	}
+	for _, ready := range pending {
+		releaseWindowBuildResult(ready)
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if next != count {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("V4 window pipeline completed %d of %d windows", next, count)
+	}
+	if _, err := output.Seek(payloadOffset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return descriptors, nil
 }
 
 type builtWindow struct {

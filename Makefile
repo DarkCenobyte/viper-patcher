@@ -8,34 +8,42 @@ LDFLAGS := -s -w \
 	-X $(MODULE)/internal/buildinfo.Version=$(VERSION) \
 	-X $(MODULE)/internal/buildinfo.Commit=$(COMMIT) \
 	-X $(MODULE)/internal/buildinfo.BuildDate=$(BUILD_DATE)
-ZSTD_STAMP := build/zstd/.built
+NATIVE_STAMP := build/native-deps/.built
 
-.PHONY: all fetch-zstd build-zstd build test vet check clean
+.PHONY: all fetch-zstd fetch-blake3 build-zstd build-blake3 build-native build test vet check clean
 
 all: check build
 
 fetch-zstd:
 	./scripts/fetch-zstd.sh
 
-$(ZSTD_STAMP): scripts/fetch-zstd.sh scripts/build-zstd.sh
+fetch-blake3:
+	./scripts/fetch-blake3.sh
+
+$(NATIVE_STAMP): scripts/fetch-zstd.sh scripts/build-zstd.sh scripts/fetch-blake3.sh scripts/build-blake3.sh internal/zstdversion/version.go internal/blake3version/version.go
 	./scripts/fetch-zstd.sh
 	./scripts/build-zstd.sh
-	touch $(ZSTD_STAMP)
+	mkdir -p $(dir $(NATIVE_STAMP))
+	touch $(NATIVE_STAMP)
 
-build-zstd: $(ZSTD_STAMP)
+build-native: $(NATIVE_STAMP)
 
-build: $(ZSTD_STAMP)
+build-zstd: build-native
+
+build-blake3: build-native
+
+build: $(NATIVE_STAMP)
 	mkdir -p dist
 	CGO_ENABLED=1 $(GO) build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags '$(LDFLAGS)' -o dist/creator ./cmd/creator
 	CGO_ENABLED=1 $(GO) build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags '$(LDFLAGS)' -o dist/patcher ./cmd/patcher
 
-test: $(ZSTD_STAMP)
+test: $(NATIVE_STAMP)
 	CGO_ENABLED=1 $(GO) test -race -tags vipr_static_zstd,migrated_fynedo ./...
 
-vet: $(ZSTD_STAMP)
+vet: $(NATIVE_STAMP)
 	CGO_ENABLED=1 $(GO) vet -tags vipr_static_zstd,migrated_fynedo ./...
 
-check: $(ZSTD_STAMP)
+check: $(NATIVE_STAMP)
 	CGO_ENABLED=1 $(GO) test -race -tags vipr_static_zstd,migrated_fynedo ./...
 	CGO_ENABLED=1 $(GO) vet -tags vipr_static_zstd,migrated_fynedo ./...
 	@test -z "$$(gofmt -l .)" || (echo 'Go files are not formatted; run gofmt -w .' >&2; gofmt -l . >&2; exit 1)

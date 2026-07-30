@@ -89,3 +89,7 @@ Copy-Item (Join-Path $Source "lib/zstd_errors.h") (Join-Path $Output "include")
 Copy-Item (Join-Path $Source "lib/zdict.h") (Join-Path $Output "include")
 Copy-Item (Join-Path $Source "lib/libzstd.a") (Join-Path $Output "lib/libzstd.a")
 Write-Host "Built static libzstd at $(Join-Path $Output 'lib/libzstd.a')."
+
+# Both static native libraries are mandatory for vipr_static_zstd builds.
+& (Join-Path $PSScriptRoot "fetch-blake3.ps1")
+& (Join-Path $PSScriptRoot "build-blake3.ps1") -Architecture $Architecture -MSYS2Root $ResolvedMSYS2Root
