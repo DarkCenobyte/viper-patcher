@@ -128,7 +128,7 @@ func commitPrepared(root *installationRoot, files []preparedFile, durability Dur
 
 	for i := range files {
 		item := &files[i]
-		current, _, currentName, err := root.openStableRegularFile(item.path)
+		current, _, currentName, err := root.openStableRegularFile(filepath.ToSlash(item.path))
 		if err != nil {
 			return fmt.Errorf("reopen %q before replacement: %w", item.path, err)
 		}
