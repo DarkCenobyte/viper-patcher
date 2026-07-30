@@ -94,6 +94,8 @@ jobs:
           mkdir -p "$license_dir"
           cp third_party/zstd/LICENSE "$license_dir/zstd-BSD-3-Clause.txt"
           cp third_party/zstd-NOTICE.txt "$license_dir/zstd-NOTICE.txt"
+          cp third-party-licenses/BLAKE3-APACHE-2.0.txt "$license_dir/BLAKE3-APACHE-2.0.txt"
+          cp third-party-licenses/BLAKE3-NOTICE.txt "$license_dir/BLAKE3-NOTICE.txt"
           ./scripts/collect-go-licenses.sh "$license_dir/go-modules"
           tar -C dist -czf "dist/${package}.tar.gz" "$package"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -162,6 +164,8 @@ jobs:
           mkdir -p "$license_dir"
           cp third_party/zstd/LICENSE "$license_dir/zstd-BSD-3-Clause.txt"
           cp third_party/zstd-NOTICE.txt "$license_dir/zstd-NOTICE.txt"
+          cp third-party-licenses/BLAKE3-APACHE-2.0.txt "$license_dir/BLAKE3-APACHE-2.0.txt"
+          cp third-party-licenses/BLAKE3-NOTICE.txt "$license_dir/BLAKE3-NOTICE.txt"
           ./scripts/collect-go-licenses.sh "$license_dir/go-modules"
           tar -C dist -czf "dist/${package}.tar.gz" "$package"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -244,6 +248,8 @@ jobs:
           mkdir -p "$license_dir"
           cp third_party/zstd/LICENSE "$license_dir/zstd-BSD-3-Clause.txt"
           cp third_party/zstd-NOTICE.txt "$license_dir/zstd-NOTICE.txt"
+          cp third-party-licenses/BLAKE3-APACHE-2.0.txt "$license_dir/BLAKE3-APACHE-2.0.txt"
+          cp third-party-licenses/BLAKE3-NOTICE.txt "$license_dir/BLAKE3-NOTICE.txt"
           ./scripts/collect-go-licenses.sh "$license_dir/go-modules"
           tar -C dist -czf "dist/${package}.tar.gz" "$package"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -446,6 +452,8 @@ jobs:
           Copy-Item README.md, LICENSE "dist/$package/"
           Copy-Item third_party/zstd/LICENSE "dist/$package/third-party-licenses/zstd-BSD-3-Clause.txt"
           Copy-Item third_party/zstd-NOTICE.txt "dist/$package/third-party-licenses/zstd-NOTICE.txt"
+          Copy-Item third-party-licenses/BLAKE3-APACHE-2.0.txt "dist/$package/third-party-licenses/BLAKE3-APACHE-2.0.txt"
+          Copy-Item third-party-licenses/BLAKE3-NOTICE.txt "dist/$package/third-party-licenses/BLAKE3-NOTICE.txt"
           ./scripts/collect-go-licenses.ps1 -Destination "dist/$package/third-party-licenses/go-modules"
           Compress-Archive -Path "dist/$package" -DestinationPath "dist/$package.zip"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
