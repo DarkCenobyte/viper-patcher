@@ -131,7 +131,7 @@ func openPatch(path, expectedDigest string, calculateDigest bool) (*openedPatch,
 		return closeErr(fmt.Errorf("patch has invalid size"))
 	}
 	size := uint64(identity.Size())
-	parsed, err := patchformat.DecodeAt(file, size, func(index []byte, expected patchformat.Digest) error {
+	parsed, err := patchformat.DecodeAtWithLimits(file, size, patchformat.DefaultDecodeLimits(), func(index []byte, expected patchformat.Digest) error {
 		actual, err := nativev4.HashBytes(index)
 		if err != nil {
 			return err
