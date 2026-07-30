@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"sync"
@@ -339,8 +340,10 @@ type GroupResult struct {
 }
 
 type SourceVerification struct {
-	Digests []patchformat.Digest
-	States  []uint32
+	Digests   []patchformat.Digest
+	States    []uint32
+	source    unsafe.Pointer
+	sourceSize uint64
 }
 
 func NewSourceVerification(digests []patchformat.Digest, preverified bool) *SourceVerification {
@@ -353,11 +356,88 @@ func NewSourceVerification(digests []patchformat.Digest, preverified bool) *Sour
 	return &SourceVerification{Digests: digests, States: states}
 }
 
-func verificationPointers(verification *SourceVerification) (*C.uint8_t, C.uint32_t, *C.uint32_t) {
-	if verification == nil || len(verification.Digests) == 0 {
-		return nil, 0, nil
+// LoadSource reads one stable source image into C-owned memory. When verify is
+// true each canonical chunk is authenticated before the cache becomes visible
+// to native COPY decoding.
+func (verification *SourceVerification) LoadSource(ctx context.Context, source *os.File, size uint64, verify bool) error {
+	if verification == nil || source == nil {
+		return fmt.Errorf("source cache requires a verification object and file")
 	}
-	return (*C.uint8_t)(unsafe.Pointer(&verification.Digests[0][0])), C.uint32_t(len(verification.Digests)), (*C.uint32_t)(unsafe.Pointer(&verification.States[0]))
+	if verification.source != nil {
+		return fmt.Errorf("source cache is already loaded")
+	}
+	if size == 0 {
+		return nil
+	}
+	if size > uint64(^uint(0)>>1) {
+		return fmt.Errorf("source cache is too large for this architecture")
+	}
+	pointer := C.malloc(C.size_t(size))
+	if pointer == nil {
+		return &NativeError{Status: StatusMemoryLimit, Detail: "allocate source cache"}
+	}
+	data := unsafe.Slice((*byte)(pointer), int(size))
+	for offset := uint64(0); offset < size; {
+		if err := ctx.Err(); err != nil {
+			C.free(pointer)
+			return err
+		}
+		count := min(uint64(patchformat.IdentityChunkSize), size-offset)
+		read, err := source.ReadAt(data[int(offset):int(offset+count)], int64(offset))
+		if err != nil && !(errors.Is(err, io.EOF) && read == int(count)) {
+			C.free(pointer)
+			return fmt.Errorf("read source cache at %d: %w", offset, err)
+		}
+		if read != int(count) {
+			C.free(pointer)
+			return io.ErrUnexpectedEOF
+		}
+		if verify {
+			index := offset / patchformat.IdentityChunkSize
+			if index >= uint64(len(verification.Digests)) {
+				C.free(pointer)
+				return fmt.Errorf("source cache exceeds digest table")
+			}
+			actual, err := HashBytes(data[int(offset):int(offset+count)])
+			if err != nil {
+				C.free(pointer)
+				return err
+			}
+			if actual != verification.Digests[index] {
+				C.free(pointer)
+				verification.States[index] = 3
+				return fmt.Errorf("source chunk %d digest mismatch", index)
+			}
+			verification.States[index] = 2
+		}
+		offset += count
+	}
+	verification.source = pointer
+	verification.sourceSize = size
+	return nil
+}
+
+func (verification *SourceVerification) Close() {
+	if verification == nil || verification.source == nil {
+		return
+	}
+	C.free(verification.source)
+	verification.source = nil
+	verification.sourceSize = 0
+}
+
+func verificationPointers(verification *SourceVerification) (*C.uint8_t, C.uint32_t, *C.uint32_t, *C.uint8_t, C.uint64_t) {
+	if verification == nil {
+		return nil, 0, nil, nil, 0
+	}
+	var digests *C.uint8_t
+	var states *C.uint32_t
+	if len(verification.Digests) != 0 {
+		digests = (*C.uint8_t)(unsafe.Pointer(&verification.Digests[0][0]))
+		states = (*C.uint32_t)(unsafe.Pointer(&verification.States[0]))
+	}
+	return digests, C.uint32_t(len(verification.Digests)), states,
+		(*C.uint8_t)(verification.source), C.uint64_t(verification.sourceSize)
 }
 
 func resultFromC(value C.vipr_group_result) GroupResult {
@@ -389,10 +469,10 @@ func (s *Session) ApplyGroupWithToken(token *CancelToken, windows []patchformat.
 		copy(s.windowDescriptors[start:start+patchformat.WindowDescriptorSize], encoded[:])
 	}
 	encodedWindows := s.windowDescriptors
-	digests, count, states := verificationPointers(verification)
+	digests, count, states, sourceCache, sourceCacheSize := verificationPointers(verification)
 	var result C.vipr_group_result
 	err := withErrorBuffer(func(buffer *C.char) C.vipr_status {
-		return C.vipr_apply_group(s.native, (*C.uint8_t)(unsafe.Pointer(&encodedWindows[0])), C.uint32_t(len(windows)), C.uint64_t(groupOffset), C.uint32_t(groupSize), C.uint64_t(sourceSize), digests, count, states, (*C.uint8_t)(unsafe.Pointer(&expected[0])), token.pointer(), &result, buffer, errorBufferSize)
+		return C.vipr_apply_group(s.native, (*C.uint8_t)(unsafe.Pointer(&encodedWindows[0])), C.uint32_t(len(windows)), C.uint64_t(groupOffset), C.uint32_t(groupSize), C.uint64_t(sourceSize), digests, count, states, sourceCache, sourceCacheSize, (*C.uint8_t)(unsafe.Pointer(&expected[0])), token.pointer(), &result, buffer, errorBufferSize)
 	})
 	runtime.KeepAlive(s)
 	runtime.KeepAlive(encodedWindows)
@@ -412,10 +492,10 @@ func (s *Session) ApplyChangedWindowWithToken(token *CancelToken, window patchfo
 		return GroupResult{}, fmt.Errorf("native session is unavailable")
 	}
 	encodedWindow := patchformat.MarshalWindowDescriptor(window)
-	digests, count, states := verificationPointers(verification)
+	digests, count, states, sourceCache, sourceCacheSize := verificationPointers(verification)
 	var result C.vipr_group_result
 	err := withErrorBuffer(func(buffer *C.char) C.vipr_status {
-		return C.vipr_apply_changed_window(s.native, (*C.uint8_t)(unsafe.Pointer(&encodedWindow[0])), C.uint64_t(sourceSize), digests, count, states, token.pointer(), &result, buffer, errorBufferSize)
+		return C.vipr_apply_changed_window(s.native, (*C.uint8_t)(unsafe.Pointer(&encodedWindow[0])), C.uint64_t(sourceSize), digests, count, states, sourceCache, sourceCacheSize, token.pointer(), &result, buffer, errorBufferSize)
 	})
 	runtime.KeepAlive(s)
 	runtime.KeepAlive(encodedWindow)

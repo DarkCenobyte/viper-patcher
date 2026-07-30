@@ -222,6 +222,27 @@ func prepareApplicationFile(ctx context.Context, token *nativev4.CancelToken, op
 	} else if verify == VerifyOutput {
 		verification = nil
 	}
+	var sourceCacheLease *memoryLease
+	if !cloneWorthTrying(windows, inputSize, outputSize) && sourceCacheWorthTrying(windows, inputSize) {
+		if lease, ok := resources.TryAcquire(inputSize); ok {
+			if verification == nil {
+				verification = nativev4.NewSourceVerification(nil, true)
+			}
+			cacheErr := verification.LoadSource(ctx, source, inputSize, verify == VerifyReferenced)
+			if cacheErr != nil {
+				lease.Release()
+				source.Close()
+				return preparedFile{}, cacheErr
+			}
+			sourceCacheLease = lease
+		}
+	}
+	if verification != nil {
+		defer verification.Close()
+	}
+	if sourceCacheLease != nil {
+		defer sourceCacheLease.Release()
+	}
 
 	output, temporaryName, err := createRootTemp(root.root, filepath.Dir(targetName), ".viper-v4-output-")
 	if err != nil {
@@ -311,6 +332,23 @@ func prepareApplicationFile(ctx context.Context, token *nativev4.CancelToken, op
 		return preparedFile{}, err
 	}
 	cleanup = false
+func sourceCacheWorthTrying(windows []patchformat.WindowDescriptor, inputSize uint64) bool {
+	maximum := uint64(256 << 20)
+	if strconvIntSizeRuntime() == 32 {
+		maximum = 64 << 20
+	}
+	if inputSize == 0 || inputSize > maximum {
+		return false
+	}
+	for _, window := range windows {
+		switch window.Kind {
+		case patchformat.WindowSame, patchformat.WindowCopy, patchformat.WindowDeltaRaw, patchformat.WindowDeltaZstd:
+			return true
+		}
+	}
+	return false
+}
+
 	return preparedFile{path: targetName, temp: temporaryName, identity: identity}, nil
 }
 

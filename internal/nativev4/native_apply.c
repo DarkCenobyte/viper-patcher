@@ -80,6 +80,8 @@ static vipr_status hash_source_chunk(vipr_io_session *session,
                                      const uint8_t *expected_digests,
                                      uint32_t digest_count,
                                      volatile uint32_t *states,
+                                     const uint8_t *source_cache,
+                                     uint64_t source_cache_size,
                                      volatile uint32_t *cancel,
                                      vipr_group_result *result,
                                      char *error_buffer,
@@ -111,13 +113,20 @@ static vipr_status hash_source_chunk(vipr_io_session *session,
     }
     uint64_t remaining = source_file_size - offset;
     size_t size = remaining > VIPR_V4_IDENTITY_CHUNK_SIZE ? VIPR_V4_IDENTITY_CHUNK_SIZE : (size_t)remaining;
-    if (!vipr_scratch_reserve(&session->verification_buffer, size == 0 ? 1 : size)) {
-        __atomic_store_n(state, 0, __ATOMIC_RELEASE);
-        vipr_set_error(error_buffer, error_buffer_size, "reserve source verification buffer");
-        return VIPR_STATUS_MEMORY_LIMIT;
+    const uint8_t *buffer = NULL;
+    vipr_status status = VIPR_STATUS_OK;
+    if (source_cache != NULL && offset <= source_cache_size && size <= source_cache_size - offset) {
+        buffer = source_cache + (size_t)offset;
+    } else {
+        if (!vipr_scratch_reserve(&session->verification_buffer, size == 0 ? 1 : size)) {
+            __atomic_store_n(state, 0, __ATOMIC_RELEASE);
+            vipr_set_error(error_buffer, error_buffer_size, "reserve source verification buffer");
+            return VIPR_STATUS_MEMORY_LIMIT;
+        }
+        buffer = session->verification_buffer.data;
+        status = vipr_read_at(session, session->source, offset, (void *)buffer, size, error_buffer, error_buffer_size);
+        if (status == VIPR_STATUS_OK && result != NULL) result->bytes_read_source += size;
     }
-    uint8_t *buffer = session->verification_buffer.data;
-    vipr_status status = vipr_read_at(session, session->source, offset, buffer, size, error_buffer, error_buffer_size);
     if (status == VIPR_STATUS_OK) {
         uint8_t actual[32];
         vipr_blake3_hash(buffer, size, actual);
@@ -127,7 +136,6 @@ static vipr_status hash_source_chunk(vipr_io_session *session,
         }
     }
     if (status == VIPR_STATUS_OK) {
-        if (result != NULL) result->bytes_read_source += size;
         __atomic_store_n(state, 2, __ATOMIC_RELEASE);
     } else if (status == VIPR_STATUS_SOURCE_MISMATCH) {
         __atomic_store_n(state, 3, __ATOMIC_RELEASE);
@@ -143,6 +151,8 @@ static vipr_status verify_source_range(vipr_io_session *session,
                                        const uint8_t *source_chunk_digests,
                                        uint32_t source_chunk_count,
                                        volatile uint32_t *source_chunk_states,
+                                       const uint8_t *source_cache,
+                                       uint64_t source_cache_size,
                                        volatile uint32_t *cancel,
                                        vipr_group_result *result,
                                        char *error_buffer,
@@ -155,7 +165,8 @@ static vipr_status verify_source_range(vipr_io_session *session,
     }
     for (uint32_t index = window->source_first_chunk; index < (uint32_t)end; ++index) {
         vipr_status status = hash_source_chunk(session, index, source_file_size, source_chunk_digests,
-                                              source_chunk_count, source_chunk_states, cancel, result,
+                                              source_chunk_count, source_chunk_states,
+                                              source_cache, source_cache_size, cancel, result,
                                               error_buffer, error_buffer_size);
         if (status != VIPR_STATUS_OK) return status;
     }
@@ -192,6 +203,8 @@ static vipr_status read_copy(vipr_io_session *session,
                              uint32_t output_size,
                              uint32_t *produced,
                              uint64_t length,
+                             const uint8_t *source_cache,
+                             uint64_t source_cache_size,
                              volatile uint32_t *cancel,
                              vipr_group_result *result,
                              char *error_buffer,
@@ -210,6 +223,12 @@ static vipr_status read_copy(vipr_io_session *session,
     if (relative > window->source_size || length > (uint64_t)window->source_size - relative) {
         vipr_set_error(error_buffer, error_buffer_size, "COPY instruction exceeds declared source span");
         return VIPR_STATUS_INVALID_WINDOW;
+    }
+    if (source_cache != NULL && source_offset <= source_cache_size &&
+        length <= source_cache_size - source_offset) {
+        memcpy(output + *produced, source_cache + (size_t)source_offset, (size_t)length);
+        *produced += (uint32_t)length;
+        return VIPR_STATUS_OK;
     }
     uint64_t copied = 0;
     while (copied < length) {
@@ -230,6 +249,8 @@ static vipr_status decode_delta(vipr_io_session *session,
                                 const uint8_t *stream,
                                 size_t stream_size,
                                 uint64_t source_file_size,
+                                const uint8_t *source_cache,
+                                uint64_t source_cache_size,
                                 uint8_t *output,
                                 volatile uint32_t *cancel,
                                 vipr_group_result *result,
@@ -326,7 +347,8 @@ static vipr_status decode_delta(vipr_io_session *session,
             uint64_t add_length = (uint64_t)*cursor++;
             if (add_length == 0 || local_offset > UINT64_MAX - window->source_offset) goto malformed;
             vipr_status status = read_copy(session, window, window->source_offset + local_offset, source_file_size, output,
-                                           window->output_size, &produced, copy_length, cancel, result,
+                                           window->output_size, &produced, copy_length,
+                                           source_cache, source_cache_size, cancel, result,
                                            error_buffer, error_buffer_size);
             if (status != VIPR_STATUS_OK) return status;
             if (add_length > (uint64_t)(end - cursor) || add_length > window->output_size - produced) goto malformed;
@@ -342,7 +364,8 @@ static vipr_status decode_delta(vipr_io_session *session,
         }
         {
             vipr_status status = read_copy(session, window, source_offset, source_file_size, output, window->output_size,
-                                           &produced, length, cancel, result, error_buffer, error_buffer_size);
+                                           &produced, length, source_cache, source_cache_size,
+                                           cancel, result, error_buffer, error_buffer_size);
             if (status != VIPR_STATUS_OK) return status;
             previous_copy_end = source_offset + length;
         }
@@ -467,6 +490,8 @@ static vipr_status materialize_window(vipr_io_session *session,
                                       const uint8_t *source_chunk_digests,
                                       uint32_t source_chunk_count,
                                       volatile uint32_t *source_chunk_states,
+                                      const uint8_t *source_cache,
+                                      uint64_t source_cache_size,
                                       uint8_t *output,
                                       int verify_window_digest,
                                       volatile uint32_t *cancel,
@@ -478,18 +503,21 @@ static vipr_status materialize_window(vipr_io_session *session,
         return VIPR_STATUS_INVALID_ARGUMENT;
     }
     vipr_status status = verify_source_range(session, window, source_file_size, source_chunk_digests,
-                                             source_chunk_count, source_chunk_states, cancel, result,
+                                             source_chunk_count, source_chunk_states,
+                                             source_cache, source_cache_size, cancel, result,
                                              error_buffer, error_buffer_size);
     if (status != VIPR_STATUS_OK) return status;
 
     switch (window->kind) {
     case VIPR_WINDOW_SAME:
         status = read_copy(session, window, window->output_offset, source_file_size, output, window->output_size,
-                           &(uint32_t){0}, window->output_size, cancel, result, error_buffer, error_buffer_size);
+                           &(uint32_t){0}, window->output_size, source_cache, source_cache_size,
+                           cancel, result, error_buffer, error_buffer_size);
         break;
     case VIPR_WINDOW_COPY:
         status = read_copy(session, window, window->source_offset, source_file_size, output, window->output_size,
-                           &(uint32_t){0}, window->output_size, cancel, result, error_buffer, error_buffer_size);
+                           &(uint32_t){0}, window->output_size, source_cache, source_cache_size,
+                           cancel, result, error_buffer, error_buffer_size);
         break;
     case VIPR_WINDOW_ZERO:
         memset(output, 0, window->output_size);
@@ -530,7 +558,8 @@ static vipr_status materialize_window(vipr_io_session *session,
                                     error_buffer, error_buffer_size);
         if (status == VIPR_STATUS_OK) {
             status = decode_delta(session, window, session->payload_buffer.data, window->payload_size,
-                                  source_file_size, output, cancel, result, error_buffer, error_buffer_size);
+                                  source_file_size, source_cache, source_cache_size, output,
+                                  cancel, result, error_buffer, error_buffer_size);
         }
         break;
     case VIPR_WINDOW_DELTA_ZSTD:
@@ -547,7 +576,8 @@ static vipr_status materialize_window(vipr_io_session *session,
         }
         if (status == VIPR_STATUS_OK) {
             status = decode_delta(session, window, session->expanded_buffer.data, window->expanded_size,
-                                  source_file_size, output, cancel, result, error_buffer, error_buffer_size);
+                                  source_file_size, source_cache, source_cache_size, output,
+                                  cancel, result, error_buffer, error_buffer_size);
         }
         break;
     default:
@@ -573,6 +603,7 @@ vipr_status vipr_apply_group(vipr_io_session *session,
                              uint64_t source_file_size,
                              const uint8_t *source_chunk_digests, uint32_t source_chunk_count,
                              volatile uint32_t *source_chunk_states,
+                             const uint8_t *source_cache, uint64_t source_cache_size,
                              const uint8_t expected_group_digest[32],
                              volatile uint32_t *cancel,
                              vipr_group_result *result,
@@ -603,6 +634,7 @@ vipr_status vipr_apply_group(vipr_io_session *session,
         }
         status = materialize_window(session, window, source_file_size, source_chunk_digests,
                                     source_chunk_count, source_chunk_states,
+                                    source_cache, source_cache_size,
                                     buffer + (size_t)(window->output_offset - group_offset), 0, cancel, result,
                                     error_buffer, error_buffer_size);
         if (status != VIPR_STATUS_OK) break;
@@ -632,6 +664,7 @@ vipr_status vipr_apply_changed_window(vipr_io_session *session, const uint8_t *e
                                       uint64_t source_file_size,
                                       const uint8_t *source_chunk_digests, uint32_t source_chunk_count,
                                       volatile uint32_t *source_chunk_states,
+                                      const uint8_t *source_cache, uint64_t source_cache_size,
                                       volatile uint32_t *cancel,
                                       vipr_group_result *result,
                                       char *error_buffer, size_t error_buffer_size) {
@@ -651,7 +684,8 @@ vipr_status vipr_apply_changed_window(vipr_io_session *session, const uint8_t *e
     }
     uint8_t *buffer = session->group_buffer.data;
     status = materialize_window(session, window, source_file_size, source_chunk_digests,
-                                source_chunk_count, source_chunk_states, buffer, 1, cancel, result,
+                                source_chunk_count, source_chunk_states,
+                                source_cache, source_cache_size, buffer, 1, cancel, result,
                                 error_buffer, error_buffer_size);
     if (status == VIPR_STATUS_OK && window->kind != VIPR_WINDOW_SAME) {
         status = vipr_write_at(session, session->output, window->output_offset, buffer, window->output_size,

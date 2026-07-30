@@ -48,7 +48,7 @@ func automaticMemoryLimit(kind operationKind) uint64 {
 	if kind == operationCreate {
 		return 1536 << 20
 	}
-	return 768 << 20
+	return 1 << 30
 }
 
 func strconvIntSizeRuntime() int {
