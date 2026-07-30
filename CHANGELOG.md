@@ -7,6 +7,11 @@ version before the first retained tag.
 
 ## [Unreleased]
 
+- Added JSON file-pair manifests, architecture-aware index limits, explicit
+  memory limits, profile-aware operation scheduling, clone-first snapshots,
+  recoverable apply journals, and the documented V4 metadata policy.
+- Added bounded source-image caching for COPY-heavy application and release
+  SPDX/provenance records.
 ### Added
 
 - Replaced the container with V4: a binary trailing index, canonical 8 MiB
@@ -21,6 +26,8 @@ version before the first retained tag.
 
 ### Removed
 
+- Retired the historical `internal/zstd` wrapper from default builds; native V4
+  is the only production zstd data plane.
 - Removed V3 from the default build and removed the Go BLAKE3 implementation.
 
 ## [0.5.1] - 2026-07-29
