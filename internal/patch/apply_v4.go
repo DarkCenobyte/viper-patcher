@@ -86,6 +86,9 @@ func applyOpened(ctx context.Context, opened *openedPatch, release func() error,
 	if err != nil {
 		return errors.Join(err, release())
 	}
+	if err := recoverApplyTransactions(root, durability); err != nil {
+		return errors.Join(err, root.Close(), release())
+	}
 	defer func() { resultErr = errors.Join(resultErr, root.Close(), release()) }()
 
 	token := nativev4.NewCancelToken(ctx)

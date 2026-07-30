@@ -100,6 +100,17 @@ func reserveRootPath(root *installationRoot, directory, prefix string) (string, 
 }
 
 func commitPrepared(root *installationRoot, files []preparedFile, durability DurabilityMode) (resultErr error) {
+	for index := range files {
+		backup, err := reserveRootPath(root, filepath.Dir(files[index].path), ".viper-v4-backup-")
+		if err != nil {
+			return fmt.Errorf("reserve backup for %q: %w", files[index].path, err)
+		}
+		files[index].backup = backup
+	}
+	journal, err := beginApplyJournal(root, files, durability)
+	if err != nil {
+		return err
+	}
 	committed := 0
 	allCommitted := false
 	defer func() {
@@ -107,22 +118,26 @@ func commitPrepared(root *installationRoot, files []preparedFile, durability Dur
 			return
 		}
 		var rollbackErrors []error
-		for i := committed - 1; i >= 0; i-- {
-			if err := root.root.Remove(files[i].path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				rollbackErrors = append(rollbackErrors, fmt.Errorf("remove replacement %q: %w", files[i].path, err))
-				continue
+		for i := len(files) - 1; i >= 0; i-- {
+			if files[i].backup != "" && rootPathExists(root, files[i].backup) {
+				if err := root.root.Remove(files[i].path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("remove replacement %q: %w", files[i].path, err))
+					continue
+				}
+				if err := root.root.Rename(files[i].backup, files[i].path); err != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("restore %q: %w", files[i].path, err))
+				}
 			}
-			if err := root.root.Rename(files[i].backup, files[i].path); err != nil {
-				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore %q: %w", files[i].path, err))
-			}
-		}
-		for i := committed; i < len(files); i++ {
 			if err := root.root.Remove(files[i].temp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("remove abandoned output %q: %w", files[i].temp, err))
 			}
 		}
 		if rollbackErr := errors.Join(rollbackErrors...); rollbackErr != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("rollback after failed V4 commit: %w", rollbackErr))
+			return
+		}
+		if err := journal.remove(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove rolled-back transaction journal: %w", err))
 		}
 	}()
 
@@ -145,13 +160,11 @@ func commitPrepared(root *installationRoot, files []preparedFile, durability Dur
 			return err
 		}
 
-		backup, err := reserveRootPath(root, filepath.Dir(item.path), ".viper-v4-backup-")
-		if err != nil {
-			return fmt.Errorf("reserve backup for %q: %w", item.path, err)
-		}
-		item.backup = backup
 		if err := root.root.Rename(item.path, item.backup); err != nil {
 			return fmt.Errorf("backup %q: %w", item.path, err)
+		}
+		if err := journal.mark(i, "backed-up"); err != nil {
+			return err
 		}
 		if err := root.root.Rename(item.temp, item.path); err != nil {
 			replaceErr := fmt.Errorf("replace %q: %w", item.path, err)
@@ -163,12 +176,18 @@ func commitPrepared(root *installationRoot, files []preparedFile, durability Dur
 			}
 			return replaceErr
 		}
+		if err := journal.mark(i, "replaced"); err != nil {
+			return err
+		}
 		committed++
 		if durability == DurabilityDurable {
 			if err := syncDirectoryV4(root, filepath.Dir(item.path)); err != nil {
 				return err
 			}
 		}
+	}
+	if err := journal.markCommitted(); err != nil {
+		return err
 	}
 	allCommitted = true
 
@@ -191,6 +210,9 @@ func commitPrepared(root *installationRoot, files []preparedFile, durability Dur
 				cleanup = append(cleanup, err)
 			}
 		}
+	}
+	if err := journal.remove(); err != nil {
+		cleanup = append(cleanup, fmt.Errorf("remove transaction journal: %w", err))
 	}
 	return committedWarning("patch application", errors.Join(cleanup...))
 }
