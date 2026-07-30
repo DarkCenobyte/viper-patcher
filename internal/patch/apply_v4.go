@@ -17,6 +17,7 @@ type ApplyOptions struct {
 	Direction         Direction
 	ExpectedPatchHash string
 	WorkerBudget      int
+	MemoryLimit       uint64
 	Verify            VerifyMode
 	Durability        DurabilityMode
 	IOProfile         IOProfile
@@ -25,6 +26,7 @@ type PreparedApplyOptions struct {
 	Root         string
 	Direction    Direction
 	WorkerBudget int
+	MemoryLimit  uint64
 	Verify       VerifyMode
 	Durability   DurabilityMode
 	IOProfile    IOProfile
@@ -42,7 +44,7 @@ func ApplyWithOptions(ctx context.Context, options ApplyOptions, callback progre
 	if err != nil {
 		return err
 	}
-	return applyOpened(ctx, opened, opened.Close, options.Root, options.Direction, options.WorkerBudget, verify, durability, profile, callback)
+	return applyOpened(ctx, opened, opened.Close, options.Root, options.Direction, options.WorkerBudget, options.MemoryLimit, verify, durability, profile, callback)
 }
 func ApplyPreparedWithOptions(ctx context.Context, prepared *PreparedPatch, options PreparedApplyOptions, callback progress.Callback) error {
 	verify, durability, profile, err := normalizeApplyModes(options.Verify, options.Durability, options.IOProfile)
@@ -53,7 +55,7 @@ func ApplyPreparedWithOptions(ctx context.Context, prepared *PreparedPatch, opti
 	if err != nil {
 		return err
 	}
-	return applyOpened(ctx, opened, release, options.Root, options.Direction, options.WorkerBudget, verify, durability, profile, callback)
+	return applyOpened(ctx, opened, release, options.Root, options.Direction, options.WorkerBudget, options.MemoryLimit, verify, durability, profile, callback)
 }
 func normalizeApplyModes(verify VerifyMode, durability DurabilityMode, profile IOProfile) (VerifyMode, DurabilityMode, IOProfile, error) {
 	normalizedVerify, err := ParseVerifyMode(string(verify))
@@ -71,7 +73,7 @@ func normalizeApplyModes(verify VerifyMode, durability DurabilityMode, profile I
 	return normalizedVerify, normalizedDurability, normalizedProfile, nil
 }
 
-func applyOpened(ctx context.Context, opened *openedPatch, release func() error, rootPath string, direction Direction, workers int, verify VerifyMode, durability DurabilityMode, profile IOProfile, callback progress.Callback) (resultErr error) {
+func applyOpened(ctx context.Context, opened *openedPatch, release func() error, rootPath string, direction Direction, workers int, memoryLimit uint64, verify VerifyMode, durability DurabilityMode, profile IOProfile, callback progress.Callback) (resultErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -95,11 +97,13 @@ func applyOpened(ctx context.Context, opened *openedPatch, release func() error,
 	defer token.Close()
 	prepared := make([]preparedFile, len(opened.parsed.Header.Files))
 	applyProgress := newApplyProgress(callback, opened.parsed.Header.Files, direction)
+	resources := newMemoryBudget(memoryLimit, operationApply)
 	fileWorkers, perFileWorkers := applicationWorkers(profile, effectiveWorkers(workers), len(prepared))
+	fileWorkers, perFileWorkers = fitApplicationWorkers(resources, fileWorkers, perFileWorkers)
 	operationErr := parallelFor(ctx, len(prepared), fileWorkers, func(ctx context.Context, index int) error {
 		entry := opened.parsed.Header.Files[index]
 		fileCallback := applyProgress.callbackForFile(index)
-		item, err := prepareApplicationFile(ctx, token, opened, root, entry, direction, perFileWorkers, verify, durability, profile, index, len(prepared), fileCallback)
+		item, err := prepareApplicationFile(ctx, token, opened, root, entry, direction, perFileWorkers, resources, verify, durability, profile, index, len(prepared), fileCallback)
 		if err != nil {
 			return fmt.Errorf("prepare %q: %w", entry.Path, err)
 		}
@@ -173,7 +177,13 @@ func directionData(entry patchformat.FileEntry, direction Direction) (inputSize,
 	return entry.SourceSize, entry.TargetSize, entry.SourceDigest, entry.TargetDigest, entry.SourceChunks, entry.TargetChunks, entry.ForwardWindows
 }
 
-func prepareApplicationFile(ctx context.Context, token *nativev4.CancelToken, opened *openedPatch, root *installationRoot, entry patchformat.FileEntry, direction Direction, workerBudget int, verify VerifyMode, durability DurabilityMode, profile IOProfile, index, count int, callback progress.Callback) (preparedFile, error) {
+func prepareApplicationFile(ctx context.Context, token *nativev4.CancelToken, opened *openedPatch, root *installationRoot, entry patchformat.FileEntry, direction Direction, workerBudget int, resources *memoryBudget, verify VerifyMode, durability DurabilityMode, profile IOProfile, index, count int, callback progress.Callback) (preparedFile, error) {
+	reservation := uint64(workerBudget+1) * applySessionReservation
+	lease, err := resources.Acquire(ctx, reservation)
+	if err != nil {
+		return preparedFile{}, err
+	}
+	defer lease.Release()
 	source, identity, targetName, err := root.openStableRegularFile(entry.Path)
 	if err != nil {
 		return preparedFile{}, err

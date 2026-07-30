@@ -20,6 +20,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	var patchFile string
 	var reverse bool
 	var workerBudget int
+	var memoryLimitValue string
 	var verifyValue string
 	var durabilityValue string
 	var ioProfileValue string
@@ -28,6 +29,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.StringVar(&patchFile, "patch-file", "", "input .vipr patch")
 	flags.BoolVar(&reverse, "reverse", false, "apply reverse differentials")
 	flags.IntVar(&workerBudget, "workers", 0, "logical worker target; 0 selects the automatic process-aware default")
+	flags.StringVar(&memoryLimitValue, "memory-limit", "auto", "auto or a byte size such as 512M")
 	flags.StringVar(&verifyValue, "verify", "referenced", "referenced, strict, or output")
 	flags.StringVar(&durabilityValue, "durability", "buffered", "buffered or durable")
 	flags.StringVar(&ioProfileValue, "io-profile", "auto", "auto, hdd, ssd, or nvme")
@@ -62,6 +64,11 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "Error: --workers must be 0 (automatic) or between 1 and %d.\n", workerbudget.Maximum())
 		return 2
 	}
+	memoryLimit, err := patch.ParseMemoryLimit(memoryLimitValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 2
+	}
 	verifyMode, err := patch.ParseVerifyMode(verifyValue)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
@@ -88,6 +95,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		Root:         flags.Arg(0),
 		Direction:    direction,
 		WorkerBudget: workerBudget,
+		MemoryLimit:  memoryLimit,
 		Verify:       verifyMode,
 		Durability:   durabilityMode,
 		IOProfile:    ioProfile,
@@ -114,6 +122,7 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  <target-directory>            Required positional argument.")
 	fmt.Fprintln(writer, "  [--reverse]                   Default: false.")
 	fmt.Fprintln(writer, "  [--workers <count>]           0 (automatic) or 1..logical CPU count. Default: 0.")
+	fmt.Fprintln(writer, "  [--memory-limit <size>]       auto or at least 128M. Default: auto.")
 	fmt.Fprintln(writer, "  [--verify <mode>]             referenced, strict, or output. Default: referenced.")
 	fmt.Fprintln(writer, "  [--durability <mode>]         buffered or durable. Default: buffered.")
 	fmt.Fprintln(writer, "  [--io-profile <profile>]      auto, hdd, ssd, or nvme. Default: auto.")

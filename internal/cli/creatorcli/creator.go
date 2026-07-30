@@ -45,6 +45,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	var reverse bool
 	var workDirectory string
 	var workerBudget int
+	var memoryLimitValue string
 	var windowSize string
 	var optimization string
 	var help bool
@@ -56,6 +57,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.BoolVar(&reverse, "create-reverse", false, "include reverse differentials")
 	flags.StringVar(&workDirectory, "work-directory", "", "parent directory for temporary creator data")
 	flags.IntVar(&workerBudget, "workers", 0, "logical worker target; 0 selects the automatic system-aware default")
+	flags.StringVar(&memoryLimitValue, "memory-limit", "auto", "auto or a byte size such as 512M")
 	flags.StringVar(&windowSize, "window-size", "auto", "auto, 256K, 512K, 1M, 2M, 4M, or 8M")
 	flags.StringVar(&optimization, "optimize", "balanced", "balanced, apply-speed, or patch-size")
 	flags.Bool("headless", false, "force command-line mode")
@@ -126,6 +128,11 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 2
 	}
+	memoryLimit, err := patch.ParseMemoryLimit(memoryLimitValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 2
+	}
 	reporter := newTerminalProgress(stderr)
 	err = patch.Create(ctx, patch.CreateOptions{
 		Files:            pairs,
@@ -135,6 +142,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		CreateReverse:    reverse,
 		WorkDirectory:    workDirectory,
 		WorkerBudget:     workerBudget,
+		MemoryLimit:      memoryLimit,
 		WindowSize:       windowSizeBytes,
 		Optimization:     optimizationMode,
 	}, reporter.Report)
@@ -163,6 +171,7 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  [--create-reverse]             Default: false.")
 	fmt.Fprintln(writer, "  [--work-directory <directory>] Optional creator temporary-data parent.")
 	fmt.Fprintln(writer, "  [--workers <count>]            0 (automatic) or 1..logical CPU count. Default: 0.")
+	fmt.Fprintln(writer, "  [--memory-limit <size>]        auto or at least 128M. Default: auto.")
 	fmt.Fprintln(writer, "  [--window-size <size>]         auto, 256K, 512K, 1M, 2M, 4M, or 8M. Default: auto.")
 	fmt.Fprintln(writer, "  [--optimize <profile>]         balanced, apply-speed, or patch-size. Default: balanced.")
 	fmt.Fprintln(writer, "  [--headless]                   Force CLI mode.")

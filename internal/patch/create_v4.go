@@ -26,6 +26,7 @@ type CreateOptions struct {
 	CreateReverse    bool
 	WorkDirectory    string
 	WorkerBudget     int
+	MemoryLimit      uint64
 	WindowSize       uint32
 	Optimization     OptimizationMode
 }
@@ -107,6 +108,8 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 	if version := nativev4.ZstdVersion(); version != patchformat.SupportedZstdVersion {
 		return fmt.Errorf("Viper-Patcher V4 requires libzstd %s, linked version is %s", patchformat.SupportedZstdVersion, version)
 	}
+	resources := newMemoryBudget(options.MemoryLimit, operationCreate)
+	createWorkers := resources.LimitWorkers(effectiveWorkers(options.WorkerBudget), createSessionReservation)
 	workParent := options.WorkDirectory
 	if workParent != "" {
 		absolute, err := filepath.Abs(workParent)
@@ -148,7 +151,7 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		entry, err := createFileEntry(ctx, output, snapshots[index], options, effectiveWorkers(options.WorkerBudget), index, len(snapshots), callback)
+		entry, err := createFileEntry(ctx, output, snapshots[index], options, createWorkers, resources, index, len(snapshots), callback)
 		if err != nil {
 			return fmt.Errorf("create V4 file %q: %w", snapshots[index].path, err)
 		}
@@ -292,7 +295,12 @@ func copySnapshot(ctx context.Context, sourcePath, targetPath string) (uint64, e
 	return total, nil
 }
 
-func createFileEntry(ctx context.Context, output *os.File, snapshot snapshotPair, options CreateOptions, workers, index, count int, callback progress.Callback) (patchformat.FileEntry, error) {
+func createFileEntry(ctx context.Context, output *os.File, snapshot snapshotPair, options CreateOptions, workers int, resources *memoryBudget, index, count int, callback progress.Callback) (patchformat.FileEntry, error) {
+	lease, err := resources.Acquire(ctx, uint64(workers)*createSessionReservation)
+	if err != nil {
+		return patchformat.FileEntry{}, err
+	}
+	defer lease.Release()
 	source, err := os.Open(snapshot.sourcePath)
 	if err != nil {
 		return patchformat.FileEntry{}, err

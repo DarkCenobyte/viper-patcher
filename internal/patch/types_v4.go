@@ -115,6 +115,41 @@ func ParseWindowSize(value string) (uint32, error) {
 	}
 }
 
+func ParseMemoryLimit(value string) (uint64, error) {
+	normalized := strings.ToUpper(strings.TrimSpace(value))
+	if normalized == "" || normalized == "AUTO" {
+		return 0, nil
+	}
+	multiplier := uint64(1)
+	for _, suffix := range []struct {
+		value      string
+		multiplier uint64
+	}{
+		{"GIB", 1 << 30}, {"GB", 1 << 30}, {"G", 1 << 30},
+		{"MIB", 1 << 20}, {"MB", 1 << 20}, {"M", 1 << 20},
+		{"KIB", 1 << 10}, {"KB", 1 << 10}, {"K", 1 << 10},
+		{"B", 1},
+	} {
+		if strings.HasSuffix(normalized, suffix.value) {
+			multiplier = suffix.multiplier
+			normalized = strings.TrimSpace(strings.TrimSuffix(normalized, suffix.value))
+			break
+		}
+	}
+	number, err := strconv.ParseUint(normalized, 10, 64)
+	if err != nil || number == 0 {
+		return 0, fmt.Errorf("memory limit must be auto or a positive byte size such as 512M")
+	}
+	if number > ^uint64(0)/multiplier {
+		return 0, fmt.Errorf("memory limit overflows uint64")
+	}
+	result := number * multiplier
+	if result < 128<<20 {
+		return 0, fmt.Errorf("memory limit must be at least 128M")
+	}
+	return result, nil
+}
+
 func automaticWindowSize(size uint64) uint32 {
 	switch {
 	case size < 1<<20:
