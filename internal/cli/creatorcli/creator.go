@@ -39,6 +39,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags := flag.NewFlagSet("creator", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var pairs filePairList
+	var filePairsFile string
 	var level int
 	var comment string
 	var reverse bool
@@ -49,6 +50,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	var help bool
 	var version bool
 	flags.Var(&pairs, "file-pair", "source and target pair; repeat for each file")
+	flags.StringVar(&filePairsFile, "file-pairs-file", "", "JSON array of source/target objects")
 	flags.IntVar(&level, "compression-level", 3, "zstd compression level")
 	flags.StringVar(&comment, "comment", "Created with Viper-Patcher", "comment stored in the patch")
 	flags.BoolVar(&reverse, "create-reverse", false, "include reverse differentials")
@@ -77,8 +79,20 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stdout, "viper-patcher creator %s (%s, %s)\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 		return 0
 	}
+	if filePairsFile != "" {
+		if len(pairs) != 0 {
+			fmt.Fprintln(stderr, "Error: --file-pair and --file-pairs-file cannot be combined.")
+			return 2
+		}
+		loaded, loadErr := loadFilePairsJSON(filePairsFile)
+		if loadErr != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", loadErr)
+			return 2
+		}
+		pairs = loaded
+	}
 	if len(pairs) == 0 {
-		fmt.Fprintln(stderr, "Error: at least one --file-pair value is required.")
+		fmt.Fprintln(stderr, "Error: at least one --file-pair value or --file-pairs-file is required.")
 		fmt.Fprintln(stderr)
 		printUsage(stderr)
 		return 2
@@ -141,7 +155,9 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  creator --headless --file-pair old/bin/game.exe::new/bin/game.exe --file-pair old/data/assets.bin::new/data/assets.bin --compression-level 12 --workers 4 --comment \"Version 1.1 update\" --create-reverse update.vipr")
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "Supported parameters and arguments:")
-	fmt.Fprintln(writer, "  --file-pair <source>::<target> Required. Repeat once per source/target pair.")
+	fmt.Fprintln(writer, "  --file-pair <source>::<target> Repeat once per source/target pair.")
+	fmt.Fprintln(writer, "  --file-pairs-file <pairs.json> JSON array of {source,target} objects.")
+	fmt.Fprintln(writer, "                                  Use exactly one input form.")
 	fmt.Fprintln(writer, "  [--compression-level <level>]  Default: 3.")
 	fmt.Fprintln(writer, "  [--comment <text>]             Default: Created with Viper-Patcher.")
 	fmt.Fprintln(writer, "  [--create-reverse]             Default: false.")
