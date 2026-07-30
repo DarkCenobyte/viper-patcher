@@ -1,3 +1,5 @@
+//go:build vipr_legacy_zstd
+
 package zstd
 
 /*

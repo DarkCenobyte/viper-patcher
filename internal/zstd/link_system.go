@@ -1,4 +1,4 @@
-//go:build !vipr_static_zstd
+//go:build vipr_legacy_zstd && !vipr_static_zstd
 
 package zstd
 

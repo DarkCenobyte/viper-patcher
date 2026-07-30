@@ -57,7 +57,7 @@ jobs:
           CGO_LDFLAGS: "-fsanitize=address,undefined"
           ASAN_OPTIONS: "detect_leaks=0:halt_on_error=1"
           UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
-        run: go test -count=1 -tags vipr_static_zstd,migrated_fynedo ./internal/zstd ./internal/patch
+        run: go test -count=1 -tags vipr_static_zstd,migrated_fynedo ./internal/nativev4 ./internal/patch
 
       - name: Run go vet
         env:
@@ -80,7 +80,7 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: |
-          packages="./internal/appmode ./internal/buildinfo ./internal/cli/... ./internal/hashutil ./internal/patch ./internal/patchformat ./internal/pathutil ./internal/progress ./internal/zstd"
+          packages="./internal/appmode ./internal/buildinfo ./internal/cli/... ./internal/hashutil ./internal/patch ./internal/patchformat ./internal/pathutil ./internal/progress"
           go test -count=1 -tags vipr_static_zstd,migrated_fynedo -coverprofile=coverage.out $packages
           go tool cover -func=coverage.out | tee coverage.txt
           coverage="$(awk '$1 == "total:" { gsub(/%/, "", $3); print $3 }' coverage.txt)"
@@ -136,7 +136,7 @@ jobs:
           LANG: C.UTF-8
           LC_ALL: C.UTF-8
         run: |
-          packages="./internal/appmode ./internal/buildinfo ./internal/cli/... ./internal/hashutil ./internal/patch ./internal/patchformat ./internal/pathutil ./internal/progress ./internal/zstd"
+          packages="./internal/appmode ./internal/buildinfo ./internal/cli/... ./internal/hashutil ./internal/patch ./internal/patchformat ./internal/pathutil ./internal/progress"
           go test -count=1 -tags vipr_static_zstd,migrated_fynedo $packages
 
   core-windows:
@@ -227,8 +227,7 @@ jobs:
             "./internal/patch",
             "./internal/patchformat",
             "./internal/pathutil",
-            "./internal/progress",
-            "./internal/zstd"
+            "./internal/progress"
           )
           go test -count=1 -tags vipr_static_zstd,migrated_fynedo $packages
           if ($LASTEXITCODE -ne 0) {

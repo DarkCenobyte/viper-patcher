@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build vipr_legacy_zstd && !windows
 
 package zstd
 
