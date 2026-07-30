@@ -27,6 +27,7 @@ type CreateOptions struct {
 	WorkDirectory    string
 	WorkerBudget     int
 	MemoryLimit      uint64
+	IOProfile        IOProfile
 	WindowSize       uint32
 	Optimization     OptimizationMode
 }
@@ -110,6 +111,7 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 	}
 	resources := newMemoryBudget(options.MemoryLimit, operationCreate)
 	createWorkers := resources.LimitWorkers(effectiveWorkers(options.WorkerBudget), createSessionReservation)
+	ctx = withOperationScheduler(ctx, options.IOProfile, createWorkers)
 	workParent := options.WorkDirectory
 	if workParent != "" {
 		absolute, err := filepath.Abs(workParent)
@@ -123,7 +125,7 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 		return fmt.Errorf("create work directory: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(work) }()
-	snapshots, snapshotErr := createSnapshots(ctx, options.Files, work, callback)
+	snapshots, snapshotErr := createSnapshots(ctx, options.Files, work, createWorkers, callback)
 	if snapshotErr != nil {
 		return snapshotErr
 	}
@@ -222,7 +224,7 @@ func validateCreateOptions(options CreateOptions) error {
 	return nil
 }
 
-func createSnapshots(ctx context.Context, pairs []FilePair, work string, callback progress.Callback) ([]snapshotPair, error) {
+func createSnapshots(ctx context.Context, pairs []FilePair, work string, workers int, callback progress.Callback) ([]snapshotPair, error) {
 	sources := make([]string, len(pairs))
 	for i := range pairs {
 		sources[i] = pairs[i].SourcePath
@@ -232,23 +234,31 @@ func createSnapshots(ctx context.Context, pairs []FilePair, work string, callbac
 		return nil, err
 	}
 	result := make([]snapshotPair, len(pairs))
-	for i, pair := range pairs {
-		relative, err := pathutil.RelativePatchPath(base, pair.SourcePath)
-		if err != nil {
-			return nil, err
-		}
-		sourcePath := filepath.Join(work, fmt.Sprintf("%06d-source", i))
-		targetPath := filepath.Join(work, fmt.Sprintf("%06d-target", i))
-		sourceSize, err := copySnapshot(ctx, pair.SourcePath, sourcePath)
-		if err != nil {
-			return nil, err
-		}
-		targetSize, err := copySnapshot(ctx, pair.TargetPath, targetPath)
-		if err != nil {
-			return nil, err
-		}
-		result[i] = snapshotPair{relative, sourcePath, targetPath, sourceSize, targetSize}
-		progress.Report(callback, progress.Event{FileIndex: i + 1, FileCount: len(pairs), Path: relative, ProcessedBytes: sourceSize + targetSize, TotalBytes: sourceSize + targetSize, Stage: progress.StageSnapshotting})
+	workers = min(max(1, workers), len(pairs))
+	err = parallelFor(ctx, len(pairs), workers, func(ctx context.Context, i int) error {
+		return runScheduled(ctx, taskCost{ReadUnits: 1, WriteUnits: 1}, func() error {
+			pair := pairs[i]
+			relative, err := pathutil.RelativePatchPath(base, pair.SourcePath)
+			if err != nil {
+				return err
+			}
+			sourcePath := filepath.Join(work, fmt.Sprintf("%06d-source", i))
+			targetPath := filepath.Join(work, fmt.Sprintf("%06d-target", i))
+			sourceSize, err := copySnapshot(ctx, pair.SourcePath, sourcePath)
+			if err != nil {
+				return err
+			}
+			targetSize, err := copySnapshot(ctx, pair.TargetPath, targetPath)
+			if err != nil {
+				return err
+			}
+			result[i] = snapshotPair{relative, sourcePath, targetPath, sourceSize, targetSize}
+			progress.Report(callback, progress.Event{FileIndex: i + 1, FileCount: len(pairs), Path: relative, ProcessedBytes: sourceSize + targetSize, TotalBytes: sourceSize + targetSize, Stage: progress.StageSnapshotting})
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -261,6 +271,24 @@ func copySnapshot(ctx context.Context, sourcePath, targetPath string) (uint64, e
 	target, err := os.OpenFile(targetPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return 0, err
+	}
+	cloneSession, cloneErr := nativev4.NewSession(source, nil, target)
+	if cloneErr == nil {
+		cloneErr = cloneSession.CloneOutput(uint64(identity.Size()))
+		_ = cloneSession.Close()
+	}
+	if cloneErr == nil {
+		if err := target.Close(); err != nil {
+			return 0, err
+		}
+		if err := stableUnchanged(source, sourcePath, identity); err != nil {
+			return 0, err
+		}
+		return uint64(identity.Size()), nil
+	}
+	if !nativev4.IsUnsupported(cloneErr) {
+		target.Close()
+		return 0, cloneErr
 	}
 	buffer := make([]byte, 1<<20)
 	var total uint64
@@ -403,7 +431,12 @@ func buildWindowSetToOutput(ctx context.Context, output, source, target *os.File
 				if remaining := targetSize - offset; remaining < uint64(size) {
 					size = uint32(remaining)
 				}
-				borrowed, err := session.BuildWindowBorrowed(token, sourceSize, targetSize, offset, size, windowSize, level, mode)
+				var borrowed *nativev4.BorrowedWindow
+				err := runScheduled(operationCtx, taskCost{CPUUnits: 1, ReadUnits: 1}, func() error {
+					var buildErr error
+					borrowed, buildErr = session.BuildWindowBorrowed(token, sourceSize, targetSize, offset, size, windowSize, level, mode)
+					return buildErr
+				})
 				result := windowBuildResult{index: index, borrowed: borrowed, err: err}
 				if borrowed != nil {
 					result.ack = ack

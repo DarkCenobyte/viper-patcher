@@ -78,6 +78,7 @@ func applyOpened(ctx context.Context, opened *openedPatch, release func() error,
 		ctx = context.Background()
 	}
 	callback = progress.Serialize(callback)
+	ctx = withOperationScheduler(ctx, profile, effectiveWorkers(workers))
 	if direction != Forward && direction != Reverse {
 		return fmt.Errorf("unsupported direction %q", direction)
 	}
@@ -359,18 +360,20 @@ func applyClonedWindows(ctx context.Context, token *nativev4.CancelToken, pool *
 		progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: unchanged, TotalBytes: totalBytes, Stage: progress.StageApplying})
 	}
 	return parallelFor(ctx, len(changed), workers, func(ctx context.Context, job int) error {
-		i := changed[job]
-		session, err := pool.Acquire(ctx)
-		if err != nil {
+		return runScheduled(ctx, taskCost{CPUUnits: 1, ReadUnits: 1, WriteUnits: 1}, func() error {
+			i := changed[job]
+			session, err := pool.Acquire(ctx)
+			if err != nil {
+				return err
+			}
+			defer pool.Release(session)
+			_, err = session.ApplyChangedWindowWithToken(token, windows[i], sourceSize, verification)
+			if err == nil {
+				done := completed.Add(uint64(windows[i].OutputSize))
+				progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: done, TotalBytes: totalBytes, Stage: progress.StageApplying})
+			}
 			return err
-		}
-		defer pool.Release(session)
-		_, err = session.ApplyChangedWindowWithToken(token, windows[i], sourceSize, verification)
-		if err == nil {
-			done := completed.Add(uint64(windows[i].OutputSize))
-			progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: done, TotalBytes: totalBytes, Stage: progress.StageApplying})
-		}
-		return err
+		})
 	})
 }
 func applyWindowGroups(ctx context.Context, token *nativev4.CancelToken, pool *nativev4.SessionPool, windows []patchformat.WindowDescriptor, sourceSize, outputSize uint64, outputChunks []patchformat.Digest, verification *nativev4.SourceVerification, workers, index, count int, path string, callback progress.Callback) error {
@@ -383,18 +386,20 @@ func applyWindowGroups(ctx context.Context, token *nativev4.CancelToken, pool *n
 	}
 	var completed atomicCounter
 	return parallelFor(ctx, len(groups), workers, func(ctx context.Context, i int) error {
-		group := groups[i]
-		session, err := pool.Acquire(ctx)
-		if err != nil {
+		return runScheduled(ctx, taskCost{CPUUnits: 1, ReadUnits: 1, WriteUnits: 1}, func() error {
+			group := groups[i]
+			session, err := pool.Acquire(ctx)
+			if err != nil {
+				return err
+			}
+			defer pool.Release(session)
+			_, err = session.ApplyGroupWithToken(token, windows[group.first:group.last], group.offset, group.size, sourceSize, verification, outputChunks[i])
+			if err == nil {
+				done := completed.Add(uint64(group.size))
+				progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: done, TotalBytes: outputSize, Stage: progress.StageApplying})
+			}
 			return err
-		}
-		defer pool.Release(session)
-		_, err = session.ApplyGroupWithToken(token, windows[group.first:group.last], group.offset, group.size, sourceSize, verification, outputChunks[i])
-		if err == nil {
-			done := completed.Add(uint64(group.size))
-			progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: done, TotalBytes: outputSize, Stage: progress.StageApplying})
-		}
-		return err
+		})
 	})
 }
 
