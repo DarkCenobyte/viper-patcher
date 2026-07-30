@@ -15,6 +15,9 @@ if [ ! -f "$SOURCE/blake3.h" ]; then
     exit 1
 fi
 
+rm -rf "$OUTPUT"
+mkdir -p "$OBJECTS" "$OUTPUT/include" "$OUTPUT/lib"
+
 target=$($CC -dumpmachine 2>/dev/null || printf unknown)
 # -dumpmachine reports the compiler installation target and may still say
 # x86_64 when a wrapper adds -m32. Preprocessor macros describe the ABI that

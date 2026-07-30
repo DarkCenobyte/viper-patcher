@@ -15,14 +15,14 @@ NATIVE_STAMP := build/native-deps/.built
 all: check build
 
 fetch-zstd:
-	./scripts/fetch-zstd.sh
+	sh ./scripts/fetch-zstd.sh
 
 fetch-blake3:
-	./scripts/fetch-blake3.sh
+	sh ./scripts/fetch-blake3.sh
 
 $(NATIVE_STAMP): scripts/fetch-zstd.sh scripts/build-zstd.sh scripts/fetch-blake3.sh scripts/build-blake3.sh internal/zstdversion/version.go internal/blake3version/version.go
-	./scripts/fetch-zstd.sh
-	./scripts/build-zstd.sh
+	sh ./scripts/fetch-zstd.sh
+	sh ./scripts/build-zstd.sh
 	mkdir -p $(dir $(NATIVE_STAMP))
 	touch $(NATIVE_STAMP)
 
