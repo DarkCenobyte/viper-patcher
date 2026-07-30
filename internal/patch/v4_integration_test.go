@@ -165,13 +165,19 @@ func TestV4CommitRollsBackEarlierFiles(t *testing.T) {
 		firstSource.Close()
 		t.Fatal(err)
 	}
-	firstTempFile, firstTemp, err := createRootTemp(root.root, ".", ".viper-test-")
-	if err != nil {
-		firstSource.Close()
+	if err := firstSource.Close(); err != nil {
 		secondSource.Close()
 		t.Fatal(err)
 	}
+	if err := secondSource.Close(); err != nil {
+		t.Fatal(err)
+	}
+	firstTempFile, firstTemp, err := createRootTemp(root.root, ".", ".viper-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := firstTempFile.Write([]byte("first-new")); err != nil {
+		firstTempFile.Close()
 		t.Fatal(err)
 	}
 	if err := firstTempFile.Close(); err != nil {
@@ -179,8 +185,8 @@ func TestV4CommitRollsBackEarlierFiles(t *testing.T) {
 	}
 	missingTemp := filepath.Join(".", ".viper-missing-output")
 	err = commitPrepared(root, []preparedFile{
-		{path: firstName, temp: firstTemp, source: firstSource, identity: firstIdentity},
-		{path: secondName, temp: missingTemp, source: secondSource, identity: secondIdentity},
+		{path: firstName, temp: firstTemp, identity: firstIdentity},
+		{path: secondName, temp: missingTemp, identity: secondIdentity},
 	}, DurabilityBuffered)
 	if err == nil {
 		t.Fatal("expected the missing second prepared file to fail the commit")

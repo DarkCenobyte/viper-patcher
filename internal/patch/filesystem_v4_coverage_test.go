@@ -170,28 +170,27 @@ func TestV4CommitPreparedBufferedAndDurable(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if err := source.Close(); err != nil {
+					t.Fatal(err)
+				}
 				temp, tempName, err := createRootTemp(root.root, filepath.Dir(name), ".viper-output-")
 				if err != nil {
-					source.Close()
 					t.Fatal(err)
 				}
 				if _, err := temp.Write([]byte(item.new)); err != nil {
-					source.Close()
 					temp.Close()
 					t.Fatal(err)
 				}
 				if durability == DurabilityDurable {
 					if err := temp.Sync(); err != nil {
-						source.Close()
 						temp.Close()
 						t.Fatal(err)
 					}
 				}
 				if err := temp.Close(); err != nil {
-					source.Close()
 					t.Fatal(err)
 				}
-				prepared = append(prepared, preparedFile{path: name, temp: tempName, source: source, identity: identity})
+				prepared = append(prepared, preparedFile{path: name, temp: tempName, identity: identity})
 			}
 			if err := commitPrepared(root, prepared, durability); err != nil {
 				t.Fatal(err)
