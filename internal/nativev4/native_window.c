@@ -335,13 +335,36 @@ static int all_same_byte(const uint8_t *data, uint32_t size, uint8_t *value) {
 }
 
 
+static uint64_t sparse_load64(const uint8_t *data) {
+    uint64_t value;
+    memcpy(&value, data, sizeof(value));
+    return value;
+}
+
+static int word_has_zero_byte(uint64_t value) {
+    return ((value - 0x0101010101010101ULL) & ~value & 0x8080808080808080ULL) != 0;
+}
+
 static int build_sparse_ops(const uint8_t *source, const uint8_t *target, uint32_t size,
                             uint64_t source_offset, op_list *ops) {
     uint32_t cursor = 0;
     while (cursor < size) {
         uint32_t start = cursor;
         int equal = source[cursor] == target[cursor];
-        while (cursor < size && (source[cursor] == target[cursor]) == equal) cursor++;
+        if (equal) {
+            while (cursor + 8 <= size &&
+                   sparse_load64(source + cursor) == sparse_load64(target + cursor)) {
+                cursor += 8;
+            }
+            while (cursor < size && source[cursor] == target[cursor]) cursor++;
+        } else {
+            while (cursor + 8 <= size) {
+                uint64_t different = sparse_load64(source + cursor) ^ sparse_load64(target + cursor);
+                if (word_has_zero_byte(different)) break;
+                cursor += 8;
+            }
+            while (cursor < size && source[cursor] != target[cursor]) cursor++;
+        }
         uint32_t length = cursor - start;
         if (equal) {
             if (!ops_add_copy(ops, source_offset + start, length)) return 0;

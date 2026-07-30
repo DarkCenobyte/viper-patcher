@@ -354,11 +354,31 @@ vipr_status vipr_flush_output(vipr_io_session *session, char *error_buffer, size
     return vipr_flush(session->output, error_buffer, error_buffer_size);
 }
 
+static uint64_t vipr_load64(const uint8_t *data) {
+    uint64_t value;
+    memcpy(&value, data, sizeof(value));
+    return value;
+}
+
+static uint64_t vipr_mix64(uint64_t value) {
+    value ^= value >> 32;
+    value *= 0xd6e8feb86659fd93ULL;
+    value ^= value >> 32;
+    value *= 0xd6e8feb86659fd93ULL;
+    return value ^ (value >> 32);
+}
+
 uint64_t vipr_hash64(const uint8_t *data, size_t size) {
-    uint64_t hash = 1469598103934665603ULL;
-    for (size_t i = 0; i < size; ++i) { hash ^= data[i]; hash *= 1099511628211ULL; }
-    hash ^= hash >> 33; hash *= 0xff51afd7ed558ccdULL; hash ^= hash >> 33;
-    return hash;
+    uint64_t hash = 0xa0761d6478bd642fULL ^ (uint64_t)size;
+    while (size >= 8) {
+        uint64_t word = vipr_load64(data);
+        hash = vipr_mix64(hash ^ word ^ 0xe7037ed1a0b428dbULL);
+        data += 8;
+        size -= 8;
+    }
+    uint64_t tail = 0;
+    if (size != 0) memcpy(&tail, data, size);
+    return vipr_mix64(hash ^ tail ^ 0x8ebc6af09c88c6e3ULL);
 }
 
 size_t vipr_write_uvarint(uint8_t *output, uint64_t value) {
