@@ -181,6 +181,10 @@ func prepareApplicationFile(ctx context.Context, token *nativev4.CancelToken, op
 		source.Close()
 		return preparedFile{}, fmt.Errorf("installed file has wrong size")
 	}
+	if err := validateInstalledMetadata(identity.Mode()); err != nil {
+		source.Close()
+		return preparedFile{}, fmt.Errorf("validate installed metadata: %w", err)
+	}
 	verification := nativev4.NewSourceVerification(inputChunks, false)
 	sourceStrictlyVerified := false
 	if verify == VerifyStrict {
@@ -278,7 +282,7 @@ func prepareApplicationFile(ctx context.Context, token *nativev4.CancelToken, op
 		source.Close()
 		return preparedFile{}, err
 	}
-	if err = output.Chmod(identity.Mode().Perm()); err != nil {
+	if err = output.Chmod(targetPermissions(identity.Mode())); err != nil {
 		source.Close()
 		return preparedFile{}, err
 	}
