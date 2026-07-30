@@ -185,6 +185,7 @@ static int read_varint(const uint8_t **cursor, const uint8_t *end, uint64_t *val
 }
 
 static vipr_status read_copy(vipr_io_session *session,
+                             const vipr_window *window,
                              uint64_t source_offset,
                              uint64_t source_file_size,
                              uint8_t *output,
@@ -195,9 +196,19 @@ static vipr_status read_copy(vipr_io_session *session,
                              vipr_group_result *result,
                              char *error_buffer,
                              size_t error_buffer_size) {
-    if (length == 0 || source_offset > source_file_size || length > source_file_size - source_offset ||
+    if (window == NULL || produced == NULL || *produced > output_size || length == 0 ||
+        source_offset > source_file_size || length > source_file_size - source_offset ||
         length > output_size - *produced) {
-        vipr_set_error(error_buffer, error_buffer_size, "COPY instruction exceeds source or output bounds");
+        vipr_set_error(error_buffer, error_buffer_size, "COPY instruction exceeds file or output bounds");
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
+    if (source_offset < window->source_offset) {
+        vipr_set_error(error_buffer, error_buffer_size, "COPY instruction begins before declared source span");
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
+    uint64_t relative = source_offset - window->source_offset;
+    if (relative > window->source_size || length > (uint64_t)window->source_size - relative) {
+        vipr_set_error(error_buffer, error_buffer_size, "COPY instruction exceeds declared source span");
         return VIPR_STATUS_INVALID_WINDOW;
     }
     uint64_t copied = 0;
@@ -314,7 +325,7 @@ static vipr_status decode_delta(vipr_io_session *session,
             if (!read_varint(&cursor, end, &local_offset) || !read_varint(&cursor, end, &copy_length) || cursor >= end) goto malformed;
             uint64_t add_length = (uint64_t)*cursor++;
             if (add_length == 0 || local_offset > UINT64_MAX - window->source_offset) goto malformed;
-            vipr_status status = read_copy(session, window->source_offset + local_offset, source_file_size, output,
+            vipr_status status = read_copy(session, window, window->source_offset + local_offset, source_file_size, output,
                                            window->output_size, &produced, copy_length, cancel, result,
                                            error_buffer, error_buffer_size);
             if (status != VIPR_STATUS_OK) return status;
@@ -330,7 +341,7 @@ static vipr_status decode_delta(vipr_io_session *session,
             return VIPR_STATUS_INVALID_WINDOW;
         }
         {
-            vipr_status status = read_copy(session, source_offset, source_file_size, output, window->output_size,
+            vipr_status status = read_copy(session, window, source_offset, source_file_size, output, window->output_size,
                                            &produced, length, cancel, result, error_buffer, error_buffer_size);
             if (status != VIPR_STATUS_OK) return status;
             previous_copy_end = source_offset + length;
@@ -413,11 +424,11 @@ static vipr_status materialize_window(vipr_io_session *session,
 
     switch (window->kind) {
     case VIPR_WINDOW_SAME:
-        status = read_copy(session, window->output_offset, source_file_size, output, window->output_size,
+        status = read_copy(session, window, window->output_offset, source_file_size, output, window->output_size,
                            &(uint32_t){0}, window->output_size, cancel, result, error_buffer, error_buffer_size);
         break;
     case VIPR_WINDOW_COPY:
-        status = read_copy(session, window->source_offset, source_file_size, output, window->output_size,
+        status = read_copy(session, window, window->source_offset, source_file_size, output, window->output_size,
                            &(uint32_t){0}, window->output_size, cancel, result, error_buffer, error_buffer_size);
         break;
     case VIPR_WINDOW_ZERO:
