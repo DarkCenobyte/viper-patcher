@@ -286,6 +286,7 @@ See [GitHub Actions CI/CD](docs/CI-CD.md) for initial repository configuration,
 release tags, and future code-signing insertion points.
 
 ## Platform targets
+- [Supply-chain and release provenance](docs/SUPPLY-CHAIN.md)
 
 | Operating system | Architecture | Release workflow |
 |---|---|---|

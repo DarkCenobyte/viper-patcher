@@ -469,14 +469,37 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache: true
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true
+      - name: Generate SBOM and build provenance
+        env:
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          go mod download
+          go run ./scripts/sbom -output dist/SBOM.spdx.json
+          cat > dist/BUILD-PROVENANCE.json <<EOF
+          {
+            "repository": "${GITHUB_REPOSITORY}",
+            "tag": "${RELEASE_TAG}",
+            "commit": "${GITHUB_SHA}",
+            "workflow": "${GITHUB_WORKFLOW}",
+            "run_id": "${GITHUB_RUN_ID}",
+            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
+            "runner_os": "${RUNNER_OS}",
+            "runner_arch": "${RUNNER_ARCH}"
+          }
+          EOF
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+          sha256sum *.tar.gz *.zip SBOM.spdx.json BUILD-PROVENANCE.json > SHA256SUMS.txt
       - name: Publish release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
