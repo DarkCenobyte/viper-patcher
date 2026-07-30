@@ -100,6 +100,7 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	callback = progress.Serialize(callback)
 	if err := validateCreateOptions(options); err != nil {
 		return err
 	}

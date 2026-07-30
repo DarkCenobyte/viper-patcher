@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/DarkCenobyte/viper-patcher/internal/buildinfo"
 	"github.com/DarkCenobyte/viper-patcher/internal/patch"
@@ -122,6 +123,7 @@ func printUsage(writer io.Writer) {
 }
 
 type terminalProgress struct {
+	mutex         sync.Mutex
 	writer        io.Writer
 	lastFile      int
 	lastCompleted int
@@ -134,17 +136,20 @@ func newTerminalProgress(writer io.Writer) *terminalProgress {
 }
 
 func (reporter *terminalProgress) Report(event progress.Event) {
+	reporter.mutex.Lock()
+	defer reporter.mutex.Unlock()
+
 	if event.Stage == progress.StageCompleted {
-		reporter.Finish()
+		reporter.finishLocked()
 		return
 	}
 	if event.Stage == progress.StageFilePrepared {
-		reporter.Finish()
+		reporter.finishLocked()
 		fmt.Fprintf(reporter.writer, "  Prepared: %s\n", event.Path)
 		return
 	}
 	if event.Stage == progress.StageFileCompleted {
-		reporter.Finish()
+		reporter.finishLocked()
 		if event.FileIndex != reporter.lastCompleted {
 			fmt.Fprintf(reporter.writer, "  Committed: %s\n", event.Path)
 			reporter.lastCompleted = event.FileIndex
@@ -152,7 +157,7 @@ func (reporter *terminalProgress) Report(event progress.Event) {
 		return
 	}
 	if event.FileIndex != reporter.lastFile || event.Stage != reporter.lastStage {
-		reporter.Finish()
+		reporter.finishLocked()
 		fmt.Fprintf(reporter.writer, "[%d/%d] Before: %s\n", event.FileIndex, event.FileCount, event.Path)
 		reporter.lastFile = event.FileIndex
 		reporter.lastStage = event.Stage
@@ -169,6 +174,12 @@ func (reporter *terminalProgress) Report(event progress.Event) {
 }
 
 func (reporter *terminalProgress) Finish() {
+	reporter.mutex.Lock()
+	defer reporter.mutex.Unlock()
+	reporter.finishLocked()
+}
+
+func (reporter *terminalProgress) finishLocked() {
 	if reporter.lineActive {
 		fmt.Fprintln(reporter.writer)
 		reporter.lineActive = false

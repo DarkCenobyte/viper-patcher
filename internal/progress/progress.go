@@ -1,5 +1,10 @@
 package progress
 
+import (
+	"math"
+	"sync"
+)
+
 // Stage identifies one phase of a patch creation or application operation.
 type Stage string
 
@@ -30,6 +35,35 @@ type Event struct {
 
 // Callback receives serialized progress events.
 type Callback func(Event)
+
+// Serialize enforces the Callback contract for producers that report from
+// several workers. It also clamps invalid values and prevents Overall from
+// moving backwards when independently completed work arrives out of order.
+func Serialize(callback Callback) Callback {
+	if callback == nil {
+		return nil
+	}
+	var mutex sync.Mutex
+	lastOverall := 0.0
+	return func(event Event) {
+		mutex.Lock()
+		defer mutex.Unlock()
+		if math.IsNaN(event.Overall) || math.IsInf(event.Overall, 0) {
+			event.Overall = lastOverall
+		}
+		if event.Overall < 0 {
+			event.Overall = 0
+		} else if event.Overall > 1 {
+			event.Overall = 1
+		}
+		if event.Overall < lastOverall {
+			event.Overall = lastOverall
+		} else {
+			lastOverall = event.Overall
+		}
+		callback(event)
+	}
+}
 
 // Report invokes callback when it is not nil.
 func Report(callback Callback, event Event) {

@@ -75,6 +75,7 @@ func applyOpened(ctx context.Context, opened *openedPatch, release func() error,
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	callback = progress.Serialize(callback)
 	if direction != Forward && direction != Reverse {
 		return fmt.Errorf("unsupported direction %q", direction)
 	}
@@ -114,7 +115,7 @@ func applyOpened(ctx context.Context, opened *openedPatch, release func() error,
 		return commitErr
 	}
 	for i, item := range prepared {
-		progress.Report(callback, progress.Event{FileIndex: i + 1, FileCount: len(prepared), Path: filepath.ToSlash(item.path), Stage: progress.StageFileCompleted, Overall: float64(i+1) / float64(len(prepared))})
+		progress.Report(callback, progress.Event{FileIndex: i + 1, FileCount: len(prepared), Path: filepath.ToSlash(item.path), Stage: progress.StageFileCompleted, Overall: .95 + .05*float64(i+1)/float64(len(prepared))})
 	}
 	progress.Report(callback, progress.Event{FileIndex: len(prepared), FileCount: len(prepared), Stage: progress.StageCompleted, Overall: 1})
 	return commitErr
@@ -324,6 +325,7 @@ func cloneWorthTrying(windows []patchformat.WindowDescriptor, inputSize, outputS
 func applyClonedWindows(ctx context.Context, token *nativev4.CancelToken, pool *nativev4.SessionPool, windows []patchformat.WindowDescriptor, sourceSize uint64, verification *nativev4.SourceVerification, workers, index, count int, path string, callback progress.Callback) error {
 	changed := make([]int, 0, len(windows))
 	var unchanged uint64
+	totalBytes := sumWindowBytes(windows)
 	for i := range windows {
 		if windows[i].Kind == patchformat.WindowSame {
 			unchanged += uint64(windows[i].OutputSize)
@@ -334,7 +336,7 @@ func applyClonedWindows(ctx context.Context, token *nativev4.CancelToken, pool *
 	var completed atomicCounter
 	completed.value.Store(unchanged)
 	if unchanged != 0 {
-		progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: unchanged, TotalBytes: sumWindowBytes(windows), Stage: progress.StageApplying})
+		progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: unchanged, TotalBytes: totalBytes, Stage: progress.StageApplying})
 	}
 	return parallelFor(ctx, len(changed), workers, func(ctx context.Context, job int) error {
 		i := changed[job]
@@ -346,7 +348,7 @@ func applyClonedWindows(ctx context.Context, token *nativev4.CancelToken, pool *
 		_, err = session.ApplyChangedWindowWithToken(token, windows[i], sourceSize, verification)
 		if err == nil {
 			done := completed.Add(uint64(windows[i].OutputSize))
-			progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: done, TotalBytes: sumWindowBytes(windows), Stage: progress.StageApplying})
+			progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: done, TotalBytes: totalBytes, Stage: progress.StageApplying})
 		}
 		return err
 	})
