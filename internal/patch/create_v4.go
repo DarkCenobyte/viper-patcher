@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,6 +32,15 @@ type CreateOptions struct {
 
 type CreateEstimate struct{ TotalBytes, WorkDirectoryBytes, OutputDirectoryBytes uint64 }
 
+func addEstimatedBytes(total *uint64, value uint64) error {
+	sum, carry := bits.Add64(*total, value, 0)
+	if carry != 0 {
+		return fmt.Errorf("creation size estimate exceeds uint64")
+	}
+	*total = sum
+	return nil
+}
+
 func EstimateCreate(options CreateOptions) (CreateEstimate, error) {
 	if len(options.Files) == 0 {
 		return CreateEstimate{}, fmt.Errorf("at least one file pair is required")
@@ -45,18 +55,40 @@ func EstimateCreate(options CreateOptions) (CreateEstimate, error) {
 		if err != nil {
 			return CreateEstimate{}, err
 		}
-		if !a.Mode().IsRegular() || !b.Mode().IsRegular() {
+		if !a.Mode().IsRegular() || !b.Mode().IsRegular() || a.Size() < 0 || b.Size() < 0 {
 			return CreateEstimate{}, fmt.Errorf("creation inputs must be regular files")
 		}
-		source += uint64(a.Size())
-		target += uint64(b.Size())
+		if err := addEstimatedBytes(&source, uint64(a.Size())); err != nil {
+			return CreateEstimate{}, err
+		}
+		if err := addEstimatedBytes(&target, uint64(b.Size())); err != nil {
+			return CreateEstimate{}, err
+		}
 	}
-	work := source + target
-	output := target + target/4 + 64<<20
+	work := source
+	if err := addEstimatedBytes(&work, target); err != nil {
+		return CreateEstimate{}, err
+	}
+	output := target
+	if err := addEstimatedBytes(&output, target/4); err != nil {
+		return CreateEstimate{}, err
+	}
+	if err := addEstimatedBytes(&output, 64<<20); err != nil {
+		return CreateEstimate{}, err
+	}
 	if options.CreateReverse {
-		output += source + source/4
+		if err := addEstimatedBytes(&output, source); err != nil {
+			return CreateEstimate{}, err
+		}
+		if err := addEstimatedBytes(&output, source/4); err != nil {
+			return CreateEstimate{}, err
+		}
 	}
-	return CreateEstimate{work + output, work, output}, nil
+	total := work
+	if err := addEstimatedBytes(&total, output); err != nil {
+		return CreateEstimate{}, err
+	}
+	return CreateEstimate{total, work, output}, nil
 }
 
 type snapshotPair struct {
@@ -86,9 +118,9 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 	if err != nil {
 		return fmt.Errorf("create work directory: %w", err)
 	}
+	defer func() { _ = os.RemoveAll(work) }()
 	snapshots, snapshotErr := createSnapshots(ctx, options.Files, work, callback)
 	if snapshotErr != nil {
-		_ = os.RemoveAll(work)
 		return snapshotErr
 	}
 	outputDirectory := filepath.Dir(options.OutputPath)
@@ -106,7 +138,6 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 		if !committed {
 			_ = os.Remove(tempName)
 		}
-		_ = os.RemoveAll(work)
 	}()
 	if err := patchformat.WritePrefix(output, boolFlag(options.CreateReverse)); err != nil {
 		return err
@@ -146,25 +177,13 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 	if err = output.Close(); err != nil {
 		return err
 	}
-	backup := options.OutputPath + ".viper-backup"
-	_ = os.Remove(backup)
-	if _, err = os.Stat(options.OutputPath); err == nil {
-		if err = os.Rename(options.OutputPath, backup); err != nil {
-			return err
-		}
-	}
-	if err = os.Rename(tempName, options.OutputPath); err != nil {
-		_ = os.Rename(backup, options.OutputPath)
-		return err
-	}
-	committed = true
-	directorySyncError := syncCreatedPatchDirectory(options.OutputPath)
-	cleanup := os.Remove(backup)
-	if os.IsNotExist(cleanup) {
-		cleanup = nil
+	published, publishErr := publishCreatedPatch(tempName, options.OutputPath)
+	committed = published
+	if publishErr != nil && !IsCommittedWarning(publishErr) {
+		return publishErr
 	}
 	progress.Report(callback, progress.Event{FileIndex: len(snapshots), FileCount: len(snapshots), Stage: progress.StageCompleted, Overall: 1})
-	return committedWarning("patch creation", directorySyncError, cleanup)
+	return publishErr
 }
 func boolFlag(value bool) uint32 {
 	if value {
