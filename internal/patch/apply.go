@@ -194,11 +194,11 @@ func prepareApplicationFile(
 	callback progress.Callback,
 ) (preparedFile, error) {
 	reservation := uint64(workerBudget+1) * applySessionReservation
-	memoryLease, err := resources.Acquire(ctx, reservation)
+	operationLease, err := resources.Acquire(ctx, reservation)
 	if err != nil {
 		return preparedFile{}, err
 	}
-	defer memoryLease.Release()
+	defer operationLease.Release()
 
 	source, identity, targetName, err := root.openStableRegularFile(entry.Path)
 	if err != nil {
