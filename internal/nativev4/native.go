@@ -340,9 +340,9 @@ type GroupResult struct {
 }
 
 type SourceVerification struct {
-	Digests   []patchformat.Digest
-	States    []uint32
-	source    unsafe.Pointer
+	Digests    []patchformat.Digest
+	States     []uint32
+	source     unsafe.Pointer
 	sourceSize uint64
 }
 
