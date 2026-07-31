@@ -28,10 +28,9 @@ The test suite covers:
   format versions, SHA-256 metadata, permission fields, and legacy `targetHint`
   fields.
 - Differential-range validation and unreferenced-data rejection.
-- Standalone libzstd compression, frame-window inspection, process-wide weighted
-  window budgeting, reusable positional inputs, distinct per-decoder Windows
-  handles, positional compression and decompression above 2 GiB, and bounded
-  segment decompression through cgo.
+- Native V4 zstd compression and decompression, decoder-window bounds,
+  positional I/O, source verification, session-resource limits, 32-bit offset
+  handling, and apply-window/group round trips through cgo.
 - Immediate termination before decompressed output can exceed its declared size.
 - Canonical chunked-replace descriptor boundaries, the two-identity-chunk
   selection threshold, and per-frame BLAKE3 checks.

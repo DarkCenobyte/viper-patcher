@@ -26,8 +26,8 @@ version before the first retained tag.
 
 ### Removed
 
-- Retired the historical `internal/zstd` wrapper from default builds; native V4
-  is the only production zstd data plane.
+- Removed the historical `internal/zstd` wrapper; native V4 is the only
+  production zstd data plane.
 - Removed V3 from the default build and removed the Go BLAKE3 implementation.
 
 ## [0.5.1] - 2026-07-29

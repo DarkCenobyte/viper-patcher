@@ -6,7 +6,7 @@
 3. Add tests for every behavior change. A deliberate `.vipr` compatibility break
    requires a new application minor version, a format-version check, and an
    explicit migration note.
-4. Keep cgo code small, defensive, and isolated under `internal/zstd`.
+4. Keep cgo code small, defensive, and isolated under `internal/nativev4`.
 5. Treat patch files, installation paths, external assets, and release inputs as
    untrusted data.
 

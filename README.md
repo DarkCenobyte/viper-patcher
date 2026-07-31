@@ -306,8 +306,6 @@ positional I/O, and native memory limits; it never maps an entire source or patc
 - [V4 architecture](docs/ARCHITECTURE-V4.md)
 - [VIPR format V4](docs/FORMAT-V4.md)
 - [Native V4 implementation](docs/NATIVE-V4.md)
-- [Legacy zstd wrapper status](docs/LEGACY-ZSTD.md)
-- [Legacy zstd wrapper status](docs/LEGACY-ZSTD.md)
 - [Building](docs/BUILDING.md)
 - [Testing strategy](docs/TESTING.md)
 - [GitHub Actions CI/CD](docs/CI-CD.md)

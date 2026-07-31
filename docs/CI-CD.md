@@ -13,7 +13,7 @@ repository permissions. It:
 3. Builds the static library.
 4. Checks formatting.
 5. Runs the complete test suite with the race detector.
-6. Runs native patch and zstd tests with AddressSanitizer and
+6. Runs native V4 and patch tests with AddressSanitizer and
    UndefinedBehaviorSanitizer.
 7. Runs `go vet`.
 8. Runs Staticcheck.
