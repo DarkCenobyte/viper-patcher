@@ -7,6 +7,18 @@ version before the first retained tag.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-31
+
+### Fixed
+
+- Decoupled multi-file preparation concurrency from the global leaf I/O
+  scheduler. File coordinators again use the process worker budget, while each
+  file's native apply pool remains bounded by CPU/read/write capacity and the
+  operation-wide memory budget.
+- Restored throughput for workloads containing many small files without
+  reintroducing the excess native sessions or complete-source cache regression
+  fixed in v0.6.1.
+
 ## [0.6.1] - 2026-07-31
 
 ### Changed

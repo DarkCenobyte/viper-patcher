@@ -100,9 +100,13 @@ func applyOpened(ctx context.Context, opened *openedPatch, release func() error,
 	prepared := make([]preparedFile, len(opened.parsed.Header.Files))
 	applyProgress := newApplyProgress(callback, opened.parsed.Header.Files, direction)
 	resources := newMemoryBudget(memoryLimit, operationApply)
-	leafWorkers := scheduledWorkers(ctx, requestedWorkers, applyLeafTaskCost)
-	fileWorkers, perFileWorkers := applicationWorkers(profile, leafWorkers, len(prepared))
-	fileWorkers, perFileWorkers = fitApplicationWorkers(resources, fileWorkers, perFileWorkers)
+	fileWorkers, perFileWorkers := plannedApplicationConcurrency(
+		ctx,
+		profile,
+		requestedWorkers,
+		len(prepared),
+		resources,
+	)
 	operationErr := parallelFor(ctx, len(prepared), fileWorkers, func(ctx context.Context, index int) error {
 		entry := opened.parsed.Header.Files[index]
 		fileCallback := applyProgress.callbackForFile(index)
@@ -171,6 +175,21 @@ func applicationWorkers(profile IOProfile, requested, fileCount int) (fileWorker
 	fileWorkers = min(fileCount, max(1, requested/2))
 	perFileWorkers = max(1, requested/fileWorkers)
 	return fileWorkers, perFileWorkers
+}
+
+func plannedApplicationConcurrency(
+	ctx context.Context,
+	profile IOProfile,
+	requested, fileCount int,
+	resources *memoryBudget,
+) (fileWorkers, perFileWorkers int) {
+	// File coordinators perform opening, validation, temporary-file setup, and
+	// other preparation outside the leaf scheduler. Keep their concurrency tied
+	// to the process worker budget, while separately limiting each file's native
+	// leaf pool to the scheduler's actual CPU/read/write capacity.
+	fileWorkers, perFileWorkers = applicationWorkers(profile, requested, fileCount)
+	perFileWorkers = scheduledWorkers(ctx, perFileWorkers, applyLeafTaskCost)
+	return fitApplicationWorkers(resources, fileWorkers, perFileWorkers)
 }
 
 func directionData(entry patchformat.FileEntry, direction Direction) (inputSize, outputSize uint64, inputRoot, outputRoot patchformat.Digest, inputChunks, outputChunks []patchformat.Digest, windows []patchformat.WindowDescriptor) {
