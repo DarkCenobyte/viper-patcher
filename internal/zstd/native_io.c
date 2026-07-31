@@ -1,3 +1,5 @@
+//go:build vipr_legacy_zstd
+
 #if !defined(_WIN32)
 #if !defined(_FILE_OFFSET_BITS)
 #define _FILE_OFFSET_BITS 64

@@ -1,3 +1,5 @@
+//go:build vipr_legacy_zstd
+
 #include "native.h"
 #include "native_internal.h"
 #include "_cgo_export.h"
