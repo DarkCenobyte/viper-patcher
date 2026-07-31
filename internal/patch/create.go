@@ -112,6 +112,7 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 	resources := newMemoryBudget(options.MemoryLimit, operationCreate)
 	createWorkers := resources.LimitWorkers(effectiveWorkers(options.WorkerBudget), createSessionReservation)
 	ctx = withOperationScheduler(ctx, options.IOProfile, createWorkers)
+	createWorkers = scheduledWorkers(ctx, createWorkers, createWindowTaskCost)
 	workParent := options.WorkDirectory
 	if workParent != "" {
 		absolute, err := filepath.Abs(workParent)
@@ -234,9 +235,9 @@ func createSnapshots(ctx context.Context, pairs []FilePair, work string, workers
 		return nil, err
 	}
 	result := make([]snapshotPair, len(pairs))
-	workers = min(max(1, workers), len(pairs))
+	workers = scheduledWorkers(ctx, min(max(1, workers), len(pairs)), snapshotTaskCost)
 	err = parallelFor(ctx, len(pairs), workers, func(ctx context.Context, i int) error {
-		return runScheduled(ctx, taskCost{ReadUnits: 1, WriteUnits: 1}, func() error {
+		return runScheduled(ctx, snapshotTaskCost, func() error {
 			pair := pairs[i]
 			relative, err := pathutil.RelativePatchPath(base, pair.SourcePath)
 			if err != nil {
@@ -432,7 +433,7 @@ func buildWindowSetToOutput(ctx context.Context, output, source, target *os.File
 					size = uint32(remaining)
 				}
 				var borrowed *nativev4.BorrowedWindow
-				err := runScheduled(operationCtx, taskCost{CPUUnits: 1, ReadUnits: 1}, func() error {
+				err := runScheduled(operationCtx, createWindowTaskCost, func() error {
 					var buildErr error
 					borrowed, buildErr = session.BuildWindowBorrowed(token, sourceSize, targetSize, offset, size, windowSize, level, mode)
 					return buildErr

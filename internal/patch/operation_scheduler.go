@@ -13,6 +13,12 @@ type taskCost struct {
 	WriteUnits uint64
 }
 
+var (
+	applyLeafTaskCost    = taskCost{CPUUnits: 1, ReadUnits: 1, WriteUnits: 1}
+	createWindowTaskCost = taskCost{CPUUnits: 1, ReadUnits: 1}
+	snapshotTaskCost     = taskCost{ReadUnits: 1, WriteUnits: 1}
+)
+
 type operationScheduler struct {
 	cpu   *memoryBudget
 	read  *memoryBudget
@@ -21,7 +27,7 @@ type operationScheduler struct {
 
 func withOperationScheduler(ctx context.Context, profile IOProfile, workers int) context.Context {
 	workers = max(1, workers)
-	readUnits, writeUnits := 4, 2
+	readUnits, writeUnits := min(workers, 8), min(workers, 4)
 	switch profile {
 	case IOHDD:
 		readUnits, writeUnits = 1, 1
@@ -44,6 +50,32 @@ func schedulerFromContext(ctx context.Context) *operationScheduler {
 	}
 	scheduler, _ := ctx.Value(schedulerContextKey{}).(*operationScheduler)
 	return scheduler
+}
+
+func scheduledWorkers(ctx context.Context, requested int, cost taskCost) int {
+	requested = max(1, requested)
+	scheduler := schedulerFromContext(ctx)
+	if scheduler == nil {
+		return requested
+	}
+	requested = limitScheduledWorkers(requested, scheduler.cpu, cost.CPUUnits)
+	requested = limitScheduledWorkers(requested, scheduler.read, cost.ReadUnits)
+	requested = limitScheduledWorkers(requested, scheduler.write, cost.WriteUnits)
+	return max(1, requested)
+}
+
+func limitScheduledWorkers(requested int, budget *memoryBudget, units uint64) int {
+	if budget == nil || units == 0 {
+		return requested
+	}
+	capacity := budget.Capacity() / units
+	if capacity == 0 {
+		return 1
+	}
+	if capacity < uint64(requested) {
+		return int(capacity)
+	}
+	return requested
 }
 
 func runScheduled(ctx context.Context, cost taskCost, operation func() error) error {

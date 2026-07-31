@@ -78,7 +78,8 @@ func applyOpened(ctx context.Context, opened *openedPatch, release func() error,
 		ctx = context.Background()
 	}
 	callback = progress.Serialize(callback)
-	ctx = withOperationScheduler(ctx, profile, effectiveWorkers(workers))
+	requestedWorkers := effectiveWorkers(workers)
+	ctx = withOperationScheduler(ctx, profile, requestedWorkers)
 	if direction != Forward && direction != Reverse {
 		return fmt.Errorf("unsupported direction %q", direction)
 	}
@@ -99,7 +100,8 @@ func applyOpened(ctx context.Context, opened *openedPatch, release func() error,
 	prepared := make([]preparedFile, len(opened.parsed.Header.Files))
 	applyProgress := newApplyProgress(callback, opened.parsed.Header.Files, direction)
 	resources := newMemoryBudget(memoryLimit, operationApply)
-	fileWorkers, perFileWorkers := applicationWorkers(profile, effectiveWorkers(workers), len(prepared))
+	leafWorkers := scheduledWorkers(ctx, requestedWorkers, applyLeafTaskCost)
+	fileWorkers, perFileWorkers := applicationWorkers(profile, leafWorkers, len(prepared))
 	fileWorkers, perFileWorkers = fitApplicationWorkers(resources, fileWorkers, perFileWorkers)
 	operationErr := parallelFor(ctx, len(prepared), fileWorkers, func(ctx context.Context, index int) error {
 		entry := opened.parsed.Header.Files[index]
@@ -193,7 +195,10 @@ func prepareApplicationFile(
 	index, count int,
 	callback progress.Callback,
 ) (preparedFile, error) {
-	reservation := uint64(workerBudget+1) * applySessionReservation
+	inputSize, outputSize, inputRoot, _, inputChunks, outputChunks, windows :=
+		directionData(entry, direction)
+	plannedWorkers := plannedApplicationWorkers(workerBudget, windows, outputSize)
+	reservation := uint64(plannedWorkers+1) * applySessionReservation
 	operationLease, err := resources.Acquire(ctx, reservation)
 	if err != nil {
 		return preparedFile{}, err
@@ -205,9 +210,6 @@ func prepareApplicationFile(
 		return preparedFile{}, err
 	}
 	defer source.Close()
-
-	inputSize, outputSize, inputRoot, _, inputChunks, outputChunks, windows :=
-		directionData(entry, direction)
 
 	if identity.Size() < 0 || uint64(identity.Size()) != inputSize {
 		return preparedFile{}, fmt.Errorf("installed file has wrong size")
@@ -265,7 +267,7 @@ func prepareApplicationFile(
 	}
 
 	if !cloneWorthTrying(windows, inputSize, outputSize) &&
-		sourceCacheWorthTrying(windows, inputSize) {
+		sourceCacheWorthTrying(profile, windows, inputSize) {
 		cacheLease, acquired := resources.TryAcquire(inputSize)
 		if acquired {
 			if verification == nil {
@@ -361,7 +363,7 @@ func prepareApplicationFile(
 
 	workCount := applicationWorkCount(cloned, windows, outputSize)
 	if workCount != 0 {
-		poolSize := min(max(1, workerBudget), workCount)
+		poolSize := min(plannedWorkers, workCount)
 
 		pool, poolErr := nativev4.NewSessionPool(
 			poolSize,
@@ -382,7 +384,7 @@ func prepareApplicationFile(
 				windows,
 				inputSize,
 				verification,
-				workerBudget,
+				poolSize,
 				index,
 				count,
 				entry.Path,
@@ -398,7 +400,7 @@ func prepareApplicationFile(
 				outputSize,
 				outputChunks,
 				verification,
-				workerBudget,
+				poolSize,
 				index,
 				count,
 				entry.Path,
@@ -440,28 +442,43 @@ func prepareApplicationFile(
 }
 
 func sourceCacheWorthTrying(
+	profile IOProfile,
 	windows []patchformat.WindowDescriptor,
 	inputSize uint64,
 ) bool {
+	// Loading the complete source image is intentionally limited to HDD mode.
+	// On SSD/NVMe the v0.6.0 benchmark showed that the eager serial read costs
+	// more wall time than the positional-I/O path despite reducing syscalls.
+	if profile != IOHDD {
+		return false
+	}
+
 	maximum := uint64(256 << 20)
 	if strconvIntSizeRuntime() == 32 {
 		maximum = 64 << 20
 	}
-
 	if inputSize == 0 || inputSize > maximum {
 		return false
 	}
 
+	threshold := min(inputSize, max(uint64(8<<20), inputSize/4))
+	var referenced uint64
 	for _, window := range windows {
 		switch window.Kind {
 		case patchformat.WindowSame,
 			patchformat.WindowCopy,
 			patchformat.WindowDeltaRaw,
 			patchformat.WindowDeltaZstd:
-			return true
+			if referenced >= threshold {
+				return true
+			}
+			size := uint64(window.SourceSize)
+			if size >= threshold-referenced {
+				return true
+			}
+			referenced += size
 		}
 	}
-
 	return false
 }
 
@@ -480,6 +497,14 @@ func applicationWorkCount(cloned bool, windows []patchformat.WindowDescriptor, o
 		return count
 	}
 	return len(groupWindows(windows, outputSize))
+}
+
+func plannedApplicationWorkers(requested int, windows []patchformat.WindowDescriptor, outputSize uint64) int {
+	workCount := applicationWorkCount(false, windows, outputSize)
+	if workCount == 0 {
+		return 0
+	}
+	return min(max(1, requested), workCount)
 }
 
 func cloneWorthTrying(windows []patchformat.WindowDescriptor, inputSize, outputSize uint64) bool {
@@ -511,7 +536,7 @@ func applyClonedWindows(ctx context.Context, token *nativev4.CancelToken, pool *
 		progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: unchanged, TotalBytes: totalBytes, Stage: progress.StageApplying})
 	}
 	return parallelFor(ctx, len(changed), workers, func(ctx context.Context, job int) error {
-		return runScheduled(ctx, taskCost{CPUUnits: 1, ReadUnits: 1, WriteUnits: 1}, func() error {
+		return runScheduled(ctx, applyLeafTaskCost, func() error {
 			i := changed[job]
 			session, err := pool.Acquire(ctx)
 			if err != nil {
@@ -537,7 +562,7 @@ func applyWindowGroups(ctx context.Context, token *nativev4.CancelToken, pool *n
 	}
 	var completed atomicCounter
 	return parallelFor(ctx, len(groups), workers, func(ctx context.Context, i int) error {
-		return runScheduled(ctx, taskCost{CPUUnits: 1, ReadUnits: 1, WriteUnits: 1}, func() error {
+		return runScheduled(ctx, applyLeafTaskCost, func() error {
 			group := groups[i]
 			session, err := pool.Acquire(ctx)
 			if err != nil {

@@ -7,6 +7,26 @@ version before the first retained tag.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-31
+
+### Changed
+
+- Disabled eager complete-source caching for automatic, SSD, and NVMe profiles
+  after the v0.6.0 benchmark showed lower I/O but substantially higher wall
+  time and memory pressure; explicit HDD mode retains the cache.
+- Increased the automatic scheduler ceiling to eight readers and four writers,
+  matching the measured NVMe profile.
+- Capped native apply and creator session pools by the scheduler's actual leaf
+  concurrency and by the number of output groups that can run.
+
+### Fixed
+
+- Avoided reserving and constructing native sessions that remain blocked behind
+  tighter scheduler limits, reducing memory pressure without changing V4 patch
+  bytes or verification guarantees.
+
+## [0.6.0] - 2026-07-31
+
 - Added JSON file-pair manifests, architecture-aware index limits, explicit
   memory limits, profile-aware operation scheduling, clone-first snapshots,
   recoverable apply journals, and the documented V4 metadata policy.

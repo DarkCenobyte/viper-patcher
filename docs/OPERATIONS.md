@@ -19,19 +19,23 @@ bytes are also bounded.
 reservation covers all native sessions planned for a file and is acquired in
 one operation. Partial multi-unit acquisition is forbidden.
 
-Automatic defaults are architecture- and operation-aware. A source cache is
-optional: it is enabled only when the complete reservation succeeds and falls
-back to positional I/O otherwise.
+Automatic defaults are architecture- and operation-aware. The complete-image
+source cache is enabled only for explicit `hdd` mode and only when its complete
+reservation succeeds; all other profiles use bounded positional I/O. A future
+parallel span cache may replace this HDD-only policy without changing V4.
 
 ## Scheduling and I/O profiles
 
 One scheduler coordinates leaf CPU, read, and write work across all files.
 File coordinators do not hold scheduler tokens while waiting for nested work.
+Native session pools are capped by the tightest scheduler resource before
+allocation, so inactive sessions do not consume memory.
 
 - `hdd` serializes read/write-heavy leaves;
-- `ssd` permits moderate parallelism;
-- `nvme` permits wider queues;
-- `auto` uses conservative SSD-like I/O limits and the process worker budget.
+- `ssd` permits up to four readers and two writers;
+- `nvme` permits up to eight readers and four writers;
+- `auto` uses the same eight-reader/four-writer ceiling as `nvme`, bounded by
+  the process worker budget.
 
 ## Creator snapshots
 
