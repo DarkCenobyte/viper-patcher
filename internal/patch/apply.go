@@ -178,77 +178,124 @@ func directionData(entry patchformat.FileEntry, direction Direction) (inputSize,
 	return entry.SourceSize, entry.TargetSize, entry.SourceDigest, entry.TargetDigest, entry.SourceChunks, entry.TargetChunks, entry.ForwardWindows
 }
 
-func prepareApplicationFile(ctx context.Context, token *nativev4.CancelToken, opened *openedPatch, root *installationRoot, entry patchformat.FileEntry, direction Direction, workerBudget int, resources *memoryBudget, verify VerifyMode, durability DurabilityMode, profile IOProfile, index, count int, callback progress.Callback) (preparedFile, error) {
+func prepareApplicationFile(
+	ctx context.Context,
+	token *nativev4.CancelToken,
+	opened *openedPatch,
+	root *installationRoot,
+	entry patchformat.FileEntry,
+	direction Direction,
+	workerBudget int,
+	resources *memoryBudget,
+	verify VerifyMode,
+	durability DurabilityMode,
+	profile IOProfile,
+	index, count int,
+	callback progress.Callback,
+) (preparedFile, error) {
 	reservation := uint64(workerBudget+1) * applySessionReservation
-	lease, err := resources.Acquire(ctx, reservation)
+	memoryLease, err := resources.Acquire(ctx, reservation)
 	if err != nil {
 		return preparedFile{}, err
 	}
-	defer lease.Release()
+	defer memoryLease.Release()
+
 	source, identity, targetName, err := root.openStableRegularFile(entry.Path)
 	if err != nil {
 		return preparedFile{}, err
 	}
 	defer source.Close()
-	inputSize, outputSize, inputRoot, _, inputChunks, outputChunks, windows := directionData(entry, direction)
+
+	inputSize, outputSize, inputRoot, _, inputChunks, outputChunks, windows :=
+		directionData(entry, direction)
+
 	if identity.Size() < 0 || uint64(identity.Size()) != inputSize {
-		source.Close()
 		return preparedFile{}, fmt.Errorf("installed file has wrong size")
 	}
 	if err := validateInstalledMetadata(identity.Mode()); err != nil {
-		source.Close()
 		return preparedFile{}, fmt.Errorf("validate installed metadata: %w", err)
 	}
+
 	verification := nativev4.NewSourceVerification(inputChunks, false)
+	var sourceCacheLease *memoryLease
+
+	// Close the final verification object before releasing the memory-budget
+	// reservation associated with its optional source cache.
+	defer func() {
+		if verification != nil {
+			verification.Close()
+		}
+		if sourceCacheLease != nil {
+			sourceCacheLease.Release()
+		}
+	}()
+
 	sourceStrictlyVerified := false
+
 	if verify == VerifyStrict {
 		session, sessionErr := nativev4.NewSession(source, nil, nil)
 		if sessionErr != nil {
-			source.Close()
 			return preparedFile{}, sessionErr
 		}
-		actual, _, hashErr := session.HashFileTreeWithToken(token, false, inputSize, patchformat.IdentityChunkSize)
-		session.Close()
+
+		actual, _, hashErr := session.HashFileTreeWithToken(
+			token,
+			false,
+			inputSize,
+			patchformat.IdentityChunkSize,
+		)
+		closeErr := session.Close()
+
 		if hashErr != nil {
-			source.Close()
-			return preparedFile{}, hashErr
+			return preparedFile{}, errors.Join(hashErr, closeErr)
+		}
+		if closeErr != nil {
+			return preparedFile{}, closeErr
 		}
 		if actual != inputRoot {
-			source.Close()
 			return preparedFile{}, fmt.Errorf("source BLAKE3 tree mismatch")
 		}
+
+		verification.Close()
 		verification = nativev4.NewSourceVerification(inputChunks, true)
 		sourceStrictlyVerified = true
 	} else if verify == VerifyOutput {
+		verification.Close()
 		verification = nil
 	}
-	var sourceCacheLease *memoryLease
-	if !cloneWorthTrying(windows, inputSize, outputSize) && sourceCacheWorthTrying(windows, inputSize) {
-		if lease, ok := resources.TryAcquire(inputSize); ok {
+
+	if !cloneWorthTrying(windows, inputSize, outputSize) &&
+		sourceCacheWorthTrying(windows, inputSize) {
+		cacheLease, acquired := resources.TryAcquire(inputSize)
+		if acquired {
 			if verification == nil {
 				verification = nativev4.NewSourceVerification(nil, true)
 			}
-			cacheErr := verification.LoadSource(ctx, source, inputSize, verify == VerifyReferenced)
+
+			cacheErr := verification.LoadSource(
+				ctx,
+				source,
+				inputSize,
+				verify == VerifyReferenced,
+			)
 			if cacheErr != nil {
-				lease.Release()
-				source.Close()
+				cacheLease.Release()
 				return preparedFile{}, cacheErr
 			}
-			sourceCacheLease = lease
+
+			sourceCacheLease = cacheLease
 		}
 	}
-	if verification != nil {
-		defer verification.Close()
-	}
-	if sourceCacheLease != nil {
-		defer sourceCacheLease.Release()
-	}
 
-	output, temporaryName, err := createRootTemp(root.root, filepath.Dir(targetName), ".viper-v4-output-")
+	output, temporaryName, err := createRootTemp(
+		root.root,
+		filepath.Dir(targetName),
+		".viper-v4-output-",
+	)
 	if err != nil {
-		source.Close()
 		return preparedFile{}, err
 	}
+
 	cleanup := true
 	defer func() {
 		if cleanup {
@@ -257,9 +304,13 @@ func prepareApplicationFile(ctx context.Context, token *nativev4.CancelToken, op
 		}
 	}()
 
-	patchSession, err := nativev4.NewSessionWithProfile(source, opened.file, output, nativeIOProfile(profile))
+	patchSession, err := nativev4.NewSessionWithProfile(
+		source,
+		opened.file,
+		output,
+		nativeIOProfile(profile),
+	)
 	if err != nil {
-		source.Close()
 		return preparedFile{}, err
 	}
 	defer patchSession.Close()
@@ -270,86 +321,148 @@ func prepareApplicationFile(ctx context.Context, token *nativev4.CancelToken, op
 		if cloneErr == nil {
 			cloned = true
 		} else if !nativev4.IsUnsupported(cloneErr) {
-			source.Close()
 			return preparedFile{}, cloneErr
 		}
 	}
+
 	if cloned && !sourceStrictlyVerified {
-		// A clone inherits every unchanged byte from the installed source. Verify
-		// that source once, then skip all SAME windows without rereading them.
-		actual, _, hashErr := patchSession.HashFileTreeWithToken(token, false, inputSize, patchformat.IdentityChunkSize)
+		// A clone inherits every unchanged byte from the installed source.
+		// Verify that source once, then skip all SAME windows without
+		// rereading them.
+		actual, _, hashErr := patchSession.HashFileTreeWithToken(
+			token,
+			false,
+			inputSize,
+			patchformat.IdentityChunkSize,
+		)
 		if hashErr != nil {
-			source.Close()
 			return preparedFile{}, hashErr
 		}
 		if actual != inputRoot {
-			source.Close()
 			return preparedFile{}, fmt.Errorf("source BLAKE3 tree mismatch")
+		}
+
+		if verification != nil {
+			verification.Close()
 		}
 		verification = nativev4.NewSourceVerification(inputChunks, true)
 		sourceStrictlyVerified = true
 	}
+
 	if !cloned {
-		if err = patchSession.SetOutputSize(outputSize, shouldPreallocateOutput(durability, profile)); err != nil {
-			source.Close()
+		err = patchSession.SetOutputSize(
+			outputSize,
+			shouldPreallocateOutput(durability, profile),
+		)
+		if err != nil {
 			return preparedFile{}, err
 		}
 	}
+
 	workCount := applicationWorkCount(cloned, windows, outputSize)
 	if workCount != 0 {
 		poolSize := min(max(1, workerBudget), workCount)
-		pool, poolErr := nativev4.NewSessionPool(poolSize, source, opened.file, output, nativeIOProfile(profile))
+
+		pool, poolErr := nativev4.NewSessionPool(
+			poolSize,
+			source,
+			opened.file,
+			output,
+			nativeIOProfile(profile),
+		)
 		if poolErr != nil {
-			source.Close()
 			return preparedFile{}, poolErr
 		}
+
 		if cloned {
-			err = applyClonedWindows(ctx, token, pool, windows, inputSize, verification, workerBudget, index, count, entry.Path, callback)
+			err = applyClonedWindows(
+				ctx,
+				token,
+				pool,
+				windows,
+				inputSize,
+				verification,
+				workerBudget,
+				index,
+				count,
+				entry.Path,
+				callback,
+			)
 		} else {
-			err = applyWindowGroups(ctx, token, pool, windows, inputSize, outputSize, outputChunks, verification, workerBudget, index, count, entry.Path, callback)
+			err = applyWindowGroups(
+				ctx,
+				token,
+				pool,
+				windows,
+				inputSize,
+				outputSize,
+				outputChunks,
+				verification,
+				workerBudget,
+				index,
+				count,
+				entry.Path,
+				callback,
+			)
 		}
+
 		poolCloseErr := pool.Close()
 		if err == nil {
 			err = poolCloseErr
 		}
 	}
+
 	if err != nil {
-		source.Close()
 		return preparedFile{}, err
 	}
+
 	if err = output.Chmod(targetPermissions(identity.Mode())); err != nil {
-		source.Close()
 		return preparedFile{}, err
 	}
+
 	if durability == DurabilityDurable {
 		if err = patchSession.FlushOutput(); err != nil {
-			source.Close()
 			return preparedFile{}, err
 		}
 	}
+
 	if err = output.Close(); err != nil {
-		source.Close()
 		return preparedFile{}, err
 	}
+
 	cleanup = false
-func sourceCacheWorthTrying(windows []patchformat.WindowDescriptor, inputSize uint64) bool {
+
+	return preparedFile{
+		path:     targetName,
+		temp:     temporaryName,
+		identity: identity,
+	}, nil
+}
+
+func sourceCacheWorthTrying(
+	windows []patchformat.WindowDescriptor,
+	inputSize uint64,
+) bool {
 	maximum := uint64(256 << 20)
 	if strconvIntSizeRuntime() == 32 {
 		maximum = 64 << 20
 	}
+
 	if inputSize == 0 || inputSize > maximum {
 		return false
 	}
+
 	for _, window := range windows {
 		switch window.Kind {
-		case patchformat.WindowSame, patchformat.WindowCopy, patchformat.WindowDeltaRaw, patchformat.WindowDeltaZstd:
+		case patchformat.WindowSame,
+			patchformat.WindowCopy,
+			patchformat.WindowDeltaRaw,
+			patchformat.WindowDeltaZstd:
 			return true
 		}
 	}
-	return false
-}
 
-	return preparedFile{path: targetName, temp: temporaryName, identity: identity}, nil
+	return false
 }
 
 func shouldPreallocateOutput(durability DurabilityMode, profile IOProfile) bool {
