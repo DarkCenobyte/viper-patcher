@@ -22,6 +22,25 @@ A file identity is `blake3-tree-v1`: BLAKE3-256 is computed for each ordered
 size, chunk count, order, and every digest. BLAKE3 exists only in the native C
 data plane.
 
+The optional fine-verification index extension does not alter that identity.
+It stores sparse, sorted source-band indexes and full BLAKE3-256 digests for
+delta source spans whose canonical 8 MiB verification would cause meaningful
+read amplification. Supported band sizes are 64 KiB, 256 KiB, and 1 MiB. The
+creator selects one size independently for each source direction and omits the
+table when dense coverage or index cost would erase the predicted benefit.
+
+Fine digests are ordinary full BLAKE3-256 hashes of complete aligned bands;
+they are not truncated chaining values and are not used to reconstruct the
+canonical file root. The extension is covered by the existing index digest.
+Legacy V4 patches have no extension and continue to use canonical verification.
+Readers that do not support the feature reject its container flag rather than
+misinterpreting the extended index.
+
+SAME and COPY require no extra table because their window digest already
+authenticates the exact bytes they copy. Delta windows use a fine table only
+when every band intersecting their declared source span is present; otherwise
+the applicator falls back to the canonical digest table.
+
 ## Windows
 
 A file has one recorded window size chosen by the creator or supplied with
@@ -45,6 +64,11 @@ verifies every produced window and 8 MiB output group. `strict` first verifies
 the complete source tree. `output` omits source pre-verification but retains
 window and output-group verification. The index digest and tree-root consistency
 are always checked.
+
+When fine verification is available, `referenced` reads, authenticates, and
+immediately consumes only the required bands. A missing optimization table is a
+normal fallback condition; a present digest that does not match is always a
+source mismatch. Reflink outputs verify unchanged SAME windows before commit.
 
 Paths are canonical slash-separated relative paths. Absolute paths, traversal,
 NULs, backslashes, duplicate paths, case/Unicode collisions, invalid ranges,

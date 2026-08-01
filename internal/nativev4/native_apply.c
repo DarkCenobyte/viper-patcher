@@ -74,6 +74,281 @@ static vipr_status check_cancel(volatile uint32_t *cancel) {
     return vipr_cancelled(cancel) ? VIPR_STATUS_CANCELLED : VIPR_STATUS_OK;
 }
 
+static int source_chunks_preverified(const vipr_window *window,
+                                     uint32_t source_chunk_count,
+                                     volatile uint32_t *source_chunk_states) {
+    if (window == NULL || source_chunk_states == NULL ||
+        window->source_chunk_count == 0) {
+        return 0;
+    }
+    uint64_t end = (uint64_t)window->source_first_chunk +
+                   window->source_chunk_count;
+    if (end > source_chunk_count) return 0;
+    for (uint32_t index = window->source_first_chunk;
+         index < (uint32_t)end; ++index) {
+        if (__atomic_load_n(&source_chunk_states[index],
+                            __ATOMIC_ACQUIRE) != 2) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// SAME and COPY already carry the BLAKE3 digest of the exact bytes that they
+// materialize. In referenced mode, authenticate that precise range before it
+// is consumed instead of reading its complete enclosing 8 MiB identity chunk.
+// Strict mode keeps using the preverified canonical table, and legacy/output
+// paths remain unchanged.
+static vipr_status try_verify_exact_copy_window(
+    vipr_io_session *session,
+    const vipr_window *window,
+    uint64_t source_file_size,
+    uint32_t source_chunk_count,
+    volatile uint32_t *source_chunk_states,
+    const uint8_t *source_cache,
+    uint64_t source_cache_size,
+    volatile uint32_t *cancel,
+    vipr_group_result *result,
+    int *handled,
+    char *error_buffer,
+    size_t error_buffer_size) {
+    *handled = 0;
+    if (session == NULL || window == NULL ||
+        (window->kind != VIPR_WINDOW_SAME &&
+         window->kind != VIPR_WINDOW_COPY) ||
+        source_chunk_states == NULL ||
+        source_chunks_preverified(window, source_chunk_count,
+                                  source_chunk_states)) {
+        return VIPR_STATUS_OK;
+    }
+
+    uint64_t offset = window->kind == VIPR_WINDOW_SAME
+                          ? window->output_offset
+                          : window->source_offset;
+    size_t size = window->source_size;
+    if (size == 0 || window->source_size != window->output_size ||
+        offset > source_file_size || size > source_file_size - offset) {
+        vipr_set_error(error_buffer, error_buffer_size,
+                       "exact source verification range is invalid");
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
+
+    *handled = 1;
+    const uint8_t *buffer = NULL;
+    vipr_status status = VIPR_STATUS_OK;
+    if (source_cache != NULL && offset <= source_cache_size &&
+        size <= source_cache_size - offset) {
+        buffer = source_cache + (size_t)offset;
+    } else {
+        session->verification_cache_valid = 0;
+        if (!vipr_scratch_reserve(&session->verification_buffer, size)) {
+            vipr_set_error(error_buffer, error_buffer_size,
+                           "reserve exact source verification buffer");
+            return VIPR_STATUS_MEMORY_LIMIT;
+        }
+        buffer = session->verification_buffer.data;
+        if (check_cancel(cancel) != VIPR_STATUS_OK) {
+            return VIPR_STATUS_CANCELLED;
+        }
+        status = vipr_read_at(session, session->source, offset,
+                              (void *)buffer, size,
+                              error_buffer, error_buffer_size);
+        if (status == VIPR_STATUS_OK && result != NULL) {
+            result->bytes_read_source += size;
+        }
+    }
+    if (status != VIPR_STATUS_OK) return status;
+
+    uint8_t actual[32];
+    vipr_blake3_hash(buffer, size, actual);
+    if (!digest_equal(actual, window->digest)) {
+        vipr_set_error(error_buffer, error_buffer_size,
+                       "exact source window digest mismatch");
+        return VIPR_STATUS_SOURCE_MISMATCH;
+    }
+    if (source_cache == NULL) {
+        session->verification_cache_offset = offset;
+        session->verification_cache_size = size;
+        session->verification_cache_valid = 1;
+    }
+    return VIPR_STATUS_OK;
+}
+
+static int valid_fine_chunk_size(uint32_t size) {
+    return size == (64u << 10) || size == (256u << 10) || size == (1u << 20);
+}
+
+static int find_fine_digest(const uint64_t *indexes, uint32_t count,
+                            uint64_t wanted, uint32_t *position) {
+    uint32_t left = 0;
+    uint32_t right = count;
+    while (left < right) {
+        uint32_t middle = left + (right - left) / 2;
+        uint64_t value = indexes[middle];
+        if (value < wanted) left = middle + 1;
+        else right = middle;
+    }
+    if (left >= count || indexes[left] != wanted) return 0;
+    *position = left;
+    return 1;
+}
+
+static vipr_status hash_source_fine_band(
+    vipr_io_session *session,
+    uint64_t band_index,
+    uint64_t source_file_size,
+    uint32_t fine_chunk_size,
+    const uint64_t *fine_indexes,
+    const uint8_t *fine_digests,
+    uint32_t fine_count,
+    volatile uint32_t *fine_states,
+    const uint8_t *source_cache,
+    uint64_t source_cache_size,
+    volatile uint32_t *cancel,
+    vipr_group_result *result,
+    char *error_buffer,
+    size_t error_buffer_size) {
+    uint32_t position = 0;
+    if (!find_fine_digest(fine_indexes, fine_count, band_index, &position)) {
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
+    volatile uint32_t *state = &fine_states[position];
+    for (;;) {
+        uint32_t value = __atomic_load_n(state, __ATOMIC_ACQUIRE);
+        if (value == 2) return VIPR_STATUS_OK;
+        if (value == 3) return VIPR_STATUS_SOURCE_MISMATCH;
+        if (value == 0) {
+            uint32_t expected = 0;
+            if (__atomic_compare_exchange_n(state, &expected, 1, 0,
+                                            __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE)) break;
+            continue;
+        }
+        if (check_cancel(cancel) != VIPR_STATUS_OK) {
+            return VIPR_STATUS_CANCELLED;
+        }
+        vipr_yield_cpu();
+    }
+
+    if (band_index > UINT64_MAX / fine_chunk_size) {
+        __atomic_store_n(state, 3, __ATOMIC_RELEASE);
+        return VIPR_STATUS_SOURCE_MISMATCH;
+    }
+    uint64_t offset = band_index * fine_chunk_size;
+    if (offset >= source_file_size) {
+        __atomic_store_n(state, 3, __ATOMIC_RELEASE);
+        return VIPR_STATUS_SOURCE_MISMATCH;
+    }
+    uint64_t remaining = source_file_size - offset;
+    size_t size = remaining > fine_chunk_size ? fine_chunk_size : (size_t)remaining;
+    const uint8_t *buffer = NULL;
+    vipr_status status = VIPR_STATUS_OK;
+    if (source_cache != NULL && offset <= source_cache_size &&
+        size <= source_cache_size - offset) {
+        buffer = source_cache + (size_t)offset;
+    } else {
+        session->verification_cache_valid = 0;
+        if (!vipr_scratch_reserve(&session->verification_buffer, size)) {
+            __atomic_store_n(state, 0, __ATOMIC_RELEASE);
+            vipr_set_error(error_buffer, error_buffer_size,
+                           "reserve fine source verification buffer");
+            return VIPR_STATUS_MEMORY_LIMIT;
+        }
+        buffer = session->verification_buffer.data;
+        if (check_cancel(cancel) != VIPR_STATUS_OK) {
+            __atomic_store_n(state, 0, __ATOMIC_RELEASE);
+            return VIPR_STATUS_CANCELLED;
+        }
+        status = vipr_read_at(session, session->source, offset,
+                              (void *)buffer, size,
+                              error_buffer, error_buffer_size);
+        if (status == VIPR_STATUS_OK && result != NULL) {
+            result->bytes_read_source += size;
+        }
+    }
+    if (status == VIPR_STATUS_OK) {
+        uint8_t actual[32];
+        vipr_blake3_hash(buffer, size, actual);
+        if (!digest_equal(actual, fine_digests + (size_t)position * 32u)) {
+            status = VIPR_STATUS_SOURCE_MISMATCH;
+            vipr_set_error(error_buffer, error_buffer_size,
+                           "fine source band digest mismatch");
+        } else if (source_cache == NULL) {
+            session->verification_cache_offset = offset;
+            session->verification_cache_size = size;
+            session->verification_cache_valid = 1;
+        }
+    }
+    if (status == VIPR_STATUS_OK) {
+        __atomic_store_n(state, 2, __ATOMIC_RELEASE);
+    } else if (status == VIPR_STATUS_SOURCE_MISMATCH) {
+        __atomic_store_n(state, 3, __ATOMIC_RELEASE);
+    } else {
+        __atomic_store_n(state, 0, __ATOMIC_RELEASE);
+    }
+    return status;
+}
+
+static vipr_status verify_source_fine_range(
+    vipr_io_session *session,
+    const vipr_window *window,
+    uint64_t source_file_size,
+    uint32_t fine_chunk_size,
+    const uint64_t *fine_indexes,
+    const uint8_t *fine_digests,
+    uint32_t fine_count,
+    volatile uint32_t *fine_states,
+    const uint8_t *source_cache,
+    uint64_t source_cache_size,
+    volatile uint32_t *cancel,
+    vipr_group_result *result,
+    int *handled,
+    char *error_buffer,
+    size_t error_buffer_size) {
+    *handled = 0;
+    if (window == NULL ||
+        (window->kind != VIPR_WINDOW_DELTA_RAW &&
+         window->kind != VIPR_WINDOW_DELTA_ZSTD) ||
+        fine_indexes == NULL || fine_digests == NULL || fine_states == NULL ||
+        fine_count == 0 || !valid_fine_chunk_size(fine_chunk_size) ||
+        window->source_size == 0) {
+        return VIPR_STATUS_OK;
+    }
+    if (window->source_offset > source_file_size ||
+        window->source_size > source_file_size - window->source_offset) {
+        vipr_set_error(error_buffer, error_buffer_size,
+                       "fine source verification range is invalid");
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
+    uint64_t first = window->source_offset / fine_chunk_size;
+    uint64_t last = (window->source_offset + window->source_size - 1) /
+                    fine_chunk_size;
+    for (uint64_t index = first; ; index++) {
+        uint32_t ignored = 0;
+        if (!find_fine_digest(fine_indexes, fine_count, index, &ignored)) {
+            return VIPR_STATUS_OK;
+        }
+        if (index == last) break;
+    }
+
+    *handled = 1;
+    for (uint64_t index = first + 1; index <= last; index++) {
+        vipr_status status = hash_source_fine_band(
+            session, index, source_file_size, fine_chunk_size,
+            fine_indexes, fine_digests, fine_count, fine_states,
+            source_cache, source_cache_size, cancel, result,
+            error_buffer, error_buffer_size);
+        if (status != VIPR_STATUS_OK) return status;
+    }
+    // Retain the band containing the declared source start for the first
+    // COPY instruction whenever this worker wins the verification race.
+    return hash_source_fine_band(
+        session, first, source_file_size, fine_chunk_size,
+        fine_indexes, fine_digests, fine_count, fine_states,
+        source_cache, source_cache_size, cancel, result,
+        error_buffer, error_buffer_size);
+}
+
 static vipr_status hash_source_chunk(vipr_io_session *session,
                                      uint32_t index,
                                      uint64_t source_file_size,
@@ -531,6 +806,11 @@ static vipr_status materialize_window(vipr_io_session *session,
                                       const uint8_t *source_chunk_digests,
                                       uint32_t source_chunk_count,
                                       volatile uint32_t *source_chunk_states,
+                                      uint32_t source_fine_chunk_size,
+                                      const uint64_t *source_fine_indexes,
+                                      const uint8_t *source_fine_digests,
+                                      uint32_t source_fine_count,
+                                      volatile uint32_t *source_fine_states,
                                       const uint8_t *source_cache,
                                       uint64_t source_cache_size,
                                       uint8_t *output,
@@ -543,11 +823,32 @@ static vipr_status materialize_window(vipr_io_session *session,
         vipr_set_error(error_buffer, error_buffer_size, "invalid V4 window destination");
         return VIPR_STATUS_INVALID_ARGUMENT;
     }
-    vipr_status status = verify_source_range(session, window, source_file_size, source_chunk_digests,
-                                             source_chunk_count, source_chunk_states,
-                                             source_cache, source_cache_size, cancel, result,
-                                             error_buffer, error_buffer_size);
+    int exact_source_verified = 0;
+    vipr_status status = try_verify_exact_copy_window(
+        session, window, source_file_size, source_chunk_count,
+        source_chunk_states, source_cache, source_cache_size,
+        cancel, result, &exact_source_verified,
+        error_buffer, error_buffer_size);
     if (status != VIPR_STATUS_OK) return status;
+    int fine_source_verified = 0;
+    if (!exact_source_verified) {
+        status = verify_source_fine_range(
+            session, window, source_file_size, source_fine_chunk_size,
+            source_fine_indexes, source_fine_digests,
+            source_fine_count, source_fine_states,
+            source_cache, source_cache_size, cancel, result,
+            &fine_source_verified, error_buffer, error_buffer_size);
+        if (status != VIPR_STATUS_OK) return status;
+    }
+    if (!exact_source_verified && !fine_source_verified) {
+        status = verify_source_range(session, window, source_file_size,
+                                     source_chunk_digests,
+                                     source_chunk_count, source_chunk_states,
+                                     source_cache, source_cache_size,
+                                     cancel, result,
+                                     error_buffer, error_buffer_size);
+        if (status != VIPR_STATUS_OK) return status;
+    }
 
     switch (window->kind) {
     case VIPR_WINDOW_SAME:
@@ -626,7 +927,7 @@ static vipr_status materialize_window(vipr_io_session *session,
         return VIPR_STATUS_INVALID_WINDOW;
     }
     if (status != VIPR_STATUS_OK) return status;
-    if (verify_window_digest) {
+    if (verify_window_digest && !exact_source_verified) {
         uint8_t digest[32];
         vipr_blake3_hash(output, window->output_size, digest);
         if (!digest_equal(digest, window->digest)) {
@@ -737,6 +1038,10 @@ vipr_status vipr_apply_group(vipr_io_session *session,
                              uint64_t source_file_size,
                              const uint8_t *source_chunk_digests, uint32_t source_chunk_count,
                              volatile uint32_t *source_chunk_states,
+                             uint32_t source_fine_chunk_size,
+                             const uint64_t *source_fine_indexes,
+                             const uint8_t *source_fine_digests, uint32_t source_fine_count,
+                             volatile uint32_t *source_fine_states,
                              const uint8_t *source_cache, uint64_t source_cache_size,
                              const uint8_t expected_group_digest[32],
                              volatile uint32_t *cancel,
@@ -778,6 +1083,9 @@ vipr_status vipr_apply_group(vipr_io_session *session,
         }
         status = materialize_window(session, window, source_file_size, source_chunk_digests,
                                     source_chunk_count, source_chunk_states,
+                                    source_fine_chunk_size, source_fine_indexes,
+                                    source_fine_digests, source_fine_count,
+                                    source_fine_states,
                                     source_cache, source_cache_size,
                                     buffer + (size_t)(window->output_offset - group_offset), 0, cancel, result,
                                     error_buffer, error_buffer_size);
@@ -808,6 +1116,10 @@ vipr_status vipr_apply_changed_window(vipr_io_session *session, const uint8_t *e
                                       uint64_t source_file_size,
                                       const uint8_t *source_chunk_digests, uint32_t source_chunk_count,
                                       volatile uint32_t *source_chunk_states,
+                                      uint32_t source_fine_chunk_size,
+                                      const uint64_t *source_fine_indexes,
+                                      const uint8_t *source_fine_digests, uint32_t source_fine_count,
+                                      volatile uint32_t *source_fine_states,
                                       const uint8_t *source_cache, uint64_t source_cache_size,
                                       volatile uint32_t *cancel,
                                       vipr_group_result *result,
@@ -829,6 +1141,9 @@ vipr_status vipr_apply_changed_window(vipr_io_session *session, const uint8_t *e
     uint8_t *buffer = session->group_buffer.data;
     status = materialize_window(session, window, source_file_size, source_chunk_digests,
                                 source_chunk_count, source_chunk_states,
+                                source_fine_chunk_size, source_fine_indexes,
+                                source_fine_digests, source_fine_count,
+                                source_fine_states,
                                 source_cache, source_cache_size, buffer, 1, cancel, result,
                                 error_buffer, error_buffer_size);
     if (status == VIPR_STATUS_OK && window->kind != VIPR_WINDOW_SAME) {

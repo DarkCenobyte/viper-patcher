@@ -206,14 +206,15 @@ func TestV4DirectionGroupingAndClonePlanning(t *testing.T) {
 	if groupWindows(nil, 0) != nil || sumWindowBytes(windows) != 10<<20 {
 		t.Fatal("window grouping totals are incorrect")
 	}
-	if applicationWorkCount(false, windows, 10<<20) != 2 ||
-		applicationWorkCount(true, windows, 10<<20) != 1 ||
-		applicationWorkCount(true, windows[:2], 8<<20) != 0 {
+	if applicationWorkCount(false, false, windows, 10<<20) != 2 ||
+		applicationWorkCount(true, false, windows, 10<<20) != 1 ||
+		applicationWorkCount(true, false, windows[:2], 8<<20) != 0 ||
+		applicationWorkCount(true, true, windows[:2], 8<<20) != 2 {
 		t.Fatal("application work count is incorrect")
 	}
 
 	var events []progress.Event
-	if err := applyClonedWindows(context.Background(), nil, nil, windows[:2], 8<<20, nil, 2, 0, 1, "same.bin", func(event progress.Event) { events = append(events, event) }); err != nil {
+	if err := applyClonedWindows(context.Background(), nil, nil, windows[:2], 8<<20, nil, false, 2, 0, 1, "same.bin", func(event progress.Event) { events = append(events, event) }); err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 1 || events[0].ProcessedBytes != 8<<20 {

@@ -199,6 +199,13 @@ func directionData(entry patchformat.FileEntry, direction Direction) (inputSize,
 	return entry.SourceSize, entry.TargetSize, entry.SourceDigest, entry.TargetDigest, entry.SourceChunks, entry.TargetChunks, entry.ForwardWindows
 }
 
+func directionFineData(entry patchformat.FileEntry, direction Direction) (uint32, []patchformat.FineDigest) {
+	if direction == Reverse {
+		return entry.TargetFineChunkSize, entry.TargetFineChunks
+	}
+	return entry.SourceFineChunkSize, entry.SourceFineChunks
+}
+
 func prepareApplicationFile(
 	ctx context.Context,
 	token *nativev4.CancelToken,
@@ -216,6 +223,7 @@ func prepareApplicationFile(
 ) (preparedFile, error) {
 	inputSize, outputSize, inputRoot, _, inputChunks, outputChunks, windows :=
 		directionData(entry, direction)
+	inputFineChunkSize, inputFineChunks := directionFineData(entry, direction)
 	plannedWorkers := plannedApplicationWorkers(workerBudget, windows, outputSize)
 	reservation := uint64(max(1, plannedWorkers)) * applySessionReservation
 	operationLease, err := resources.Acquire(ctx, reservation)
@@ -237,7 +245,9 @@ func prepareApplicationFile(
 		return preparedFile{}, fmt.Errorf("validate installed metadata: %w", err)
 	}
 
-	verification := nativev4.NewSourceVerification(inputChunks, false)
+	verification := nativev4.NewSourceVerificationWithFine(
+		inputChunks, inputFineChunkSize, inputFineChunks, false,
+	)
 	var sourceCacheLease *memoryLease
 
 	// Close the final verification object before releasing the memory-budget
@@ -278,7 +288,9 @@ func prepareApplicationFile(
 		}
 
 		verification.Close()
-		verification = nativev4.NewSourceVerification(inputChunks, true)
+		verification = nativev4.NewSourceVerificationWithFine(
+			inputChunks, inputFineChunkSize, inputFineChunks, true,
+		)
 		sourceStrictlyVerified = true
 	} else if verify == VerifyOutput {
 		verification.Close()
@@ -352,30 +364,6 @@ func prepareApplicationFile(
 		}
 	}
 
-	if cloned && !sourceStrictlyVerified {
-		// A clone inherits every unchanged byte from the installed source.
-		// Verify that source once, then skip all SAME windows without
-		// rereading them.
-		actual, _, hashErr := patchSession.HashFileTreeWithToken(
-			token,
-			false,
-			inputSize,
-			patchformat.IdentityChunkSize,
-		)
-		if hashErr != nil {
-			return preparedFile{}, hashErr
-		}
-		if actual != inputRoot {
-			return preparedFile{}, fmt.Errorf("source BLAKE3 tree mismatch")
-		}
-
-		if verification != nil {
-			verification.Close()
-		}
-		verification = nativev4.NewSourceVerification(inputChunks, true)
-		sourceStrictlyVerified = true
-	}
-
 	if !cloned {
 		err = patchSession.SetOutputSize(
 			outputSize,
@@ -386,7 +374,8 @@ func prepareApplicationFile(
 		}
 	}
 
-	workCount := applicationWorkCount(cloned, windows, outputSize)
+	verifyClonedSame := cloned && !sourceStrictlyVerified
+	workCount := applicationWorkCount(cloned, verifyClonedSame, windows, outputSize)
 	var pool *nativev4.SessionPool
 	closePool := func(cause error) error {
 		if pool == nil {
@@ -421,6 +410,7 @@ func prepareApplicationFile(
 				windows,
 				inputSize,
 				verification,
+				verifyClonedSame,
 				poolSize,
 				index,
 				count,
@@ -533,8 +523,11 @@ func shouldPreallocateOutput(durability DurabilityMode, profile IOProfile) bool 
 	return durability == DurabilityDurable && (profile == IOSSD || profile == IONVMe)
 }
 
-func applicationWorkCount(cloned bool, windows []patchformat.WindowDescriptor, outputSize uint64) int {
+func applicationWorkCount(cloned, verifyClonedSame bool, windows []patchformat.WindowDescriptor, outputSize uint64) int {
 	if cloned {
+		if verifyClonedSame {
+			return len(windows)
+		}
 		count := 0
 		for _, window := range windows {
 			if window.Kind != patchformat.WindowSame {
@@ -547,7 +540,7 @@ func applicationWorkCount(cloned bool, windows []patchformat.WindowDescriptor, o
 }
 
 func plannedApplicationWorkers(requested int, windows []patchformat.WindowDescriptor, outputSize uint64) int {
-	workCount := applicationWorkCount(false, windows, outputSize)
+	workCount := applicationWorkCount(false, false, windows, outputSize)
 	if workCount == 0 {
 		return 0
 	}
@@ -566,25 +559,25 @@ func cloneWorthTrying(windows []patchformat.WindowDescriptor, inputSize, outputS
 	}
 	return same*100 >= outputSize*90
 }
-func applyClonedWindows(ctx context.Context, token *nativev4.CancelToken, pool *nativev4.SessionPool, windows []patchformat.WindowDescriptor, sourceSize uint64, verification *nativev4.SourceVerification, workers, index, count int, path string, callback progress.Callback) error {
-	changed := make([]int, 0, len(windows))
+func applyClonedWindows(ctx context.Context, token *nativev4.CancelToken, pool *nativev4.SessionPool, windows []patchformat.WindowDescriptor, sourceSize uint64, verification *nativev4.SourceVerification, verifySame bool, workers, index, count int, path string, callback progress.Callback) error {
+	work := make([]int, 0, len(windows))
 	var unchanged uint64
 	totalBytes := sumWindowBytes(windows)
 	for i := range windows {
-		if windows[i].Kind == patchformat.WindowSame {
+		if windows[i].Kind == patchformat.WindowSame && !verifySame {
 			unchanged += uint64(windows[i].OutputSize)
 			continue
 		}
-		changed = append(changed, i)
+		work = append(work, i)
 	}
 	var completed atomicCounter
 	completed.value.Store(unchanged)
 	if unchanged != 0 {
 		progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: path, ProcessedBytes: unchanged, TotalBytes: totalBytes, Stage: progress.StageApplying})
 	}
-	return parallelFor(ctx, len(changed), workers, func(ctx context.Context, job int) error {
+	return parallelFor(ctx, len(work), workers, func(ctx context.Context, job int) error {
 		return runScheduled(ctx, applyLeafTaskCost, func() error {
-			i := changed[job]
+			i := work[job]
 			session, err := pool.Acquire(ctx)
 			if err != nil {
 				return err

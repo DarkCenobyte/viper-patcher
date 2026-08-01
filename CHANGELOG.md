@@ -23,6 +23,18 @@ version before the first retained tag.
 - Replaced repeated full transaction-journal snapshots with one snapshot plus
   compact append-only entry transitions while retaining recovery support for
   version-1 journals.
+- Authenticate SAME and COPY source ranges at their exact window granularity
+  before use, using the existing full BLAKE3-256 window digest.
+- Added an optional, index-authenticated fine-source-digest extension for delta
+  windows. The creator adaptively selects 64 KiB, 256 KiB, or 1 MiB bands only
+  when their predicted read reduction exceeds the encoded table cost.
+- Fine source tables use full BLAKE3-256 digests and preserve the canonical
+  8 MiB digest tables and `blake3-tree-v1` roots unchanged.
+- Apply delta windows as `read -> verify -> consume`; incomplete or absent fine
+  tables fall back to canonical 8 MiB verification, while digest mismatches
+  remain hard failures.
+- Reflink application now verifies unchanged SAME windows on demand instead of
+  hashing the complete source before applying changed windows.
 
 ### Fixed
 

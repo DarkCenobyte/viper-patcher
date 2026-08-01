@@ -39,6 +39,15 @@ The test suite covers:
   source buffer, including an explicit native result flag.
 - Preferred verification ordering and partial cache reuse for COPY ranges that
   cross canonical chunk boundaries.
+- Exact-window source verification for SAME/COPY without changing V4 wire
+  descriptors or canonical source states.
+- Round-trip and malformed-input coverage for the optional fine-verification
+  index extension, including feature-flag agreement and 32-bit decode limits.
+- Adaptive fine-band planning for sparse and dense delta source spans across
+  `balanced`, `apply-speed`, and `patch-size` modes.
+- Native fine-band lookup, atomic verification, canonical fallback, mismatch
+  rejection, and reuse of the last authenticated band by delta COPY decoding.
+- Reflink SAME-window verification without rewriting cloned extents.
 - Compact transaction transitions, interrupted-tail replay, and recovery of
   legacy version-1 journal snapshots.
 - Immediate termination before decompressed output can exceed its declared size.

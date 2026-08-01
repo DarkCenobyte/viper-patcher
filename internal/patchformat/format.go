@@ -135,6 +135,11 @@ type FileEntry struct {
 	TargetChunks    []Digest
 	ForwardWindows  []WindowDescriptor
 	ReverseWindows  []WindowDescriptor
+
+	SourceFineChunkSize uint32
+	TargetFineChunkSize uint32
+	SourceFineChunks    []FineDigest
+	TargetFineChunks    []FineDigest
 }
 
 type Header struct {
@@ -147,6 +152,7 @@ type Header struct {
 	Reverse           bool
 	DefaultWindowSize uint32
 	Optimization      OptimizationMode
+	FineVerification  bool
 	Files             []FileEntry
 }
 
@@ -193,10 +199,7 @@ func EncodeIndex(header Header) ([]byte, error) {
 	buffer.Grow(4096)
 	buffer.Write(IndexMagic[:])
 	writeU32(&buffer, FormatVersion)
-	var flags uint32
-	if header.Reverse {
-		flags |= 1
-	}
+	flags := containerFlags(header.Reverse, header.FineVerification)
 	writeU32(&buffer, flags)
 	writeI64(&buffer, header.CreatedAt.UnixNano())
 	writeI32(&buffer, int32(header.Compression.Level))
@@ -215,6 +218,11 @@ func EncodeIndex(header Header) ([]byte, error) {
 	for index := range header.Files {
 		if err := encodeFileEntry(&buffer, &header.Files[index], header.Reverse); err != nil {
 			return nil, fmt.Errorf("encode file entry %d: %w", index, err)
+		}
+	}
+	if header.FineVerification {
+		if err := encodeFineVerification(&buffer, header.Files); err != nil {
+			return nil, err
 		}
 	}
 	if uint64(buffer.Len()) > MaxIndexSize {
@@ -238,7 +246,7 @@ func DecodeAt(reader io.ReaderAt, size uint64, verifier IndexVerifier) (Patch, e
 		return Patch{}, fmt.Errorf("not a VIPR V4 patch")
 	}
 	prefixFlags := binary.LittleEndian.Uint32(prefix[8:12])
-	if prefixFlags&^uint32(1) != 0 {
+	if prefixFlags&^supportedContainerFlags != 0 {
 		return Patch{}, fmt.Errorf("V4 prefix contains unsupported flags")
 	}
 	if binary.LittleEndian.Uint32(prefix[12:16]) != 0 {
@@ -261,7 +269,7 @@ func DecodeAt(reader io.ReaderAt, size uint64, verifier IndexVerifier) (Patch, e
 	var digest Digest
 	copy(digest[:], footer[24:56])
 	footerFlags := binary.LittleEndian.Uint32(footer[56:60])
-	if footerFlags&^uint32(1) != 0 {
+	if footerFlags&^supportedContainerFlags != 0 {
 		return Patch{}, fmt.Errorf("V4 footer contains unsupported flags")
 	}
 	if binary.LittleEndian.Uint32(footer[60:64]) != 0 {
@@ -286,7 +294,9 @@ func DecodeAt(reader io.ReaderAt, size uint64, verifier IndexVerifier) (Patch, e
 	if err != nil {
 		return Patch{}, err
 	}
-	if header.Reverse != (footerFlags&1 != 0) || prefixFlags != footerFlags {
+	if header.Reverse != (footerFlags&ContainerFlagReverse != 0) ||
+		header.FineVerification != (footerFlags&ContainerFlagFineVerification != 0) ||
+		prefixFlags != footerFlags {
 		return Patch{}, fmt.Errorf("V4 container flags disagree")
 	}
 	result := Patch{Header: header, DataOffset: PrefixSize, IndexOffset: indexOffset, IndexSize: indexSize, IndexDigest: digest, ContainerSize: size}
@@ -321,6 +331,9 @@ func normalizeHeader(header *Header) {
 	}
 	if header.Compression.Mode == "" {
 		header.Compression.Mode = CompressionHybrid
+	}
+	if hasFineVerification(header.Files) {
+		header.FineVerification = true
 	}
 	for i := range header.Files {
 		entry := &header.Files[i]
@@ -397,6 +410,15 @@ func ValidateHeader(header Header) error {
 		}
 		if uint64(len(entry.SourceChunks)) != chunkCount(entry.SourceSize) || uint64(len(entry.TargetChunks)) != chunkCount(entry.TargetSize) {
 			return fmt.Errorf("file entry %q has an invalid digest table", entry.Path)
+		}
+		if !header.FineVerification && entryHasFineVerification(entry) {
+			return fmt.Errorf("file entry %q has fine digests without the feature flag", entry.Path)
+		}
+		if err := validateFineDigestTable(entry.SourceSize, entry.SourceFineChunkSize, entry.SourceFineChunks); err != nil {
+			return fmt.Errorf("file entry %q source fine digests: %w", entry.Path, err)
+		}
+		if err := validateFineDigestTable(entry.TargetSize, entry.TargetFineChunkSize, entry.TargetFineChunks); err != nil {
+			return fmt.Errorf("file entry %q target fine digests: %w", entry.Path, err)
 		}
 		if err := validateWindowSet(entry.ForwardWindows, entry.TargetSize, entry.SourceSize, entry.WindowSize, true); err != nil {
 			return fmt.Errorf("file entry %q forward windows: %w", entry.Path, err)
@@ -693,7 +715,7 @@ func decodeIndex(payload []byte) (Header, error) {
 	if err != nil {
 		return Header{}, err
 	}
-	if flags&^uint32(1) != 0 {
+	if flags&^supportedContainerFlags != 0 {
 		return Header{}, fmt.Errorf("V4 index contains unsupported flags")
 	}
 	created, err := reader.i64()
@@ -737,11 +759,16 @@ func decodeIndex(payload []byte) (Header, error) {
 			return Header{}, err
 		}
 	}
-	header := Header{FormatVersion: FormatVersion, CreatedAt: time.Unix(0, created).UTC(), Creator: CreatorInfo{Name: values[0], Version: values[1], Commit: values[2], BuildDate: values[3]}, Comment: comment, HashAlgorithm: HashBLAKE3Tree, Compression: Compression{Algorithm: AlgorithmHybrid, Library: values[4], Mode: CompressionHybrid, Level: int(level)}, Reverse: flags&1 != 0, DefaultWindowSize: defaultWindow, Optimization: OptimizationMode(optimization), Files: make([]FileEntry, int(fileCount))}
+	header := Header{FormatVersion: FormatVersion, CreatedAt: time.Unix(0, created).UTC(), Creator: CreatorInfo{Name: values[0], Version: values[1], Commit: values[2], BuildDate: values[3]}, Comment: comment, HashAlgorithm: HashBLAKE3Tree, Compression: Compression{Algorithm: AlgorithmHybrid, Library: values[4], Mode: CompressionHybrid, Level: int(level)}, Reverse: flags&ContainerFlagReverse != 0, DefaultWindowSize: defaultWindow, Optimization: OptimizationMode(optimization), FineVerification: flags&ContainerFlagFineVerification != 0, Files: make([]FileEntry, int(fileCount))}
 	for i := range header.Files {
 		header.Files[i], err = decodeFileEntry(reader, header.Reverse)
 		if err != nil {
 			return Header{}, fmt.Errorf("decode file entry %d: %w", i, err)
+		}
+	}
+	if header.FineVerification {
+		if err := decodeFineVerification(reader, header.Files); err != nil {
+			return Header{}, err
 		}
 	}
 	if reader.remaining() != 0 {

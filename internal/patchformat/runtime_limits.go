@@ -113,8 +113,12 @@ func DecodeAtWithLimits(reader io.ReaderAt, size uint64, limits DecodeLimits, ve
 	if counts.windows > limits.MaxWindows {
 		return Patch{}, fmt.Errorf("V4 window count %d exceeds runtime limit %d", counts.windows, limits.MaxWindows)
 	}
-	if counts.digests > limits.MaxDigests {
-		return Patch{}, fmt.Errorf("V4 digest count %d exceeds runtime limit %d", counts.digests, limits.MaxDigests)
+	totalDigests, carry := bits.Add64(counts.digests, counts.fineDigests, 0)
+	if carry != 0 {
+		return Patch{}, fmt.Errorf("V4 digest count overflows")
+	}
+	if totalDigests > limits.MaxDigests {
+		return Patch{}, fmt.Errorf("V4 digest count %d exceeds runtime limit %d", totalDigests, limits.MaxDigests)
 	}
 	if counts.strings > limits.MaxStringBytes {
 		return Patch{}, fmt.Errorf("V4 string bytes %d exceed runtime limit %d", counts.strings, limits.MaxStringBytes)
@@ -126,7 +130,7 @@ func DecodeAtWithLimits(reader io.ReaderAt, size uint64, limits DecodeLimits, ve
 }
 
 type decodedCounts struct {
-	files, windows, digests, strings uint64
+	files, windows, digests, fineDigests, strings uint64
 }
 
 func estimateDecodedIndex(header Header) (uint64, decodedCounts, error) {
@@ -158,6 +162,9 @@ func estimateDecodedIndex(header Header) (uint64, decodedCounts, error) {
 		if err := checkedAdd(&counts.digests, uint64(len(entry.SourceChunks)+len(entry.TargetChunks))); err != nil {
 			return 0, counts, err
 		}
+		if err := checkedAdd(&counts.fineDigests, uint64(len(entry.SourceFineChunks)+len(entry.TargetFineChunks))); err != nil {
+			return 0, counts, err
+		}
 	}
 
 	total := uint64(unsafe.Sizeof(Header{}))
@@ -168,6 +175,7 @@ func estimateDecodedIndex(header Header) (uint64, decodedCounts, error) {
 		{counts.files, uint64(unsafe.Sizeof(FileEntry{}))},
 		{counts.windows, uint64(unsafe.Sizeof(WindowDescriptor{}))},
 		{counts.digests, uint64(unsafe.Sizeof(Digest{}))},
+		{counts.fineDigests, uint64(unsafe.Sizeof(FineDigest{}))},
 		{counts.strings, 1},
 	}
 	for _, term := range terms {

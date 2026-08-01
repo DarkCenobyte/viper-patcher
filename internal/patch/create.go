@@ -150,6 +150,7 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 		return err
 	}
 	header := patchformat.Header{FormatVersion: patchformat.FormatVersion, CreatedAt: time.Now().UTC(), Creator: patchformat.CreatorInfo{Name: "Viper-Patcher", Version: buildinfo.Version, Commit: buildinfo.Commit, BuildDate: buildinfo.BuildDate}, Comment: options.Comment, HashAlgorithm: patchformat.HashBLAKE3Tree, Compression: patchformat.Compression{Algorithm: patchformat.AlgorithmHybrid, Library: nativev4.ZstdVersion(), Mode: patchformat.CompressionHybrid, Level: options.CompressionLevel}, Reverse: options.CreateReverse, DefaultWindowSize: defaultWindowSize(options.WindowSize), Optimization: options.Optimization, Files: make([]patchformat.FileEntry, len(snapshots))}
+	var fineDigestCount int
 	for index := range snapshots {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -158,10 +159,30 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 		if err != nil {
 			return fmt.Errorf("create V4 file %q: %w", snapshots[index].path, err)
 		}
+		retainPortableFineVerification(&entry, &fineDigestCount)
 		header.Files[index] = entry
+		if len(entry.SourceFineChunks) != 0 || len(entry.TargetFineChunks) != 0 {
+			header.FineVerification = true
+		}
 	}
 	indexOffset, err := output.Seek(0, io.SeekCurrent)
 	if err != nil {
+		return err
+	}
+	flags := boolFlag(options.CreateReverse)
+	if header.FineVerification {
+		flags |= patchformat.ContainerFlagFineVerification
+	}
+	// The fine-verification feature is selected after the window sets have
+	// exposed their referenced source spans. Rewrite the fixed-size prefix and
+	// resume exactly at the end of the payload section.
+	if _, err = output.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if err = patchformat.WritePrefix(output, flags); err != nil {
+		return err
+	}
+	if _, err = output.Seek(indexOffset, io.SeekStart); err != nil {
 		return err
 	}
 	encoded, err := patchformat.EncodeIndex(header)
@@ -175,7 +196,7 @@ func Create(ctx context.Context, options CreateOptions, callback progress.Callba
 	if _, err = output.Write(encoded); err != nil {
 		return err
 	}
-	if err = patchformat.WriteFooter(output, uint64(indexOffset), uint64(len(encoded)), digest, boolFlag(options.CreateReverse)); err != nil {
+	if err = patchformat.WriteFooter(output, uint64(indexOffset), uint64(len(encoded)), digest, flags); err != nil {
 		return err
 	}
 	if err = output.Sync(); err != nil {
@@ -371,8 +392,24 @@ func createFileEntry(ctx context.Context, output *os.File, snapshot snapshotPair
 			return patchformat.FileEntry{}, err
 		}
 	}
+	sourceFineChunkSize, sourceFineChunks, err := buildFineVerification(
+		ctx, source, snapshot.sourceSize, forward, options.Optimization,
+	)
+	if err != nil {
+		return patchformat.FileEntry{}, err
+	}
+	var targetFineChunkSize uint32
+	var targetFineChunks []patchformat.FineDigest
+	if options.CreateReverse {
+		targetFineChunkSize, targetFineChunks, err = buildFineVerification(
+			ctx, target, snapshot.targetSize, reverse, options.Optimization,
+		)
+		if err != nil {
+			return patchformat.FileEntry{}, err
+		}
+	}
 	progress.Report(callback, progress.Event{FileIndex: index + 1, FileCount: count, Path: snapshot.path, ProcessedBytes: snapshot.targetSize, TotalBytes: snapshot.targetSize, Stage: progress.StageCompressingForward})
-	return patchformat.FileEntry{Path: snapshot.path, SourceHash: sourceRoot.Hex(), TargetHash: targetRoot.Hex(), SourceSize: snapshot.sourceSize, TargetSize: snapshot.targetSize, SourceDigest: sourceRoot, TargetDigest: targetRoot, WindowSize: windowSize, SourceChunkSize: uint32(patchformat.IdentityChunkSize), SourceChunks: sourceChunks, TargetChunks: targetChunks, ForwardWindows: forward, ReverseWindows: reverse}, nil
+	return patchformat.FileEntry{Path: snapshot.path, SourceHash: sourceRoot.Hex(), TargetHash: targetRoot.Hex(), SourceSize: snapshot.sourceSize, TargetSize: snapshot.targetSize, SourceDigest: sourceRoot, TargetDigest: targetRoot, WindowSize: windowSize, SourceChunkSize: uint32(patchformat.IdentityChunkSize), SourceChunks: sourceChunks, TargetChunks: targetChunks, ForwardWindows: forward, ReverseWindows: reverse, SourceFineChunkSize: sourceFineChunkSize, TargetFineChunkSize: targetFineChunkSize, SourceFineChunks: sourceFineChunks, TargetFineChunks: targetFineChunks}, nil
 }
 
 type windowBuildResult struct {

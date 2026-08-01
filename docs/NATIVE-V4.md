@@ -25,6 +25,25 @@ verified bytes and the canonical source and target digests are identical. COPY
 may consume a verified prefix and continue with positional I/O; byte counters
 must include only bytes actually read from the source handle.
 
+Fine source verification is represented at the ABI as parallel immutable
+arrays of sorted band indexes and full 32-byte digests plus an atomic state
+array. Native code must first prove that a delta window's complete declared
+source span is represented. Only then may it replace canonical verification
+with fine-band verification. Missing entries select the canonical fallback;
+malformed metadata or a digest mismatch must never fall back silently.
+
+The fine verifier follows `read -> BLAKE3-256 -> publish state -> consume`.
+Whichever worker authenticates a band may retain those exact bytes in its
+session verification buffer so the following COPY can avoid a second read.
+Other workers may observe the shared valid state but must still read the bytes
+they need to materialize output. All pointers passed through cgo remain valid
+for the complete native call and are kept alive by the owning Go verification
+object.
+
+For clone-on-write output, referenced and output verification schedule SAME
+windows as verification-only jobs. Native SAME handling does not rewrite the
+cloned extent and may reuse the exact-source digest result as its window digest.
+
 An initial session transferred to `SessionPool` is owned by the pool even when
 construction fails; callers must clear their reference immediately after the
 transfer.
