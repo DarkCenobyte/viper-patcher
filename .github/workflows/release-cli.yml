@@ -1,0 +1,473 @@
+name: Release CLI-only
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the leading v
+        required: true
+        default: "0.6.3"
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Resolve release version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.release-version.outputs.version }}
+      tag: ${{ steps.release-version.outputs.tag }}
+    steps:
+      - name: Validate release version
+        id: release-version
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$MANUAL_VERSION"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+(\.[0-9]+){2}([.-][0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "Invalid release version: $version" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'tag=v%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: CLI-only Linux ${{ matrix.arch }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential curl
+      - run: go mod download
+      - name: Build libzstd
+        run: |
+          ./scripts/fetch-zstd.sh
+          JOBS="$(nproc)" ./scripts/build-zstd.sh
+      - name: Build and package CLI-only binary
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          version="$RELEASE_VERSION"
+          module="$(go list -m)"
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w -X ${module}/internal/buildinfo.Version=${version} -X ${module}/internal/buildinfo.Commit=${GITHUB_SHA} -X ${module}/internal/buildinfo.BuildDate=${build_date}"
+          package="viper-patcher-cli_${version}_linux_${GOARCH}"
+          package_dir="dist/${package}"
+          mkdir -p "${package_dir}/third-party-licenses"
+
+          dependencies="$(go list -deps -tags vipr_static_zstd ./cmd/patcher-cli)"
+          if printf '%s\n' "$dependencies" | grep -Eq '^(fyne\.io/|github\.com/(go-gl|fyne-io)/|github\.com/DarkCenobyte/viper-patcher/(assets|internal/gui|internal/appmode)(/|$))'; then
+            printf '%s\n' "$dependencies" >&2
+            echo "The CLI-only dependency graph unexpectedly contains GUI packages." >&2
+            exit 1
+          fi
+
+          go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o "${package_dir}/patcher-cli" ./cmd/patcher-cli
+
+          imports="$(readelf -d "${package_dir}/patcher-cli" 2>/dev/null || true)"
+          if printf '%s\n' "$imports" | grep -Eiq 'NEEDED.*zstd'; then
+            printf '%s\n' "$imports" >&2
+            echo "Dynamic zstd dependency detected; libzstd must remain statically linked." >&2
+            exit 1
+          fi
+          if printf '%s\n' "$imports" | grep -Eiq 'NEEDED.*(libGL|libEGL|libX11|libwayland|libglfw)'; then
+            printf '%s\n' "$imports" >&2
+            echo "GUI dynamic dependency detected in patcher-cli." >&2
+            exit 1
+          fi
+
+          cp README.md LICENSE "${package_dir}/"
+          cat > "${package_dir}/README-CLI.txt" <<'TEXT'
+          This archive contains the CLI-only Viper-Patcher applicator.
+
+          The patcher-cli executable is built from ./cmd/patcher-cli with only the
+          vipr_static_zstd build tag. It intentionally excludes Fyne, GLFW, embedded
+          GUI assets, and the hybrid GUI launcher. The patch engine, verification,
+          transaction handling, Ctrl+C/SIGTERM cancellation, and command-line options
+          are otherwise identical to the regular patcher CLI mode.
+          TEXT
+          cp third_party/zstd/LICENSE "${package_dir}/third-party-licenses/zstd-BSD-3-Clause.txt"
+          cp third_party/zstd-NOTICE.txt "${package_dir}/third-party-licenses/zstd-NOTICE.txt"
+          cp third-party-licenses/BLAKE3-APACHE-2.0.txt "${package_dir}/third-party-licenses/BLAKE3-APACHE-2.0.txt"
+          cp third-party-licenses/BLAKE3-NOTICE.txt "${package_dir}/third-party-licenses/BLAKE3-NOTICE.txt"
+          ./scripts/collect-go-licenses.sh "${package_dir}/third-party-licenses/go-modules"
+          tar -C dist -czf "dist/${package}.tar.gz" "$package"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: viper-patcher-cli-linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  linux-x86:
+    name: CLI-only Linux x86
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: Install 32-bit native build dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install --yes curl gcc-multilib libc6-dev-i386
+          printf '#!/bin/sh\nexec gcc -m32 "$@"\n' > "$RUNNER_TEMP/gcc-386"
+          chmod +x "$RUNNER_TEMP/gcc-386"
+      - run: go mod download
+      - name: Build 32-bit libzstd
+        env:
+          CC: ${{ runner.temp }}/gcc-386
+        run: |
+          ./scripts/fetch-zstd.sh
+          JOBS="$(nproc)" ./scripts/build-zstd.sh
+      - name: Build and package CLI-only binary
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: "386"
+          CC: ${{ runner.temp }}/gcc-386
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          version="$RELEASE_VERSION"
+          module="$(go list -m)"
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w -X ${module}/internal/buildinfo.Version=${version} -X ${module}/internal/buildinfo.Commit=${GITHUB_SHA} -X ${module}/internal/buildinfo.BuildDate=${build_date}"
+          package="viper-patcher-cli_${version}_linux_386"
+          package_dir="dist/${package}"
+          mkdir -p "${package_dir}/third-party-licenses"
+
+          dependencies="$(go list -deps -tags vipr_static_zstd ./cmd/patcher-cli)"
+          if printf '%s\n' "$dependencies" | grep -Eq '^(fyne\.io/|github\.com/(go-gl|fyne-io)/|github\.com/DarkCenobyte/viper-patcher/(assets|internal/gui|internal/appmode)(/|$))'; then
+            printf '%s\n' "$dependencies" >&2
+            echo "The CLI-only dependency graph unexpectedly contains GUI packages." >&2
+            exit 1
+          fi
+
+          go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o "${package_dir}/patcher-cli" ./cmd/patcher-cli
+
+          imports="$(readelf -d "${package_dir}/patcher-cli" 2>/dev/null || true)"
+          if printf '%s\n' "$imports" | grep -Eiq 'NEEDED.*zstd'; then
+            printf '%s\n' "$imports" >&2
+            echo "Dynamic zstd dependency detected; libzstd must remain statically linked." >&2
+            exit 1
+          fi
+          if printf '%s\n' "$imports" | grep -Eiq 'NEEDED.*(libGL|libEGL|libX11|libwayland|libglfw)'; then
+            printf '%s\n' "$imports" >&2
+            echo "GUI dynamic dependency detected in patcher-cli." >&2
+            exit 1
+          fi
+
+          cp README.md LICENSE "${package_dir}/"
+          cat > "${package_dir}/README-CLI.txt" <<'TEXT'
+          This archive contains the CLI-only Viper-Patcher applicator.
+
+          The patcher-cli executable is built from ./cmd/patcher-cli with only the
+          vipr_static_zstd build tag. It intentionally excludes Fyne, GLFW, embedded
+          GUI assets, and the hybrid GUI launcher. The patch engine, verification,
+          transaction handling, Ctrl+C/SIGTERM cancellation, and command-line options
+          are otherwise identical to the regular patcher CLI mode.
+          TEXT
+          cp third_party/zstd/LICENSE "${package_dir}/third-party-licenses/zstd-BSD-3-Clause.txt"
+          cp third_party/zstd-NOTICE.txt "${package_dir}/third-party-licenses/zstd-NOTICE.txt"
+          cp third-party-licenses/BLAKE3-APACHE-2.0.txt "${package_dir}/third-party-licenses/BLAKE3-APACHE-2.0.txt"
+          cp third-party-licenses/BLAKE3-NOTICE.txt "${package_dir}/third-party-licenses/BLAKE3-NOTICE.txt"
+          ./scripts/collect-go-licenses.sh "${package_dir}/third-party-licenses/go-modules"
+          tar -C dist -czf "dist/${package}.tar.gz" "$package"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: viper-patcher-cli-linux-386
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  macos:
+    name: CLI-only macOS arm64
+    needs: version
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - run: go mod download
+      - name: Build libzstd
+        run: |
+          ./scripts/fetch-zstd.sh
+          JOBS="$(sysctl -n hw.ncpu)" ./scripts/build-zstd.sh
+      - name: Build and package CLI-only binary
+        env:
+          CGO_ENABLED: "1"
+          GOOS: darwin
+          GOARCH: arm64
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          version="$RELEASE_VERSION"
+          module="$(go list -m)"
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w -X ${module}/internal/buildinfo.Version=${version} -X ${module}/internal/buildinfo.Commit=${GITHUB_SHA} -X ${module}/internal/buildinfo.BuildDate=${build_date}"
+          package="viper-patcher-cli_${version}_darwin_arm64"
+          package_dir="dist/${package}"
+          mkdir -p "${package_dir}/third-party-licenses"
+
+          dependencies="$(go list -deps -tags vipr_static_zstd ./cmd/patcher-cli)"
+          if printf '%s\n' "$dependencies" | grep -Eq '^(fyne\.io/|github\.com/(go-gl|fyne-io)/|github\.com/DarkCenobyte/viper-patcher/(assets|internal/gui|internal/appmode)(/|$))'; then
+            printf '%s\n' "$dependencies" >&2
+            echo "The CLI-only dependency graph unexpectedly contains GUI packages." >&2
+            exit 1
+          fi
+
+          go build -trimpath -tags vipr_static_zstd -ldflags "$ldflags" -o "${package_dir}/patcher-cli" ./cmd/patcher-cli
+
+          imports="$(otool -L "${package_dir}/patcher-cli")"
+          if printf '%s\n' "$imports" | tail -n +2 | grep -Eiq 'zstd.*\.dylib'; then
+            printf '%s\n' "$imports" >&2
+            echo "Dynamic zstd dependency detected; libzstd must remain statically linked." >&2
+            exit 1
+          fi
+          if printf '%s\n' "$imports" | tail -n +2 | grep -Eiq '(OpenGL|GLFW)'; then
+            printf '%s\n' "$imports" >&2
+            echo "GUI dynamic dependency detected in patcher-cli." >&2
+            exit 1
+          fi
+
+          cp README.md LICENSE "${package_dir}/"
+          cat > "${package_dir}/README-CLI.txt" <<'TEXT'
+          This archive contains the CLI-only Viper-Patcher applicator.
+
+          The patcher-cli executable is built from ./cmd/patcher-cli with only the
+          vipr_static_zstd build tag. It intentionally excludes Fyne, GLFW, embedded
+          GUI assets, and the hybrid GUI launcher. The patch engine, verification,
+          transaction handling, Ctrl+C/SIGTERM cancellation, and command-line options
+          are otherwise identical to the regular patcher CLI mode.
+          TEXT
+          cp third_party/zstd/LICENSE "${package_dir}/third-party-licenses/zstd-BSD-3-Clause.txt"
+          cp third_party/zstd-NOTICE.txt "${package_dir}/third-party-licenses/zstd-NOTICE.txt"
+          cp third-party-licenses/BLAKE3-APACHE-2.0.txt "${package_dir}/third-party-licenses/BLAKE3-APACHE-2.0.txt"
+          cp third-party-licenses/BLAKE3-NOTICE.txt "${package_dir}/third-party-licenses/BLAKE3-NOTICE.txt"
+          ./scripts/collect-go-licenses.sh "${package_dir}/third-party-licenses/go-modules"
+          tar -C dist -czf "dist/${package}.tar.gz" "$package"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: viper-patcher-cli-darwin-arm64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: CLI-only Windows ${{ matrix.name }}
+    needs: version
+    runs-on: windows-2025
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x64
+            goarch: amd64
+            msystem: MINGW64
+            compiler_package: mingw-w64-x86_64-gcc
+            make_package: mingw-w64-x86_64-make
+            tool_directory: mingw64
+          - name: x86
+            goarch: "386"
+            msystem: MINGW32
+            compiler_package: mingw-w64-i686-gcc
+            make_package: mingw-w64-i686-make
+            tool_directory: mingw32
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          architecture: x64
+          cache: true
+      - name: Install Windows resource tool
+        shell: pwsh
+        run: go install github.com/tc-hib/go-winres@v0.3.3
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        id: msys2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: ${{ matrix.compiler_package }} ${{ matrix.make_package }}
+      - name: Configure MinGW toolchain
+        shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+          TOOL_DIRECTORY: ${{ matrix.tool_directory }}
+        run: |
+          $toolDirectory = Join-Path $env:MSYS2_ROOT $env:TOOL_DIRECTORY
+          $binDirectory = Join-Path $toolDirectory "bin"
+          $compiler = Join-Path $binDirectory "gcc.exe"
+          $cxxCompiler = Join-Path $binDirectory "g++.exe"
+          $archiver = Join-Path $binDirectory "ar.exe"
+          $ranlib = Join-Path $binDirectory "ranlib.exe"
+          $objdump = Join-Path $binDirectory "objdump.exe"
+
+          foreach ($tool in @($compiler, $cxxCompiler, $archiver, $ranlib, $objdump)) {
+            if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
+              throw "Required MinGW tool was not found: $tool"
+            }
+          }
+
+          $binDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CC=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=$cxxCompiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AR=$archiver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RANLIB=$ranlib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OBJDUMP=$objdump" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - shell: pwsh
+        run: go mod download
+      - name: Build libzstd
+        shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          ./scripts/fetch-zstd.ps1
+          ./scripts/build-zstd.ps1 -Architecture ${{ matrix.name }} -MSYS2Root $env:MSYS2_ROOT
+      - name: Build and package CLI-only binary
+        shell: pwsh
+        env:
+          CGO_ENABLED: "1"
+          GOOS: windows
+          GOARCH: ${{ matrix.goarch }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          $version = $env:RELEASE_VERSION
+          $module = go list -m
+          $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          $ldflags = "-s -w -X $module/internal/buildinfo.Version=$version -X $module/internal/buildinfo.Commit=$env:GITHUB_SHA -X $module/internal/buildinfo.BuildDate=$buildDate"
+          $package = "viper-patcher-cli_${version}_windows_${env:GOARCH}"
+          $packageDirectory = "dist/$package"
+          New-Item -ItemType Directory -Force -Path "$packageDirectory/third-party-licenses" | Out-Null
+
+          $dependencies = @(go list -deps -tags vipr_static_zstd ./cmd/patcher-cli)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $forbidden = $dependencies | Select-String -Pattern '^(fyne\.io/|github\.com/(go-gl|fyne-io)/|github\.com/DarkCenobyte/viper-patcher/(assets|internal/gui|internal/appmode)(/|$))'
+          if ($forbidden) {
+            $dependencies | Out-String | Write-Error
+            throw "The CLI-only dependency graph unexpectedly contains GUI packages."
+          }
+
+          $goWinRes = Join-Path (go env GOPATH) "bin/go-winres.exe"
+          & $goWinRes simply `
+            --arch "${{ matrix.goarch }}" `
+            --manifest cli `
+            --product-name "Viper-Patcher CLI" `
+            --file-description "Apply and reverse VIPR patches without the GUI stack" `
+            --original-filename "patcher-cli.exe" `
+            --out "cmd/patcher-cli/rsrc"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          go build -trimpath -tags vipr_static_zstd -ldflags $ldflags -o "$packageDirectory/patcher-cli.exe" ./cmd/patcher-cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $imports = & $env:OBJDUMP -p "$packageDirectory/patcher-cli.exe"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not inspect dynamic dependencies for patcher-cli.exe."
+          }
+          if ($imports | Select-String -Pattern 'DLL Name:\s*.*zstd.*\.dll') {
+            $imports | Out-String | Write-Error
+            throw "Dynamic zstd dependency detected; libzstd must remain statically linked."
+          }
+          if ($imports | Select-String -Pattern 'DLL Name:\s*.*(opengl32|glfw).*\.dll') {
+            $imports | Out-String | Write-Error
+            throw "GUI dynamic dependency detected in patcher-cli.exe."
+          }
+
+          Copy-Item README.md, LICENSE "$packageDirectory/"
+          @'
+          This archive contains the CLI-only Viper-Patcher applicator.
+
+          The patcher-cli executable is built from ./cmd/patcher-cli with only the
+          vipr_static_zstd build tag. It intentionally excludes Fyne, GLFW, embedded
+          GUI assets, and the hybrid GUI launcher. The patch engine, verification,
+          transaction handling, Ctrl+C/SIGTERM cancellation, and command-line options
+          are otherwise identical to the regular patcher CLI mode.
+          '@ | Set-Content -LiteralPath "$packageDirectory/README-CLI.txt" -Encoding utf8
+          Copy-Item third_party/zstd/LICENSE "$packageDirectory/third-party-licenses/zstd-BSD-3-Clause.txt"
+          Copy-Item third_party/zstd-NOTICE.txt "$packageDirectory/third-party-licenses/zstd-NOTICE.txt"
+          Copy-Item third-party-licenses/BLAKE3-APACHE-2.0.txt "$packageDirectory/third-party-licenses/BLAKE3-APACHE-2.0.txt"
+          Copy-Item third-party-licenses/BLAKE3-NOTICE.txt "$packageDirectory/third-party-licenses/BLAKE3-NOTICE.txt"
+          ./scripts/collect-go-licenses.ps1 -Destination "$packageDirectory/third-party-licenses/go-modules"
+          Compress-Archive -Path $packageDirectory -DestinationPath "dist/$package.zip"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: viper-patcher-cli-windows-${{ matrix.goarch }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Attach CLI-only archives to release
+    needs: [version, linux, linux-x86, macos, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate CLI-only checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.zip > SHA256SUMS-CLI.txt
+      - name: Wait for or create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        shell: bash
+        run: |
+          for attempt in $(seq 1 90); do
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 10
+          done
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Viper-Patcher $RELEASE_TAG" \
+            --generate-notes
+      - name: Upload CLI-only release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        shell: bash
+        run: |
+          gh release upload "$RELEASE_TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

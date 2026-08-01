@@ -93,7 +93,7 @@ func TestApplyGroupReusesJustVerifiedSourceChunk(t *testing.T) {
 	}
 }
 
-func TestApplyGroupPartiallyReusesPreferredVerifiedChunk(t *testing.T) {
+func TestApplyGroupVerifiesCrossChunkCopyAtExactWindowGranularity(t *testing.T) {
 	directory := t.TempDir()
 	sourcePath := filepath.Join(directory, "source.bin")
 	outputPath := filepath.Join(directory, "output.bin")
@@ -165,11 +165,14 @@ func TestApplyGroupPartiallyReusesPreferredVerifiedChunk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Verification reads both canonical chunks (10 MiB). COPY then reuses the
-	// final 1 MiB of the preferred first chunk and reads only its 1 MiB tail.
-	const expectedSourceReads = 11 << 20
-	if result.BytesReadSource != expectedSourceReads {
-		t.Fatalf("source bytes read = %d, want %d", result.BytesReadSource, expectedSourceReads)
+	// The exact COPY digest authenticates only the requested 2 MiB range, even
+	// though that range crosses the 8 MiB canonical chunk boundary. COPY then
+	// consumes those same verified bytes without another source read.
+	if result.BytesReadSource != outputSize {
+		t.Fatalf("source bytes read = %d, want %d", result.BytesReadSource, outputSize)
+	}
+	if verification.States[0] != 0 || verification.States[1] != 0 {
+		t.Fatalf("canonical states = %d/%d, want unverified", verification.States[0], verification.States[1])
 	}
 	actual, err := os.ReadFile(outputPath)
 	if err != nil {

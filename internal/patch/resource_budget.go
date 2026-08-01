@@ -148,9 +148,11 @@ func fitApplicationWorkers(budget *memoryBudget, fileWorkers, perFileWorkers int
 	if maximumSessions < 1 {
 		maximumSessions = 1
 	}
-	for fileWorkers > 1 && fileWorkers*perFileWorkers > maximumSessions {
-		fileWorkers--
-	}
+	// Preserve inter-file concurrency first: independent files provide useful
+	// parallelism without concentrating every available session on one file.
+	// Only reduce file workers when the budget cannot provide even one session
+	// per active file, then spend any remaining capacity on intra-file workers.
+	fileWorkers = min(fileWorkers, maximumSessions)
 	perFileWorkers = min(perFileWorkers, max(1, maximumSessions/fileWorkers))
 	return fileWorkers, perFileWorkers
 }
