@@ -118,6 +118,7 @@ static vipr_status hash_source_chunk(vipr_io_session *session,
     if (source_cache != NULL && offset <= source_cache_size && size <= source_cache_size - offset) {
         buffer = source_cache + (size_t)offset;
     } else {
+        session->verification_cache_valid = 0;
         if (!vipr_scratch_reserve(&session->verification_buffer, size == 0 ? 1 : size)) {
             __atomic_store_n(state, 0, __ATOMIC_RELEASE);
             vipr_set_error(error_buffer, error_buffer_size, "reserve source verification buffer");
@@ -133,6 +134,11 @@ static vipr_status hash_source_chunk(vipr_io_session *session,
         if (!digest_equal(actual, expected_digests + (size_t)index * 32)) {
             status = VIPR_STATUS_SOURCE_MISMATCH;
             vipr_set_error(error_buffer, error_buffer_size, "source chunk digest mismatch");
+        }
+        if (status == VIPR_STATUS_OK && source_cache == NULL) {
+            session->verification_cache_offset = offset;
+            session->verification_cache_size = size;
+            session->verification_cache_valid = 1;
         }
     }
     if (status == VIPR_STATUS_OK) {
@@ -163,10 +169,29 @@ static vipr_status verify_source_range(vipr_io_session *session,
         vipr_set_error(error_buffer, error_buffer_size, "window source chunk range exceeds digest table");
         return VIPR_STATUS_INVALID_WINDOW;
     }
+
+    uint32_t preferred = UINT32_MAX;
+    uint64_t preferred_offset = window->kind == VIPR_WINDOW_SAME
+                                    ? window->output_offset
+                                    : window->source_offset;
+    uint64_t preferred64 = preferred_offset / VIPR_V4_IDENTITY_CHUNK_SIZE;
+    if (preferred64 >= window->source_first_chunk && preferred64 < end) {
+        preferred = (uint32_t)preferred64;
+    }
+
     for (uint32_t index = window->source_first_chunk; index < (uint32_t)end; ++index) {
+        if (index == preferred) continue;
         vipr_status status = hash_source_chunk(session, index, source_file_size, source_chunk_digests,
                                               source_chunk_count, source_chunk_states,
                                               source_cache, source_cache_size, cancel, result,
+                                              error_buffer, error_buffer_size);
+        if (status != VIPR_STATUS_OK) return status;
+    }
+    if (preferred != UINT32_MAX) {
+        vipr_status status = hash_source_chunk(session, preferred, source_file_size,
+                                              source_chunk_digests, source_chunk_count,
+                                              source_chunk_states, source_cache,
+                                              source_cache_size, cancel, result,
                                               error_buffer, error_buffer_size);
         if (status != VIPR_STATUS_OK) return status;
     }
@@ -229,6 +254,22 @@ static vipr_status read_copy(vipr_io_session *session,
         memcpy(output + *produced, source_cache + (size_t)source_offset, (size_t)length);
         *produced += (uint32_t)length;
         return VIPR_STATUS_OK;
+    }
+    if (session != NULL && session->verification_cache_valid &&
+        source_offset >= session->verification_cache_offset) {
+        uint64_t relative = source_offset - session->verification_cache_offset;
+        uint64_t cached_size = (uint64_t)session->verification_cache_size;
+        if (relative < cached_size) {
+            uint64_t cached = cached_size - relative;
+            if (cached > length) cached = length;
+            memcpy(output + *produced,
+                   session->verification_buffer.data + (size_t)relative,
+                   (size_t)cached);
+            *produced += (uint32_t)cached;
+            source_offset += cached;
+            length -= cached;
+            if (length == 0) return VIPR_STATUS_OK;
+        }
     }
     uint64_t copied = 0;
     while (copied < length) {
@@ -597,6 +638,99 @@ static vipr_status materialize_window(vipr_io_session *session,
     return VIPR_STATUS_OK;
 }
 
+static vipr_status try_apply_verified_same_group(
+    vipr_io_session *session,
+    const uint8_t *encoded_windows, uint32_t window_count,
+    uint64_t group_offset, uint32_t group_size,
+    uint64_t source_file_size,
+    const uint8_t *source_chunk_digests, uint32_t source_chunk_count,
+    volatile uint32_t *source_chunk_states,
+    const uint8_t *source_cache, uint64_t source_cache_size,
+    const uint8_t expected_group_digest[32],
+    volatile uint32_t *cancel,
+    vipr_group_result *result,
+    int *handled,
+    char *error_buffer, size_t error_buffer_size) {
+    *handled = 0;
+    if (source_chunk_digests == NULL || source_chunk_states == NULL ||
+        group_offset % VIPR_V4_IDENTITY_CHUNK_SIZE != 0 ||
+        group_offset >= source_file_size) {
+        return VIPR_STATUS_OK;
+    }
+
+    uint64_t chunk_index64 = group_offset / VIPR_V4_IDENTITY_CHUNK_SIZE;
+    if (chunk_index64 >= source_chunk_count) return VIPR_STATUS_OK;
+    uint64_t remaining = source_file_size - group_offset;
+    size_t canonical_size = remaining > VIPR_V4_IDENTITY_CHUNK_SIZE
+                                ? VIPR_V4_IDENTITY_CHUNK_SIZE
+                                : (size_t)remaining;
+    if ((size_t)group_size != canonical_size) return VIPR_STATUS_OK;
+
+    for (uint32_t index = 0; index < window_count; ++index) {
+        const uint8_t *encoded = encoded_windows + (size_t)index * VIPR_V4_WINDOW_DESCRIPTOR_SIZE;
+        if (encoded[12] != VIPR_WINDOW_SAME) return VIPR_STATUS_OK;
+    }
+
+    *handled = 1;
+    uint64_t expected_offset = group_offset;
+    for (uint32_t index = 0; index < window_count; ++index) {
+        vipr_window decoded_window;
+        vipr_status status = decode_window_descriptor(
+            encoded_windows + (size_t)index * VIPR_V4_WINDOW_DESCRIPTOR_SIZE,
+            &decoded_window, error_buffer, error_buffer_size);
+        if (status != VIPR_STATUS_OK) return status;
+        if (decoded_window.kind != VIPR_WINDOW_SAME ||
+            decoded_window.output_offset != expected_offset ||
+            decoded_window.output_offset < group_offset ||
+            decoded_window.output_size > group_size -
+                (uint32_t)(decoded_window.output_offset - group_offset)) {
+            vipr_set_error(error_buffer, error_buffer_size,
+                           "V4 SAME group windows are not contiguous");
+            return VIPR_STATUS_INVALID_WINDOW;
+        }
+        status = verify_source_range(session, &decoded_window, source_file_size,
+                                     source_chunk_digests, source_chunk_count,
+                                     source_chunk_states, source_cache,
+                                     source_cache_size, cancel, result,
+                                     error_buffer, error_buffer_size);
+        if (status != VIPR_STATUS_OK) return status;
+        expected_offset += decoded_window.output_size;
+    }
+    if (expected_offset != group_offset + group_size) {
+        vipr_set_error(error_buffer, error_buffer_size,
+                       "V4 SAME group does not cover its output range");
+        return VIPR_STATUS_INVALID_WINDOW;
+    }
+
+    // Only bypass normal materialization when this session owns the exact
+    // bytes it just authenticated. If another worker verified the chunk, the
+    // cache is absent and the regular read/hash/write path remains mandatory.
+    if (!session->verification_cache_valid ||
+        session->verification_cache_offset != group_offset ||
+        session->verification_cache_size != canonical_size) {
+        *handled = 0;
+        return VIPR_STATUS_OK;
+    }
+
+    const uint8_t *source_digest = source_chunk_digests + (size_t)chunk_index64 * 32u;
+    if (!digest_equal(source_digest, expected_group_digest)) {
+        vipr_set_error(error_buffer, error_buffer_size,
+                       "V4 SAME group source and output digests disagree");
+        return VIPR_STATUS_OUTPUT_MISMATCH;
+    }
+
+    vipr_status status = vipr_write_at(session, session->output, group_offset,
+                                       session->verification_buffer.data,
+                                       canonical_size,
+                                       error_buffer, error_buffer_size);
+    if (status == VIPR_STATUS_OK && result != NULL) {
+        result->bytes_written += canonical_size;
+        result->windows_completed += window_count;
+        result->reserved |= VIPR_GROUP_RESULT_DIRECT_SAME;
+    }
+    return status;
+}
+
 vipr_status vipr_apply_group(vipr_io_session *session,
                              const uint8_t *encoded_windows, uint32_t window_count,
                              uint64_t group_offset, uint32_t group_size,
@@ -613,12 +747,22 @@ vipr_status vipr_apply_group(vipr_io_session *session,
         return VIPR_STATUS_INVALID_ARGUMENT;
     }
     if (result != NULL) memset(result, 0, sizeof(*result));
+
+    int handled = 0;
+    vipr_status status = try_apply_verified_same_group(
+        session, encoded_windows, window_count, group_offset, group_size,
+        source_file_size, source_chunk_digests, source_chunk_count,
+        source_chunk_states, source_cache, source_cache_size,
+        expected_group_digest, cancel, result, &handled,
+        error_buffer, error_buffer_size);
+    if (status != VIPR_STATUS_OK || handled) return status;
+
     if (!vipr_scratch_reserve(&session->group_buffer, group_size)) {
         vipr_set_error(error_buffer, error_buffer_size, "reserve V4 output group");
         return VIPR_STATUS_MEMORY_LIMIT;
     }
     uint8_t *buffer = session->group_buffer.data;
-    vipr_status status = VIPR_STATUS_OK;
+    status = VIPR_STATUS_OK;
     uint64_t expected_offset = group_offset;
     for (uint32_t index = 0; index < window_count; ++index) {
         vipr_window decoded_window;

@@ -44,6 +44,7 @@ vipr_status vipr_hash_file_tree(vipr_io_session *session, int use_patch_handle, 
                                 char *error_buffer, size_t error_buffer_size) {
     if (session == NULL || chunk_size == 0 || root == NULL || (digest_count != 0 && digests == NULL)) return VIPR_STATUS_INVALID_ARGUMENT;
     uint64_t expected = file_size == 0 ? 0 : (file_size + chunk_size - 1) / chunk_size;
+    session->verification_cache_valid = 0;
     if (expected != digest_count || chunk_size > SIZE_MAX) return VIPR_STATUS_INVALID_ARGUMENT;
     if (digest_count != 0 && !vipr_scratch_reserve(&session->verification_buffer, (size_t)chunk_size)) {
         vipr_set_error(error_buffer, error_buffer_size, "reserve BLAKE3 chunk buffer");
@@ -68,6 +69,7 @@ vipr_status vipr_hash_file_standard(vipr_io_session *session, int use_patch_hand
                                     char *error_buffer, size_t error_buffer_size) {
     if (session == NULL || out == NULL) return VIPR_STATUS_INVALID_ARGUMENT;
     const size_t buffer_size = 1u << 20;
+    session->verification_cache_valid = 0;
     if (!vipr_scratch_reserve(&session->verification_buffer, buffer_size)) {
         vipr_set_error(error_buffer, error_buffer_size, "reserve BLAKE3 I/O buffer");
         return VIPR_STATUS_MEMORY_LIMIT;

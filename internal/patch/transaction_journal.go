@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	applyJournalPrefix  = ".viper-transaction-"
-	applyJournalVersion = 1
-	maxApplyJournalSize = 4 << 20
+	applyJournalPrefix        = ".viper-transaction-"
+	legacyApplyJournalVersion = 1
+	applyJournalVersion       = 2
+	maxApplyJournalSize       = 4 << 20
 )
 
 type applyJournalEntry struct {
@@ -25,9 +26,17 @@ type applyJournalEntry struct {
 }
 
 type applyJournalData struct {
+	Version int
+	State   string
+	Entries []applyJournalEntry
+}
+
+type applyJournalRecord struct {
 	Version int                 `json:"version"`
-	State   string              `json:"state"`
-	Entries []applyJournalEntry `json:"entries"`
+	Kind    string              `json:"kind,omitempty"`
+	State   string              `json:"state,omitempty"`
+	Entry   uint32              `json:"entry,omitempty"`
+	Entries []applyJournalEntry `json:"entries,omitempty"`
 }
 
 type applyJournal struct {
@@ -75,26 +84,58 @@ func (journal *applyJournal) mark(index int, state string) error {
 	if journal == nil || index < 0 || index >= len(journal.data.Entries) {
 		return fmt.Errorf("invalid apply journal transition")
 	}
+	current := journal.data.Entries[index].State
+	if !validApplyJournalTransition(current, state) {
+		return fmt.Errorf("invalid apply journal transition %q to %q", current, state)
+	}
 	journal.data.Entries[index].State = state
-	return journal.persist()
+	return journal.persistRecord(applyJournalRecord{
+		Version: applyJournalVersion,
+		Kind:    "entry",
+		State:   state,
+		Entry:   uint32(index + 1),
+	})
 }
 
 func (journal *applyJournal) markCommitted() error {
 	if journal == nil {
 		return fmt.Errorf("apply journal is unavailable")
 	}
+	for index := range journal.data.Entries {
+		if journal.data.Entries[index].State != "replaced" {
+			return fmt.Errorf("apply journal cannot commit before every entry is replaced")
+		}
+	}
 	journal.data.State = "committed"
-	return journal.persist()
+	return journal.persistRecord(applyJournalRecord{
+		Version: applyJournalVersion,
+		Kind:    "commit",
+	})
 }
 
+// persist writes a complete snapshot. Production writes one snapshot when the
+// journal is created and compact transition records afterwards. Keeping this
+// helper also makes recovery fixtures explicit and self-contained.
 func (journal *applyJournal) persist() error {
+	if journal == nil {
+		return fmt.Errorf("apply journal is unavailable")
+	}
+	return journal.persistRecord(applyJournalRecord{
+		Version: applyJournalVersion,
+		Kind:    "snapshot",
+		State:   journal.data.State,
+		Entries: journal.data.Entries,
+	})
+}
+
+func (journal *applyJournal) persistRecord(record applyJournalRecord) error {
 	file, err := journal.root.root.OpenFile(journal.name, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open apply transaction journal: %w", err)
 	}
 	encoder := json.NewEncoder(file)
 	encoder.SetEscapeHTML(false)
-	writeErr := encoder.Encode(journal.data)
+	writeErr := encoder.Encode(record)
 	var syncErr error
 	if writeErr == nil && journal.durability == DurabilityDurable {
 		syncErr = file.Sync()
@@ -107,6 +148,11 @@ func (journal *applyJournal) persist() error {
 		return syncDirectoryV4(journal.root, ".")
 	}
 	return nil
+}
+
+func validApplyJournalTransition(current, next string) bool {
+	return current == "prepared" && next == "backed-up" ||
+		current == "backed-up" && next == "replaced"
 }
 
 func (journal *applyJournal) remove() error {
@@ -154,11 +200,13 @@ func recoverApplyJournal(root *installationRoot, name string, durability Durabil
 	var data applyJournalData
 	decoded := false
 	for {
-		var candidate applyJournalData
-		decodeErr := decoder.Decode(&candidate)
+		var record applyJournalRecord
+		decodeErr := decoder.Decode(&record)
 		if decodeErr == nil {
-			data = candidate
-			decoded = true
+			if err := replayApplyJournalRecord(&data, &decoded, record); err != nil {
+				_ = file.Close()
+				return fmt.Errorf("decode apply transaction journal %q: %w", name, err)
+			}
 			continue
 		}
 		if errors.Is(decodeErr, io.EOF) {
@@ -179,7 +227,7 @@ func recoverApplyJournal(root *installationRoot, name string, durability Durabil
 	if !decoded {
 		return fmt.Errorf("apply transaction journal %q contains no complete state", name)
 	}
-	if data.Version != applyJournalVersion || len(data.Entries) == 0 {
+	if len(data.Entries) == 0 {
 		return fmt.Errorf("unsupported apply transaction journal %q", name)
 	}
 	for index := range data.Entries {
@@ -222,6 +270,68 @@ func recoverApplyJournal(root *installationRoot, name string, durability Durabil
 		return syncDirectoryV4(root, ".")
 	}
 	return nil
+}
+
+func replayApplyJournalRecord(data *applyJournalData, decoded *bool, record applyJournalRecord) error {
+	if data == nil || decoded == nil {
+		return fmt.Errorf("apply journal replay state is unavailable")
+	}
+	switch record.Version {
+	case legacyApplyJournalVersion:
+		if record.Kind != "" || record.Entry != 0 || len(record.Entries) == 0 {
+			return fmt.Errorf("invalid legacy apply journal snapshot")
+		}
+		*data = applyJournalData{
+			Version: legacyApplyJournalVersion,
+			State:   record.State,
+			Entries: append([]applyJournalEntry(nil), record.Entries...),
+		}
+		*decoded = true
+		return nil
+	case applyJournalVersion:
+	default:
+		return fmt.Errorf("unsupported apply journal version %d", record.Version)
+	}
+
+	switch record.Kind {
+	case "snapshot":
+		if record.Entry != 0 || len(record.Entries) == 0 {
+			return fmt.Errorf("invalid apply journal snapshot")
+		}
+		*data = applyJournalData{
+			Version: applyJournalVersion,
+			State:   record.State,
+			Entries: append([]applyJournalEntry(nil), record.Entries...),
+		}
+		*decoded = true
+		return nil
+	case "entry":
+		if !*decoded || data.Version != applyJournalVersion || record.Entry == 0 ||
+			len(record.Entries) != 0 || record.State == "" {
+			return fmt.Errorf("invalid apply journal entry transition")
+		}
+		index := int(record.Entry - 1)
+		if index < 0 || index >= len(data.Entries) ||
+			!validApplyJournalTransition(data.Entries[index].State, record.State) {
+			return fmt.Errorf("invalid apply journal entry transition")
+		}
+		data.Entries[index].State = record.State
+		return nil
+	case "commit":
+		if !*decoded || data.Version != applyJournalVersion || record.Entry != 0 ||
+			record.State != "" || len(record.Entries) != 0 {
+			return fmt.Errorf("invalid apply journal commit record")
+		}
+		for index := range data.Entries {
+			if data.Entries[index].State != "replaced" {
+				return fmt.Errorf("apply journal committed before every entry was replaced")
+			}
+		}
+		data.State = "committed"
+		return nil
+	default:
+		return fmt.Errorf("unsupported apply journal record %q", record.Kind)
+	}
 }
 
 func validateJournalEntry(entry applyJournalEntry) error {

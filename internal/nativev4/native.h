@@ -67,6 +67,8 @@ typedef struct {
     uint32_t reserved;
 } vipr_group_result;
 
+#define VIPR_GROUP_RESULT_DIRECT_SAME (1u << 0)
+
 const char *vipr_status_name(vipr_status status);
 const char *vipr_zstd_version(void);
 const char *vipr_blake3_backend(void);

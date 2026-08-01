@@ -43,6 +43,9 @@ struct vipr_io_session {
     vipr_scratch_buffer payload_buffer;
     vipr_scratch_buffer expanded_buffer;
     vipr_scratch_buffer verification_buffer;
+    uint64_t verification_cache_offset;
+    size_t verification_cache_size;
+    int verification_cache_valid;
     vipr_window_workspace *window_workspace;
     int window_result_borrowed;
 };

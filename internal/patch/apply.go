@@ -217,7 +217,7 @@ func prepareApplicationFile(
 	inputSize, outputSize, inputRoot, _, inputChunks, outputChunks, windows :=
 		directionData(entry, direction)
 	plannedWorkers := plannedApplicationWorkers(workerBudget, windows, outputSize)
-	reservation := uint64(plannedWorkers+1) * applySessionReservation
+	reservation := uint64(max(1, plannedWorkers)) * applySessionReservation
 	operationLease, err := resources.Acquire(ctx, reservation)
 	if err != nil {
 		return preparedFile{}, err
@@ -301,10 +301,12 @@ func prepareApplicationFile(
 			)
 			if cacheErr != nil {
 				cacheLease.Release()
-				return preparedFile{}, cacheErr
+				if !nativev4.IsMemoryLimit(cacheErr) {
+					return preparedFile{}, cacheErr
+				}
+			} else {
+				sourceCacheLease = cacheLease
 			}
-
-			sourceCacheLease = cacheLease
 		}
 	}
 
@@ -334,7 +336,11 @@ func prepareApplicationFile(
 	if err != nil {
 		return preparedFile{}, err
 	}
-	defer patchSession.Close()
+	defer func() {
+		if patchSession != nil {
+			_ = patchSession.Close()
+		}
+	}()
 
 	cloned := false
 	if cloneWorthTrying(windows, inputSize, outputSize) {
@@ -381,18 +387,30 @@ func prepareApplicationFile(
 	}
 
 	workCount := applicationWorkCount(cloned, windows, outputSize)
+	var pool *nativev4.SessionPool
+	closePool := func(cause error) error {
+		if pool == nil {
+			return cause
+		}
+		closeErr := pool.Close()
+		pool = nil
+		return errors.Join(cause, closeErr)
+	}
 	if workCount != 0 {
 		poolSize := min(plannedWorkers, workCount)
 
-		pool, poolErr := nativev4.NewSessionPool(
+		pool, err = nativev4.NewSessionPoolWithInitial(
+			patchSession,
 			poolSize,
 			source,
 			opened.file,
 			output,
 			nativeIOProfile(profile),
 		)
-		if poolErr != nil {
-			return preparedFile{}, poolErr
+		// The pool owns the initial session even when construction fails.
+		patchSession = nil
+		if err != nil {
+			return preparedFile{}, err
 		}
 
 		if cloned {
@@ -426,25 +444,35 @@ func prepareApplicationFile(
 				callback,
 			)
 		}
-
-		poolCloseErr := pool.Close()
-		if err == nil {
-			err = poolCloseErr
-		}
 	}
 
 	if err != nil {
-		return preparedFile{}, err
+		return preparedFile{}, closePool(err)
 	}
 
 	if err = output.Chmod(targetPermissions(identity.Mode())); err != nil {
-		return preparedFile{}, err
+		return preparedFile{}, closePool(err)
 	}
 
 	if durability == DurabilityDurable {
-		if err = patchSession.FlushOutput(); err != nil {
-			return preparedFile{}, err
+		if pool == nil {
+			err = patchSession.FlushOutput()
+		} else {
+			flushSession, acquireErr := pool.Acquire(context.Background())
+			if acquireErr != nil {
+				err = acquireErr
+			} else {
+				err = flushSession.FlushOutput()
+				pool.Release(flushSession)
+			}
 		}
+		if err != nil {
+			return preparedFile{}, closePool(err)
+		}
+	}
+
+	if err = closePool(nil); err != nil {
+		return preparedFile{}, err
 	}
 
 	if err = output.Close(); err != nil {

@@ -55,6 +55,10 @@ func IsUnsupported(err error) bool {
 	var native *NativeError
 	return errors.As(err, &native) && native.Status == StatusUnsupported
 }
+func IsMemoryLimit(err error) bool {
+	var native *NativeError
+	return errors.As(err, &native) && native.Status == StatusMemoryLimit
+}
 func IsSourceMismatch(err error) bool {
 	var native *NativeError
 	return errors.As(err, &native) && native.Status == StatusSourceMismatch
@@ -334,9 +338,14 @@ func (w *BorrowedWindow) Release() {
 	w.session = nil
 }
 
+const (
+	GroupResultDirectSame uint32 = 1 << iota
+)
+
 type GroupResult struct {
 	BytesReadPatch, BytesReadSource, BytesWritten uint64
 	WindowsCompleted                              uint32
+	Flags                                         uint32
 }
 
 type SourceVerification struct {
@@ -441,7 +450,13 @@ func verificationPointers(verification *SourceVerification) (*C.uint8_t, C.uint3
 }
 
 func resultFromC(value C.vipr_group_result) GroupResult {
-	return GroupResult{uint64(value.bytes_read_patch), uint64(value.bytes_read_source), uint64(value.bytes_written), uint32(value.windows_completed)}
+	return GroupResult{
+		BytesReadPatch:   uint64(value.bytes_read_patch),
+		BytesReadSource:  uint64(value.bytes_read_source),
+		BytesWritten:     uint64(value.bytes_written),
+		WindowsCompleted: uint32(value.windows_completed),
+		Flags:            uint32(value.reserved),
+	}
 }
 
 func (s *Session) ApplyGroup(ctx context.Context, windows []patchformat.WindowDescriptor, groupOffset uint64, groupSize uint32, sourceSize uint64, verification *SourceVerification, expected patchformat.Digest) (GroupResult, error) {
@@ -542,6 +557,23 @@ type SessionPool struct {
 }
 
 func NewSessionPool(count int, source, patch, output *os.File, profile IOProfile) (*SessionPool, error) {
+	return newSessionPool(nil, count, source, patch, output, profile)
+}
+
+// NewSessionPoolWithInitial transfers ownership of initial to the returned
+// pool. The initial session is closed if pool construction fails.
+func NewSessionPoolWithInitial(initial *Session, count int, source, patch, output *os.File, profile IOProfile) (*SessionPool, error) {
+	if initial == nil || initial.native == nil {
+		return nil, fmt.Errorf("initial native session is unavailable")
+	}
+	if count < 1 {
+		_ = initial.Close()
+		return nil, fmt.Errorf("native session pool size must be positive")
+	}
+	return newSessionPool(initial, count, source, patch, output, profile)
+}
+
+func newSessionPool(initial *Session, count int, source, patch, output *os.File, profile IOProfile) (*SessionPool, error) {
 	if count < 1 {
 		return nil, fmt.Errorf("native session pool size must be positive")
 	}
@@ -550,7 +582,11 @@ func NewSessionPool(count int, source, patch, output *os.File, profile IOProfile
 		all:       make([]*Session, 0, count),
 		closed:    make(chan struct{}),
 	}
-	for range count {
+	if initial != nil {
+		pool.all = append(pool.all, initial)
+		pool.available <- initial
+	}
+	for len(pool.all) < count {
 		session, err := NewSessionWithProfile(source, patch, output, profile)
 		if err != nil {
 			pool.Close()

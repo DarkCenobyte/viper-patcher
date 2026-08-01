@@ -31,6 +31,16 @@ The test suite covers:
 - Native V4 zstd compression and decompression, decoder-window bounds,
   positional I/O, source verification, session-resource limits, 32-bit offset
   handling, and apply-window/group round trips through cgo.
+- Transfer of the setup session into the application pool, including ownership
+  on constructor failure and exact session-budget accounting.
+- Reuse of a just-authenticated source chunk by SAME/COPY materialization, with
+  byte counters proving that the source is not read twice.
+- Direct application of fully SAME canonical groups from the authenticated
+  source buffer, including an explicit native result flag.
+- Preferred verification ordering and partial cache reuse for COPY ranges that
+  cross canonical chunk boundaries.
+- Compact transaction transitions, interrupted-tail replay, and recovery of
+  legacy version-1 journal snapshots.
 - Immediate termination before decompressed output can exceed its declared size.
 - Canonical chunked-replace descriptor boundaries, the two-identity-chunk
   selection threshold, and per-frame BLAKE3 checks.

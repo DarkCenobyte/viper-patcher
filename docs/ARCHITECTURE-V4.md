@@ -34,6 +34,17 @@ directly into their final group destination, and zstd replacements decompress
 directly there. One application-wide cancellation word is shared by all native
 calls instead of allocating a goroutine and C error buffer per group.
 
+The session used to size or clone a temporary output becomes the first member
+of that file's application pool. Referenced verification retains the last
+canonical source chunk in the session verification buffer, allowing SAME and
+local COPY decoding to consume the authenticated bytes without a second
+positional read. A fully SAME canonical output group can be written directly
+from that exact verified buffer when its source and target digests agree,
+avoiding both group-buffer materialization and a second BLAKE3 pass. The cache
+is one chunk, per session, and does not increase the session reservation. For
+multi-chunk windows, verification prefers the chunk containing the first local
+source offset and COPY consumes any cached prefix before reading the remainder.
+
 Windows uses private overlapped handles, one reusable event per session, and
 explicit offsets. Linux and other POSIX targets use `pread`/`pwrite`; macOS and
 Linux expose clone-on-write fast paths through `fcopyfile(..., COPYFILE_CLONE)`
@@ -53,6 +64,11 @@ candidates independently for every window under `balanced`, `apply-speed`, or
 8 MiB output groups second. Source chunk verification is shared atomically so
 a chunk is hashed at most once.
 
+The memory planner counts the sessions that can exist concurrently rather than
+adding a separate control session per file. Optional complete-source caching
+remains an HDD-only optimization and allocation failure falls back to the
+positionally read path.
+
 The CDC Gear hash uses a fixed 256-entry table, and its source index is built in
 one byte pass. The intentionally local source halo remains unchanged: globally
 moved regions are an accepted patch-size tradeoff until benchmark data justifies
@@ -69,3 +85,9 @@ Application writes or clones a same-directory temporary output, validates it,
 then performs rollback-capable renames. `buffered` preserves logical atomicity
 without forcing a storage flush; `durable` additionally flushes prepared files.
 Cancellation propagates through a native atomic word.
+
+The apply journal writes one complete version-2 snapshot followed by compact
+append-only entry and commit records. Recovery replays the last complete
+record, ignores an interrupted final append, and continues to accept legacy
+version-1 full snapshots so an executable upgrade cannot strand an interrupted
+transaction.

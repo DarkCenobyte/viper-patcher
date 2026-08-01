@@ -7,6 +7,28 @@ version before the first retained tag.
 
 ## [Unreleased]
 
+### Changed
+
+- Reused each file's setup native session as the first application-pool
+  session, removing one Windows handle set, event, native allocation, and
+  32 MiB scheduler reservation per active file.
+- Reused the canonical source chunk already read and authenticated by
+  `referenced` verification for immediately following SAME/COPY decoding,
+  avoiding a redundant positional read for local single-chunk references.
+- Wrote fully SAME canonical groups directly from the exact buffer that passed
+  source BLAKE3 verification, avoiding group materialization and a second hash.
+- Verified multi-chunk source ranges in an order that retains the chunk containing
+  the first local COPY, then consumed cached prefixes before issuing positional
+  reads for the remaining bytes.
+- Replaced repeated full transaction-journal snapshots with one snapshot plus
+  compact append-only entry transitions while retaining recovery support for
+  version-1 journals.
+
+### Fixed
+
+- Treat an optional complete-source cache allocation failure as a request to
+  fall back to bounded positional I/O instead of failing patch application.
+
 ## [0.6.2] - 2026-07-31
 
 ### Fixed

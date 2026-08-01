@@ -145,12 +145,12 @@ func fitApplicationWorkers(budget *memoryBudget, fileWorkers, perFileWorkers int
 		return fileWorkers, perFileWorkers
 	}
 	maximumSessions := int(budget.Capacity() / applySessionReservation)
-	if maximumSessions < 2 {
-		maximumSessions = 2
+	if maximumSessions < 1 {
+		maximumSessions = 1
 	}
-	for fileWorkers > 1 && fileWorkers*(perFileWorkers+1) > maximumSessions {
+	for fileWorkers > 1 && fileWorkers*perFileWorkers > maximumSessions {
 		fileWorkers--
 	}
-	perFileWorkers = min(perFileWorkers, max(1, maximumSessions/fileWorkers-1))
+	perFileWorkers = min(perFileWorkers, max(1, maximumSessions/fileWorkers))
 	return fileWorkers, perFileWorkers
 }

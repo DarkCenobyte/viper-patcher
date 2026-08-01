@@ -37,7 +37,10 @@ func TestMemoryBudgetRejectsImpossibleReservation(t *testing.T) {
 func TestFitApplicationWorkersStaysWithinBudget(t *testing.T) {
 	budget := newMemoryBudget(4*applySessionReservation, operationApply)
 	files, perFile := fitApplicationWorkers(budget, 4, 4)
-	if files*(perFile+1) > 4 {
-		t.Fatalf("plan uses %d sessions", files*(perFile+1))
+	if files*perFile > 4 {
+		t.Fatalf("plan uses %d sessions", files*perFile)
+	}
+	if files != 4 || perFile != 1 {
+		t.Fatalf("plan = (%d, %d), want (4, 1)", files, perFile)
 	}
 }

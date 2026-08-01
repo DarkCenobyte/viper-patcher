@@ -16,6 +16,19 @@ two Go workers concurrently. A borrowed creator result remains valid only until
 Handles are borrowed from Go and duplicated on Windows. No native pointer is
 retained by Go after the owning call, and no Go pointer is stored by C.
 
+The source verification buffer may retain the most recently authenticated
+canonical chunk as a per-session read cache. Any operation that overwrites that
+buffer must invalidate the cache metadata first. Cache hits are optimization
+only: BLAKE3 state transitions and output-group verification remain mandatory.
+The direct SAME-group path is permitted only when the session owns the exact
+verified bytes and the canonical source and target digests are identical. COPY
+may consume a verified prefix and continue with positional I/O; byte counters
+must include only bytes actually read from the source handle.
+
+An initial session transferred to `SessionPool` is owned by the pool even when
+construction fails; callers must clear their reference immediately after the
+transfer.
+
 Run normal tests with the race detector and the sanitizer workflow. Fuzz targets
 cover the V4 index and instruction streams; integration tests cover
 forward/reverse application, wrong sources, raw/zstd/zero/run windows,
