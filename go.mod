@@ -7,7 +7,6 @@ toolchain go1.26.5
 require (
 	fyne.io/fyne/v2 v2.8.0
 	github.com/go-gl/glfw/v3.4/glfw v0.1.0-pre.1.0.20260707082822-2a407d02d01a
-	golang.org/x/sys v0.45.0
 	golang.org/x/text v0.40.0
 )
 
@@ -43,5 +42,6 @@ require (
 	github.com/yuin/goldmark v1.8.2 // indirect
 	golang.org/x/image v0.43.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
