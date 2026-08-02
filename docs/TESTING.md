@@ -1,8 +1,8 @@
 # Testing strategy
 
 The repository combines unit tests, native integration tests, CLI end-to-end
-tests, synchronized GUI-model tests, fuzz tests, native sanitizers, and CI
-compilation of both GUI executables.
+tests, synchronized GUI-model tests, fuzz tests, native sanitizers, static
+analysis, cross-architecture tests, and release-artifact validation.
 
 ## Local commands
 
@@ -13,79 +13,76 @@ make check
 The test suite covers:
 
 - GUI/CLI mode selection helpers.
-- CLI signal-context cancellation, parent propagation, idempotent shutdown, and
-  notification cleanup.
-- Atomic creator file-pair parsing, required final positional arguments, help,
-  version, failure, and success paths, including the `--workers` option.
+- Shared command-line signal-context cancellation, parent propagation,
+  idempotent shutdown, and notification cleanup through `internal/commandctx`.
+- Hybrid and GUI-free CLI entry points, atomic creator file-pair parsing,
+  required final positional arguments, help, version, failure, and success
+  paths, including worker, memory, verification, durability, and I/O options.
 - BLAKE3 streaming, chunked, and parallel hashing, accumulator finalization,
   agreement between streaming and positional-read implementations, overflow-safe
   chunk counting, and forced digest-table spill equivalence.
 - Common-root and traversal-resistant `os.Root` handling, including target-root
   and component symbolic-link rejection.
 - Unicode-normalized, case-insensitive path collision detection.
-- Strict VIPR header parsing, malformed metadata, unknown fields, bounded file-entry
-  decoding, signed file-size limits, method-specific invariants, rejection of old
-  format versions, SHA-256 metadata, permission fields, and legacy `targetHint`
-  fields.
+- Strict VIPR header parsing, malformed metadata, unknown fields, bounded
+  file-entry decoding, signed file-size limits, method-specific invariants,
+  rejection of old format versions, SHA-256 metadata, permission fields, and
+  legacy `targetHint` fields.
 - Differential-range validation and unreferenced-data rejection.
 - Native V4 zstd compression and decompression, decoder-window bounds,
   positional I/O, source verification, session-resource limits, 32-bit offset
   handling, and apply-window/group round trips through cgo.
 - Transfer of the setup session into the application pool, including ownership
   on constructor failure and exact session-budget accounting.
-- Reuse of a just-authenticated source chunk by SAME/COPY materialization, with
-  byte counters proving that the source is not read twice.
-- Direct application of fully SAME canonical groups from the authenticated
-  source buffer, including an explicit native result flag.
+- Reuse of authenticated source chunks by SAME/COPY materialization and direct
+  application of fully SAME canonical groups.
 - Preferred verification ordering and partial cache reuse for COPY ranges that
   cross canonical chunk boundaries.
-- Exact-window source verification for SAME/COPY without changing V4 wire
-  descriptors or canonical source states.
-- Round-trip and malformed-input coverage for the optional fine-verification
-  index extension, including feature-flag agreement and 32-bit decode limits.
-- Adaptive fine-band planning for sparse and dense delta source spans across
-  `balanced`, `apply-speed`, and `patch-size` modes.
-- Native fine-band lookup, atomic verification, canonical fallback, mismatch
-  rejection, and reuse of the last authenticated band by delta COPY decoding.
+- Exact-window source verification for SAME/COPY and the optional fine-source
+  digest extension for delta windows.
+- Fine-band planning, native lookup, atomic verification, canonical fallback,
+  mismatch rejection, and reuse of authenticated bytes.
 - Reflink SAME-window verification without rewriting cloned extents.
 - Compact transaction transitions, interrupted-tail replay, and recovery of
   legacy version-1 journal snapshots.
 - Immediate termination before decompressed output can exceed its declared size.
-- Canonical chunked-replace descriptor boundaries, the two-identity-chunk
-  selection threshold, and per-frame BLAKE3 checks.
-- Sparse parser cancellation, malformed streams, bounded producer/consumer
-  application, and multi-chunk round trips.
-- COPY/ADD cut-point skipping equivalence across chunk profiles and deterministic
-  preference for duplicate source chunks that extend the pending COPY.
-- Immutable creator source/target snapshots and stable installed-file and patch
-  identity checks, including optimized parsing without redundant creator-side
-  full-file rehashes.
-- Multi-file forward and reverse workflows.
-- Independent forward/reverse readiness, including identical source and target
-  states, permission-independent matching, missing files, non-regular files,
-  mixed states, and unknown content.
+- Canonical descriptor boundaries, sparse parsing and bounded application,
+  COPY/ADD cut-point behavior, and deterministic source-candidate selection.
+- Immutable creator snapshots and stable installed-file and patch identity
+  checks without redundant full-file hashing.
+- Multi-file forward and reverse workflows and independent readiness states.
 - Replacement preparation, generated-file synchronization, cancellation,
-  best-effort rollback, cleanup, parent-directory synchronization before backup
-  removal, and injected rename, remove, synchronization, and Unix
-  permission-preservation failures.
-- GUI state locking and captured selections during active operations.
-- Serialized byte-level progress callbacks, monotone weighted overall progress,
-  and distinct prepared and committed stages.
-- Creator disk estimates, selected work directories, centralized automatic worker
-  targets, `--workers 0`, atomic multi-unit COPY/ADD index-memory budgeting, and
-  indexed constant-time transaction duplicate detection.
-- Fuzzing of VIPR decoding, patch opening, and secure path joining.
+  best-effort rollback, cleanup, parent-directory synchronization, and injected
+  platform failure paths.
+- GUI state locking, captured selections, serialized progress callbacks, and
+  monotone weighted overall progress.
+- Creator disk estimates, work directories, worker targets, operation-wide
+  memory budgeting, scheduler behavior, source-cache policy, and transaction
+  duplicate detection.
+- Fuzzing of VIPR decoding, patch opening, native instruction handling, and
+  secure path joining.
 
-CI runs the complete test suite with the Go race detector. It also rebuilds the
-native packages with AddressSanitizer and UndefinedBehaviorSanitizer, runs
-`go vet` and Staticcheck, and executes `govulncheck` to identify known
-vulnerabilities that are reachable from the current Go call graph.
+## Continuous integration
 
-CI enforces at least 80% statement coverage across the non-GUI core packages.
-The same core set also runs natively on Windows amd64 and Windows 386, plus Linux
-386 through the supported multilib toolchain. GUI packages are compiled by CI on
-Linux, and all release targets compile the complete GUI and CLI executables on
-their native runner or supported multilib toolchain.
+CI runs the complete suite with the Go race detector. A dedicated job rebuilds
+the native packages with Clang AddressSanitizer and UndefinedBehaviorSanitizer
+and enables leak detection. CI also runs `go vet`, Staticcheck, and
+`govulncheck`.
+
+At least 80% statement coverage is required across the non-GUI core packages.
+The measured set explicitly includes `internal/commandctx`,
+`internal/nativev4`, and `internal/workerbudget` in addition to the application,
+CLI, hashing, patch, format, path, progress, and version packages.
+
+The supported core set runs on Linux 386 and Windows amd64/386. Linux amd64
+compiles all four executables. CI verifies that both CLI-only dependency graphs
+exclude GUI packages.
+
+After all correctness jobs succeed on a `master` push, native platform jobs
+build both the hybrid and CLI-only release archives. A CI run is not successful
+unless every expected archive was built and uploaded. The tag workflow later
+promotes only artifacts from a successful push run for the exact commit; it does
+not rebuild binaries.
 
 A literal 100% line-coverage target is intentionally not used because it would
 encourage platform-specific error branches and GUI toolkit internals to be

@@ -10,43 +10,49 @@
 [![GitHub stars](https://img.shields.io/github/stars/DarkCenobyte/viper-patcher)](https://github.com/DarkCenobyte/viper-patcher/stargazers)
 [![Open issues](https://img.shields.io/github/issues/DarkCenobyte/viper-patcher)](https://github.com/DarkCenobyte/viper-patcher/issues)
 
-Viper Patcher is a cross-platform differential patch creator and applicator for
-binary files. It provides two executables:
+Viper-Patcher is a cross-platform differential patch creator and applicator for
+binary files and ordered groups of files. It provides four executables:
 
-- `creator`: builds versioned `.vipr` patches from ordered source/target pairs.
-- `patcher`: validates an installation and applies a forward or reverse patch.
+- `creator`: hybrid GUI/CLI patch creator;
+- `patcher`: hybrid GUI/CLI patch applicator;
+- `creator-cli`: GUI-free patch creator;
+- `patcher-cli`: GUI-free patch applicator.
 
-Both executables start a desktop GUI when launched without arguments and a
-graphical environment is available. Any command-line argument selects CLI mode.
-`--headless` explicitly forces CLI mode. When no graphical environment is
-available, the application prints a warning and falls back to CLI mode.
+The hybrid applications start a desktop GUI when launched without arguments and
+a graphical environment is available. Any command-line argument selects CLI
+mode, and `--headless` explicitly forces it. When no graphical environment is
+available, they print a warning and fall back to CLI mode.
+
+The dedicated `*-cli` binaries always use CLI mode and intentionally exclude
+Fyne, GLFW, embedded GUI assets, native-dialog code, and the hybrid launcher.
+They use the same creator/applicator engines, verification rules, transaction
+handling, options, progress reporting, and Ctrl+C/SIGTERM cancellation.
 
 ## Key properties
 
-- Exact libzstd **1.5.7** dependency, statically linked in release builds.
+- Exact libzstd **1.5.7** and native BLAKE3 sources, statically linked in release builds.
 - VIPR format version 4 with a binary trailing index and independent adaptive windows.
 - Per-window SAME, COPY, compact delta, raw/zstd replacement, ZERO, and RUN strategies.
-- Content-defined chunking keeps COPY/ADD patches effective across insertions and deletions.
-- Ordered multi-file patches with explicit source/target file pairs.
-- A single native C BLAKE3 implementation for source, target, index, and patch identities.
+- Content-defined chunking that remains effective across insertions and deletions.
+- Ordered multi-file patches with explicit source/target associations.
+- BLAKE3-256 source, target, window, group, index, and patch integrity.
 - Optional reverse differential for every file.
-- Strict, bounds-checked `.vipr` format 4 container; every earlier version is rejected.
-- Immutable creator snapshots and handle-based fast application.
-- Adaptive worker allocation across files and 8 MiB output groups, with native positional
-  I/O and clone-on-write fast paths where the operating system supports them.
-- Traversal-resistant installation access with `os.Root`.
-- Rollback-capable file replacement for handled errors, with generated-file
-  syncs and one parent-directory sync before backup cleanup on Unix-like systems.
+- Strict, bounds-checked format-4 container; every earlier format is rejected.
+- Architecture-aware index and memory limits, including supported 32-bit targets.
+- Immutable creator snapshots and handle-based application.
+- Adaptive worker allocation across files and canonical 8 MiB output groups.
+- Native positional I/O and clone-on-write fast paths where supported.
+- Traversal-resistant installation access through `os.Root`.
+- Rollback-capable handled-error replacement and interrupted-operation journals.
 - No claim of crash-consistent multi-file transactions after power loss or kernel failure.
 - File-level, byte-level, and monotonic overall progress reporting.
-- Fyne GUI plus deterministic CLI behavior.
 - MIT-licensed Go code.
 
 ## Important path behavior
 
-The source side of each file pair defines its path inside the patch. Viper
-Patcher computes the nearest common parent directory of all source files and
-stores every source path relative to that directory.
+The source side of each pair defines its path inside the patch. Viper-Patcher
+computes the nearest common parent directory of all source files and stores each
+source path relative to that directory.
 
 For example:
 
@@ -55,7 +61,7 @@ old/bin/game.exe
 old/data/assets.bin
 ```
 
-produces these patch paths:
+produces:
 
 ```text
 bin/game.exe
@@ -69,42 +75,39 @@ creation. Their locations are not used when applying the patch.
 
 The creator interface provides:
 
-- An **Add file pair** action that first selects one source file and then its
-  associated target file.
-- A two-column table in which every row permanently represents one
-  source/target pair. Each column displays paths relative to its nearest common
-  parent directory.
-- A dedicated comment section.
-- A collapsed **Settings** section containing compression levels 1 through 22,
-  optional reverse-patch generation, creator-only work-directory selection, and
-  a worker target. It defaults to **Auto**, follows the current process CPU limit
-  through `GOMAXPROCS`, and cannot exceed the logical CPU count; overlapping
-  verification and decoding may use helper goroutines.
-- An output directory and `.vipr` filename.
-- A conservative peak temporary-disk estimate shown before creation starts.
-- Progress by file and by processed bytes.
+- an **Add file pair** action that selects one source and its associated target;
+- a permanent two-column source/target table;
+- a dedicated comment section;
+- compression levels 1 through 22;
+- optional reverse-patch generation;
+- creator-only work-directory selection;
+- automatic or explicit worker targets;
+- an output directory and `.vipr` filename;
+- a conservative peak temporary-disk estimate;
+- file and byte progress.
 
-The selected output file is opened only by the patch creation core. Cancelling
-or failing validation therefore does not truncate an existing patch.
+The selected output file is opened only after validation by the patch creation
+core, so cancellation or validation failure does not truncate an existing patch.
 
-Both GUIs display the embedded `assets/logo.png`. The patcher additionally uses
-an external `assets/logo.png` when that exact regular PNG file is placed in an
-`assets` directory beside the patcher executable; invalid files fall back to
-the embedded logo.
-File and directory buttons use native Windows and macOS dialogs. Linux uses the
-system `zenity` command when available and otherwise falls back to Fyne's file
-dialog.
+Both GUIs display the embedded `assets/logo.png`. The patcher may additionally
+use an adjacent regular `assets/logo.png`; invalid files fall back to the
+embedded logo. Windows and macOS use native dialogs. Linux uses `zenity` when
+available and otherwise falls back to Fyne's dialog.
 
 ## Creator CLI
 
+Both `creator --headless` and `creator-cli` accept the same syntax.
+
 ```text
-creator --headless \
+creator-cli \
   --file-pair old/bin/game.exe::new/bin/game.exe \
   --file-pair old/data/assets.bin::new/data/assets.bin \
   --compression-level 12 \
   --comment "Version 1.1 update" \
   --create-reverse \
   --workers 2 \
+  --memory-limit auto \
+  --io-profile auto \
   --window-size auto \
   --optimize balanced \
   --work-directory /path/to/temporary-storage \
@@ -114,66 +117,60 @@ creator --headless \
 Supported parameters:
 
 ```text
---file-pair <source>::<target> Required. Repeat once per associated file pair.
+--file-pair <source>::<target> Repeat once per associated file pair.
+--file-pairs-file <pairs.json> Alternative JSON array of {source,target} objects.
+                              Use exactly one input form.
 [--compression-level <level>]  Default: 3.
 [--comment <text>]             Default: Created with Viper-Patcher.
 [--create-reverse]             Default: false.
 [--work-directory <directory>] Optional creator temporary-data parent.
 [--workers <count>]            0 (automatic) or 1..logical CPU count. Default: 0.
+[--memory-limit <size>]        auto or at least 128M. Default: auto.
+[--io-profile <profile>]       auto|hdd|ssd|nvme. Default: auto.
 [--window-size <size>]         auto|256K|512K|1M|2M|4M|8M. Default: auto.
 [--optimize <profile>]         balanced|apply-speed|patch-size. Default: balanced.
-[--headless]                   Force CLI mode.
+[--headless]                   Accepted by the hybrid creator; harmless in creator-cli.
 [--version]                    Show version information.
 [--help]                       Show help.
-<output.vipr>                  Required. Patch file output.
+<output.vipr>                  Required final positional argument.
 ```
 
-The `::` delimiter belongs to the option syntax. Source and target paths are
-parsed together, so their association cannot become misaligned. `--workers 0`
-selects the current process-aware `GOMAXPROCS` value, capped by the logical CPU
-count; explicit values from 1 through that logical CPU count are accepted. The
-CLI accepts libzstd's complete compression-level range, including negative fast
-levels and ultra levels. The GUI deliberately presents the conventional 1–22
-range.
+The `::` delimiter is part of the option syntax, so a source and target cannot
+become misaligned. The CLI accepts libzstd's full compression-level range,
+including negative fast levels and ultra levels. The GUI deliberately presents
+the conventional 1–22 range.
 
 ## Patcher GUI
 
-The patcher starts with instructions to select a `.vipr` patch. If exactly one
-regular `.vipr` file is present beside the patcher executable, it is selected
-automatically. After selection, the patch comment is displayed read-only.
-Selecting a target directory triggers a complete preflight:
+The patcher starts by selecting a `.vipr` patch. If exactly one regular `.vipr`
+file is present beside the executable, it is selected automatically. Selecting
+a target directory triggers a complete preflight:
 
-- Every required path must resolve to a regular file without traversing a
-  symbolic link.
-- File hash and size must match the source state to enable **Patch**.
-- When reverse data exists, the same content checks must match the target state
-  to enable **Reverse**.
-- A file that validly matches both states enables both directions.
-- Mixed, unknown, non-regular, or missing states disable the affected directions
-  and report the first problem.
-- Patch metadata is content-only and stores no Unix permission fields. Application
-  preserves the installed file mode on Unix and ignores Unix permission semantics
-  on Windows, so the same patch remains usable across supported operating systems.
+- every required path must resolve to a regular file without symbolic-link traversal;
+- hashes and sizes must match the source state to enable **Patch**;
+- reverse data and target-state matches enable **Reverse**;
+- identical source/target states may enable both directions;
+- mixed, unknown, missing, or non-regular states disable affected directions;
+- ordinary installed Unix modes are preserved, while Windows ignores Unix mode semantics.
 
-Patch and directory selections are locked while an operation is running. The
-operation uses captured selections and rejects a patch whose BLAKE3 fingerprint
-changed after the displayed GUI preflight. The application core then prepares
-files through the same handle-based fast path used by the CLI. Preflight hashing
-uses a bounded parallel worker plan, and a successful operation updates the known
-forward/reverse readiness without an immediate redundant full output rescan.
+Selections are locked during an operation. The core rejects a patch whose
+BLAKE3 fingerprint changed after GUI preflight and then uses the same
+handle-based application path as the CLI.
 
 ## Patcher CLI
+
+Both `patcher --headless` and `patcher-cli` accept the same syntax.
 
 Forward application:
 
 ```text
-patcher --headless --patch-file update.vipr /path/to/application
+patcher-cli --patch-file update.vipr /path/to/application
 ```
 
 Reverse application:
 
 ```text
-patcher --headless --patch-file update.vipr --reverse /path/to/application
+patcher-cli --patch-file update.vipr --reverse /path/to/application
 ```
 
 Supported parameters:
@@ -183,39 +180,38 @@ Supported parameters:
 <target-directory>            Required positional argument.
 [--reverse]                   Default: false.
 [--workers <count>]           0 (automatic) or 1..logical CPU count. Default: 0.
+[--memory-limit <size>]       auto or at least 128M. Default: auto.
 [--verify <mode>]             referenced|strict|output. Default: referenced.
 [--durability <mode>]         buffered|durable. Default: buffered.
 [--io-profile <profile>]      auto|hdd|ssd|nvme. Default: auto.
-[--headless]                  Force CLI mode.
+[--headless]                  Accepted by the hybrid patcher; harmless in patcher-cli.
 [--version]                   Show version information.
 [--help]                      Show help.
 ```
 
-`--workers 0` uses the same process-aware automatic policy as the creator.
-Explicit values from 1 through the logical CPU count are accepted. The value is
-a scheduling target rather than a strict process-wide goroutine limit.
-
-The CLI parses the patch without a redundant whole-file fingerprint pass and does
-not run a separate full-file inspection before application.
+`--workers 0` uses the process-aware automatic policy. An explicit worker value
+is a scheduling target, not a strict process-wide goroutine limit. The CLI
+parses the patch without a redundant whole-file fingerprint pass and does not
+run a second complete inspection before application.
 
 ## Format 4 implementation
 
-Viper Patcher does not invoke an external `zstd` executable. VIPR V4 stores
-contiguous payloads followed by a binary trailing index and a fixed footer, so
-application can seek directly to metadata without scanning payloads.
+Viper-Patcher does not invoke an external `zstd` executable. VIPR V4 stores
+contiguous payloads followed by a binary trailing index and fixed footer, so
+application seeks directly to authenticated metadata without scanning payloads.
 
-Each file uses one bounded window size, while every window independently selects
-SAME, COPY, compact delta, raw/zstd replacement, ZERO, or RUN. Go owns policy,
-path safety, scheduling, temporary files, and rollback-capable commit. Coarse
-cgo calls delegate BLAKE3, zstd, positional I/O, instruction decoding, output
-writes, and window/group verification to the native C data plane.
+Each file uses one bounded window size, while every window independently
+selects SAME, COPY, compact delta, raw/zstd replacement, ZERO, or RUN. Go owns
+policy, path safety, scheduling, temporary files, and rollback-capable commit.
+Coarse cgo calls delegate BLAKE3, zstd, positional I/O, instruction decoding,
+output writes, and window/group verification to the native C data plane.
 
-Application distributes work across independent files and canonical 8 MiB output
-groups. When an equal-size output contains at least 90% SAME windows, Viper
-attempts a copy-on-write clone and reconstructs only changed windows; unsupported
-filesystems transparently fall back to normal reconstruction. `referenced`,
-`strict`, and `output` verification profiles control source validation without
-weakening index, window, group, or output integrity checks.
+Application distributes work across files and canonical 8 MiB output groups.
+When an equal-size output contains at least 90% SAME windows, Viper-Patcher
+attempts a copy-on-write clone and reconstructs only changed windows. Unsupported
+filesystems transparently fall back to reconstruction. `referenced`, `strict`,
+and `output` verification profiles control source validation without weakening
+index, window, group, or output integrity checks.
 
 Only format 4 patches are accepted. Earlier `.vipr` files remain usable through
 their tagged historical releases. See [VIPR format V4](docs/FORMAT-V4.md),
@@ -224,9 +220,7 @@ their tagged historical releases. See [VIPR format V4](docs/FORMAT-V4.md),
 
 ## Building
 
-Go does not publish a separate LTS channel. This repository pins Go 1.26.5,
-the latest supported stable patch release selected for this project, and
-statically builds the verified zstd 1.5.7 source.
+The repository pins Go 1.26.5 and verified native dependencies.
 
 Linux/macOS:
 
@@ -248,11 +242,9 @@ $env:GOARCH = "amd64"
 $env:CC = "C:\msys64\mingw64\bin\gcc.exe"
 go build -tags vipr_static_zstd,migrated_fynedo -o dist/creator.exe ./cmd/creator
 go build -tags vipr_static_zstd,migrated_fynedo -o dist/patcher.exe ./cmd/patcher
+go build -tags vipr_static_zstd -o dist/creator-cli.exe ./cmd/creator-cli
+go build -tags vipr_static_zstd -o dist/patcher-cli.exe ./cmd/patcher-cli
 ```
-
-The PowerShell build script detects a standard `C:\msys64` installation. For
-another location, pass `-MSYS2Root "D:\path\to\msys64"` or set the
-`MSYS2_ROOT` environment variable.
 
 See [Building](docs/BUILDING.md) for dependencies, x86 instructions, and
 creator temporary-data options.
@@ -264,60 +256,55 @@ make check
 ```
 
 The repository includes unit, integration, race, fuzz, native sanitizer,
-Staticcheck, and vulnerability-reachability checks for path normalization,
-container parsing, format 4 validation, rejection of earlier formats, malformed
-binary indexes, window descriptors, and native instruction streams, CLI validation,
-zstd streaming, parallel positional reads, transaction rollback, GUI state models,
-patch creation, forward application, reverse application, preflight states, output
-replacement, and BLAKE3 integrity. CI enforces at least 80% statement coverage
-across the non-GUI core and compiles the complete GUI executables. See
-[Testing strategy](docs/TESTING.md).
+Staticcheck, vulnerability-reachability, path-safety, transaction, GUI-model,
+and cross-architecture tests. CI enforces at least 80% statement coverage across
+the non-GUI core, explicitly including command contexts, the native V4 wrapper,
+and worker budgeting. See [Testing strategy](docs/TESTING.md).
 
 ## GitHub Actions
 
-- `ci.yml` checks formatting, runs race and sanitizer tests, vets the code,
-  executes Staticcheck and `govulncheck`, enforces coverage, and compiles on every
-  push and pull request.
-- `release.yml` validates one release version, builds unsigned cross-platform
-  archives, and grants write access only to the publication job.
+- `ci.yml` runs the correctness gate on pull requests and `master`, then builds
+  all GUI and CLI-only release archives once after a green `master` commit.
+- `release.yml` runs only for a `v*` tag, requires a successful CI push run for
+  the exact tagged SHA, downloads those artifacts, and publishes one release.
+- Tag publication never rebuilds binaries.
 - External actions are referenced by immutable commit identifiers.
 
-See [GitHub Actions CI/CD](docs/CI-CD.md) for initial repository configuration,
-release tags, and future code-signing insertion points.
+See [GitHub Actions CI/CD](docs/CI-CD.md) and
+[Supply-chain controls](docs/SUPPLY-CHAIN.md).
 
 ## Platform targets
-- [Supply-chain and release provenance](docs/SUPPLY-CHAIN.md)
 
-| Operating system | Architecture | Release workflow |
+Every target receives a hybrid GUI archive and a separate CLI-only archive
+containing both `creator-cli` and `patcher-cli`.
+
+| Operating system | Architecture | Release archives |
 |---|---|---|
-| Windows | x86-64 | Yes |
-| Windows | x86 | Yes |
-| Linux | x86-64 | Yes |
-| Linux | x86 | Yes |
-| Linux | arm64 | Yes |
-| macOS | arm64 | Yes |
-
-A 32-bit process has a much smaller virtual address space. V4 keeps work bounded
-through independently encoded windows, canonical 8 MiB application groups,
-positional I/O, and native memory limits; it never maps an entire source or patch.
+| Windows | x86-64 | GUI + CLI-only |
+| Windows | x86 | GUI + CLI-only |
+| Linux | x86-64 | GUI + CLI-only |
+| Linux | x86 | GUI + CLI-only |
+| Linux | arm64 | GUI + CLI-only |
+| macOS | arm64 | GUI + CLI-only |
 
 ## Documentation
 
 - [V4 architecture](docs/ARCHITECTURE-V4.md)
 - [VIPR format V4](docs/FORMAT-V4.md)
 - [Native V4 implementation](docs/NATIVE-V4.md)
+- [Operational guarantees](docs/OPERATIONS.md)
 - [Building](docs/BUILDING.md)
 - [Testing strategy](docs/TESTING.md)
 - [GitHub Actions CI/CD](docs/CI-CD.md)
+- [Supply-chain controls](docs/SUPPLY-CHAIN.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
 ## Licenses
 
-Viper Patcher is licensed under the [MIT License](LICENSE).
+Viper-Patcher is licensed under the [MIT License](LICENSE).
 
-libzstd 1.5.7 is an upstream third-party dependency available under the BSD
-3-Clause license or GPLv2. This project uses the BSD licensing option. Fyne and
-all transitive Go modules retain their own licenses. Release archives include
-zstd's upstream license files plus automatically collected top-level license
-and notice files for every resolved Go module.
+libzstd 1.5.7 is available upstream under the BSD 3-Clause license or GPLv2;
+this project uses the BSD option. BLAKE3, Fyne, and all transitive Go modules
+retain their own licenses. Release archives include zstd and BLAKE3 notices plus
+collected top-level license and notice files for every resolved Go module.

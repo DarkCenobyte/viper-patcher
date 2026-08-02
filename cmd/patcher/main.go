@@ -7,6 +7,7 @@ import (
 
 	"github.com/DarkCenobyte/viper-patcher/internal/appmode"
 	"github.com/DarkCenobyte/viper-patcher/internal/cli/patchercli"
+	"github.com/DarkCenobyte/viper-patcher/internal/commandctx"
 	"github.com/DarkCenobyte/viper-patcher/internal/gui/patchergui"
 )
 
@@ -24,7 +25,7 @@ func runCLI(arguments []string, guiAvailable bool) int {
 	if !guiAvailable && !appmode.HeadlessRequested(arguments) {
 		fmt.Fprintln(os.Stderr, "Warning: no graphical environment detected; falling back to command-line mode.")
 	}
-	ctx, stop := appmode.CommandContext(context.Background())
+	ctx, stop := commandctx.New(context.Background())
 	defer stop()
 	return patchercli.Run(ctx, arguments, os.Stdout, os.Stderr)
 }

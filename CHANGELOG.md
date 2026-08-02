@@ -7,8 +7,21 @@ version before the first retained tag.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-02
+
+### Added
+
+- Added the GUI-free `creator-cli` executable alongside `patcher-cli`; CLI-only
+  release archives now contain both tools for every supported platform.
+- Added build-once release promotion: a tag publishes only the archives produced
+  by a successful `master` CI run for the exact tagged commit.
+
 ### Changed
 
+- Unified GUI and CLI-only archives under one CI build pipeline and one release
+  publication job, removing the independent CLI release race and tag rebuilds.
+- Synchronized repository, Fyne, workflow, changelog, and issue-template version
+  metadata for the 1.0.0 release.
 - Reused each file's setup native session as the first application-pool
   session, removing one Windows handle set, event, native allocation, and
   32 MiB scheduler reservation per active file.
@@ -23,14 +36,14 @@ version before the first retained tag.
 - Replaced repeated full transaction-journal snapshots with one snapshot plus
   compact append-only entry transitions while retaining recovery support for
   version-1 journals.
-- Authenticate SAME and COPY source ranges at their exact window granularity
+- Authenticated SAME and COPY source ranges at their exact window granularity
   before use, using the existing full BLAKE3-256 window digest.
 - Added an optional, index-authenticated fine-source-digest extension for delta
   windows. The creator adaptively selects 64 KiB, 256 KiB, or 1 MiB bands only
   when their predicted read reduction exceeds the encoded table cost.
 - Fine source tables use full BLAKE3-256 digests and preserve the canonical
   8 MiB digest tables and `blake3-tree-v1` roots unchanged.
-- Apply delta windows as `read -> verify -> consume`; incomplete or absent fine
+- Applied delta windows as `read -> verify -> consume`; incomplete or absent fine
   tables fall back to canonical 8 MiB verification, while digest mismatches
   remain hard failures.
 - Reflink application now verifies unchanged SAME windows on demand instead of
@@ -38,7 +51,7 @@ version before the first retained tag.
 
 ### Fixed
 
-- Treat an optional complete-source cache allocation failure as a request to
+- Treated an optional complete-source cache allocation failure as a request to
   fall back to bounded positional I/O instead of failing patch application.
 
 ## [0.6.2] - 2026-07-31
@@ -372,7 +385,12 @@ version before the first retained tag.
 - Fyne desktop interfaces and progress reporting.
 - Cross-platform release workflows for Windows, Linux, and macOS targets.
 
-[Unreleased]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/DarkCenobyte/viper-patcher/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.6.2...v1.0.0
+[0.6.2]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/DarkCenobyte/viper-patcher/compare/v0.3.3...v0.4.0

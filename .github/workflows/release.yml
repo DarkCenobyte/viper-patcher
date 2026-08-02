@@ -4,484 +4,143 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Release version without the leading v
-        required: true
-        default: "0.5.0"
 
 permissions:
   contents: read
 
 jobs:
-  version:
-    name: Resolve release version
+  publish:
+    name: Publish validated CI artifacts
     runs-on: ubuntu-24.04
-    outputs:
-      version: ${{ steps.release-version.outputs.version }}
-      tag: ${{ steps.release-version.outputs.tag }}
+    timeout-minutes: 75
+    permissions:
+      actions: read
+      contents: write
     steps:
-      - name: Validate release version
-        id: release-version
-        env:
-          MANUAL_VERSION: ${{ inputs.version }}
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            version="$MANUAL_VERSION"
-          fi
-          if ! [[ "$version" =~ ^[0-9]+(\.[0-9]+){2}([.-][0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
-            echo "Invalid release version: $version" >&2
-            exit 1
-          fi
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-          printf 'tag=v%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Check out tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
-  linux:
-    name: Linux ${{ matrix.arch }}
-    needs: version
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.26.5"
-          cache: true
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes build-essential curl pkg-config libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
-      - run: go mod download
-      - name: Build libzstd
-        run: |
-          ./scripts/fetch-zstd.sh
-          JOBS="$(nproc)" ./scripts/build-zstd.sh
-      - name: Build and package
-        env:
-          CGO_ENABLED: "1"
-          GOOS: linux
-          GOARCH: ${{ matrix.arch }}
-          RELEASE_VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          version="$RELEASE_VERSION"
-          module="$(go list -m)"
-          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          ldflags="-s -w -X ${module}/internal/buildinfo.Version=${version} -X ${module}/internal/buildinfo.Commit=${GITHUB_SHA} -X ${module}/internal/buildinfo.BuildDate=${build_date}"
-          package="viper-patcher_${version}_linux_${GOARCH}"
-          mkdir -p "dist/${package}"
-          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "dist/${package}/creator" ./cmd/creator
-          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "dist/${package}/patcher" ./cmd/patcher
-          for binary in "dist/${package}/creator" "dist/${package}/patcher"; do
-            if readelf -d "$binary" 2>/dev/null | grep -Eiq 'NEEDED.*zstd'; then
-              echo "Dynamic zstd dependency detected in ${binary}; libzstd must remain statically linked." >&2
-              readelf -d "$binary" >&2
-              exit 1
-            fi
-          done
-          cp README.md LICENSE "dist/${package}/"
-          license_dir="dist/${package}/third-party-licenses"
-          mkdir -p "$license_dir"
-          cp third_party/zstd/LICENSE "$license_dir/zstd-BSD-3-Clause.txt"
-          cp third_party/zstd-NOTICE.txt "$license_dir/zstd-NOTICE.txt"
-          cp third-party-licenses/BLAKE3-APACHE-2.0.txt "$license_dir/BLAKE3-APACHE-2.0.txt"
-          cp third-party-licenses/BLAKE3-NOTICE.txt "$license_dir/BLAKE3-NOTICE.txt"
-          ./scripts/collect-go-licenses.sh "$license_dir/go-modules"
-          tar -C dist -czf "dist/${package}.tar.gz" "$package"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: viper-patcher-linux-${{ matrix.arch }}
-          path: dist/*.tar.gz
-          if-no-files-found: error
-
-  linux-x86:
-    name: Linux x86
-    needs: version
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.26.5"
-          cache: true
-      - name: Install 32-bit dependencies
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install --yes curl gcc-multilib libc6-dev-i386 \
-            libgl-dev:i386 libegl-dev:i386 libx11-dev:i386 libxcursor-dev:i386 \
-            libxrandr-dev:i386 libxinerama-dev:i386 libxi-dev:i386 \
-            libxxf86vm-dev:i386 libwayland-dev:i386 libxkbcommon-dev:i386
-          printf '#!/bin/sh\nexec gcc -m32 "$@"\n' > "$RUNNER_TEMP/gcc-386"
-          chmod +x "$RUNNER_TEMP/gcc-386"
-          PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig \
-            pkg-config --print-errors --exists \
-              gl egl x11 xcursor xrandr xinerama xi xxf86vm wayland-client xkbcommon
-      - run: go mod download
-      - name: Build 32-bit libzstd
-        env:
-          CC: ${{ runner.temp }}/gcc-386
-        run: |
-          ./scripts/fetch-zstd.sh
-          JOBS="$(nproc)" ./scripts/build-zstd.sh
-      - name: Build and package
-        env:
-          CGO_ENABLED: "1"
-          GOOS: linux
-          GOARCH: "386"
-          CC: ${{ runner.temp }}/gcc-386
-          PKG_CONFIG_LIBDIR: /usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig
-          RELEASE_VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          version="$RELEASE_VERSION"
-          module="$(go list -m)"
-          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          ldflags="-s -w -X ${module}/internal/buildinfo.Version=${version} -X ${module}/internal/buildinfo.Commit=${GITHUB_SHA} -X ${module}/internal/buildinfo.BuildDate=${build_date}"
-          package="viper-patcher_${version}_linux_386"
-          mkdir -p "dist/${package}"
-          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "dist/${package}/creator" ./cmd/creator
-          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "dist/${package}/patcher" ./cmd/patcher
-          for binary in "dist/${package}/creator" "dist/${package}/patcher"; do
-            if readelf -d "$binary" 2>/dev/null | grep -Eiq 'NEEDED.*zstd'; then
-              echo "Dynamic zstd dependency detected in ${binary}; libzstd must remain statically linked." >&2
-              readelf -d "$binary" >&2
-              exit 1
-            fi
-          done
-          cp README.md LICENSE "dist/${package}/"
-          license_dir="dist/${package}/third-party-licenses"
-          mkdir -p "$license_dir"
-          cp third_party/zstd/LICENSE "$license_dir/zstd-BSD-3-Clause.txt"
-          cp third_party/zstd-NOTICE.txt "$license_dir/zstd-NOTICE.txt"
-          cp third-party-licenses/BLAKE3-APACHE-2.0.txt "$license_dir/BLAKE3-APACHE-2.0.txt"
-          cp third-party-licenses/BLAKE3-NOTICE.txt "$license_dir/BLAKE3-NOTICE.txt"
-          ./scripts/collect-go-licenses.sh "$license_dir/go-modules"
-          tar -C dist -czf "dist/${package}.tar.gz" "$package"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: viper-patcher-linux-386
-          path: dist/*.tar.gz
-          if-no-files-found: error
-
-  macos:
-    name: macOS arm64
-    needs: version
-    runs-on: macos-15
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.26.5"
-          cache: true
-      - name: Install Fyne packaging tool
-        run: go install fyne.io/tools/cmd/fyne@v1.7.2
-      - run: go mod download
-      - name: Build libzstd
-        run: |
-          ./scripts/fetch-zstd.sh
-          JOBS="$(sysctl -n hw.ncpu)" ./scripts/build-zstd.sh
-      - name: Build and package
-        env:
-          CGO_ENABLED: "1"
-          GOOS: darwin
-          GOARCH: arm64
-          RELEASE_VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          version="$RELEASE_VERSION"
-          module="$(go list -m)"
-          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          ldflags="-s -w -X ${module}/internal/buildinfo.Version=${version} -X ${module}/internal/buildinfo.Commit=${GITHUB_SHA} -X ${module}/internal/buildinfo.BuildDate=${build_date}"
-          package="viper-patcher_${version}_darwin_arm64"
-          package_dir="$PWD/dist/${package}"
-          build_dir="$RUNNER_TEMP/viper-patcher-macos"
-          rm -rf "$build_dir"
-          mkdir -p "$build_dir" "$package_dir"
-          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "$build_dir/creator" ./cmd/creator
-          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags "$ldflags" -o "$build_dir/patcher" ./cmd/patcher
-          for binary in "$build_dir/creator" "$build_dir/patcher"; do
-            if otool -L "$binary" | tail -n +2 | grep -Eiq 'zstd.*\.dylib'; then
-              echo "Dynamic zstd dependency detected in ${binary}; libzstd must remain statically linked." >&2
-              otool -L "$binary" >&2
-              exit 1
-            fi
-          done
-          root="$PWD"
-          fyne_tool="$(go env GOPATH)/bin/fyne"
-          icon="$root/assets/icon.png"
-          "$fyne_tool" package \
-            --os darwin \
-            --source-dir "$root/cmd/creator" \
-            --executable "$build_dir/creator" \
-            --name "Viper-Patcher Creator" \
-            --app-id "io.github.darkcenobyte.viperpatcher.creator" \
-            --app-version "$version" \
-            --app-build "$GITHUB_RUN_NUMBER" \
-            --icon "$icon" \
-            --release
-          mv "Viper-Patcher Creator.app" "$package_dir/"
-          "$fyne_tool" package \
-            --os darwin \
-            --source-dir "$root/cmd/patcher" \
-            --executable "$build_dir/patcher" \
-            --name "Viper-Patcher" \
-            --app-id "io.github.darkcenobyte.viperpatcher.patcher" \
-            --app-version "$version" \
-            --app-build "$GITHUB_RUN_NUMBER" \
-            --icon "$icon" \
-            --release
-          mv "Viper-Patcher.app" "$package_dir/"
-          rm -rf "$build_dir"
-          cp README.md LICENSE "$package_dir/"
-          license_dir="$package_dir/third-party-licenses"
-          mkdir -p "$license_dir"
-          cp third_party/zstd/LICENSE "$license_dir/zstd-BSD-3-Clause.txt"
-          cp third_party/zstd-NOTICE.txt "$license_dir/zstd-NOTICE.txt"
-          cp third-party-licenses/BLAKE3-APACHE-2.0.txt "$license_dir/BLAKE3-APACHE-2.0.txt"
-          cp third-party-licenses/BLAKE3-NOTICE.txt "$license_dir/BLAKE3-NOTICE.txt"
-          ./scripts/collect-go-licenses.sh "$license_dir/go-modules"
-          tar -C dist -czf "dist/${package}.tar.gz" "$package"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: viper-patcher-darwin-arm64
-          path: dist/*.tar.gz
-          if-no-files-found: error
-
-  windows:
-    name: Windows ${{ matrix.name }}
-    needs: version
-    runs-on: windows-2025
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: x64
-            goarch: amd64
-            msystem: MINGW64
-            compiler_package: mingw-w64-x86_64-gcc
-            make_package: mingw-w64-x86_64-make
-            tool_directory: mingw64
-          - name: x86
-            goarch: "386"
-            msystem: MINGW32
-            compiler_package: mingw-w64-i686-gcc
-            make_package: mingw-w64-i686-make
-            tool_directory: mingw32
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.5"
-          architecture: x64
           cache: true
-      - name: Verify Go host toolchain
-        shell: pwsh
-        run: |
-          $hostArchitecture = go env GOHOSTARCH
-          if ($hostArchitecture -ne "amd64") {
-            throw "Expected the Go host architecture amd64, but found $hostArchitecture."
-          }
-          go version
-          go env GOROOT GOTOOLDIR GOHOSTOS GOHOSTARCH
-      - name: Install Windows resource tool
-        shell: pwsh
-        run: go install github.com/tc-hib/go-winres@v0.3.3
-      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
-        id: msys2
-        with:
-          msystem: ${{ matrix.msystem }}
-          update: true
-          install: ${{ matrix.compiler_package }} ${{ matrix.make_package }}
-      - name: Configure MinGW toolchain
-        shell: pwsh
-        env:
-          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
-          TOOL_DIRECTORY: ${{ matrix.tool_directory }}
-        run: |
-          $toolDirectory = Join-Path $env:MSYS2_ROOT $env:TOOL_DIRECTORY
-          $binDirectory = Join-Path $toolDirectory "bin"
-          $compiler = Join-Path $binDirectory "gcc.exe"
-          $cxxCompiler = Join-Path $binDirectory "g++.exe"
-          $archiver = Join-Path $binDirectory "ar.exe"
-          $ranlib = Join-Path $binDirectory "ranlib.exe"
-          $windres = Join-Path $binDirectory "windres.exe"
-          $objdump = Join-Path $binDirectory "objdump.exe"
 
-          foreach ($tool in @($compiler, $cxxCompiler, $archiver, $ranlib, $windres, $objdump)) {
-            if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
-              throw "Required MinGW tool was not found: $tool"
+      - name: Validate tag and synchronized metadata
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          repository_version="$(tr -d '\r\n' < VERSION)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "Invalid release tag: $tag" >&2
+            exit 1
+          fi
+          if [ "$repository_version" != "$version" ]; then
+            echo "Tag $tag does not match VERSION=$repository_version" >&2
+            exit 1
+          fi
+          for metadata in cmd/creator/FyneApp.toml cmd/patcher/FyneApp.toml; do
+            if ! grep -Fxq "Version = \"$version\"" "$metadata"; then
+              echo "$metadata is not synchronized with VERSION=$version" >&2
+              exit 1
+            fi
+          done
+          if ! grep -Fq "## [$version] - " CHANGELOG.md; then
+            echo "CHANGELOG.md has no release section for $version" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Locate successful CI run for the exact commit
+        id: ci-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 240); do
+            runs="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+              -f head_sha="$GITHUB_SHA" \
+              -f event=push \
+              -f per_page=100)"
+            run_id="$(printf '%s' "$runs" | jq -r \
+              '[.workflow_runs[] | select(.head_sha == env.GITHUB_SHA and .head_branch == "master" and .conclusion == "success")] | sort_by(.run_number) | last | .id // empty')"
+            if [ -n "$run_id" ]; then
+              printf 'run_id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            failed="$(printf '%s' "$runs" | jq -r \
+              '[.workflow_runs[] | select(.head_sha == env.GITHUB_SHA and .head_branch == "master" and .status == "completed" and .conclusion != "success")] | length')"
+            active="$(printf '%s' "$runs" | jq -r \
+              '[.workflow_runs[] | select(.head_sha == env.GITHUB_SHA and .head_branch == "master" and .status != "completed")] | length')"
+            if [ "$failed" -gt 0 ] && [ "$active" -eq 0 ]; then
+              echo "The exact commit has no successful CI run." >&2
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "Timed out waiting for a successful CI run for $GITHUB_SHA." >&2
+          exit 1
+
+      - name: Download exact CI artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ steps.ci-run.outputs.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf downloaded dist
+          mkdir -p downloaded dist
+          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir downloaded
+          find downloaded -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp '{}' dist/ \;
+
+      - name: Verify complete release archive set
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$RELEASE_VERSION"
+          expected=(
+            "viper-patcher_${version}_linux_amd64.tar.gz"
+            "viper-patcher_${version}_linux_arm64.tar.gz"
+            "viper-patcher_${version}_linux_386.tar.gz"
+            "viper-patcher_${version}_darwin_arm64.tar.gz"
+            "viper-patcher_${version}_windows_amd64.zip"
+            "viper-patcher_${version}_windows_386.zip"
+            "viper-patcher-cli_${version}_linux_amd64.tar.gz"
+            "viper-patcher-cli_${version}_linux_arm64.tar.gz"
+            "viper-patcher-cli_${version}_linux_386.tar.gz"
+            "viper-patcher-cli_${version}_darwin_arm64.tar.gz"
+            "viper-patcher-cli_${version}_windows_amd64.zip"
+            "viper-patcher-cli_${version}_windows_386.zip"
+          )
+          for archive in "${expected[@]}"; do
+            test -f "dist/$archive" || {
+              echo "Missing release archive: $archive" >&2
+              exit 1
             }
-          }
+          done
+          actual="$(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)"
+          if [ "$actual" -ne "${#expected[@]}" ]; then
+            echo "Unexpected release archive count: $actual" >&2
+            find dist -maxdepth 1 -type f -print >&2
+            exit 1
+          fi
 
-          $binDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "CC=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "CXX=$cxxCompiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "AR=$archiver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RANLIB=$ranlib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "WINDRES=$windres" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "OBJDUMP=$objdump" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Verify MinGW and cgo
-        shell: pwsh
+      - name: Generate SBOM, provenance, and checksums
         env:
-          CGO_ENABLED: "1"
-          GOOS: windows
-          GOARCH: ${{ matrix.goarch }}
+          CI_RUN_ID: ${{ steps.ci-run.outputs.run_id }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
         run: |
-          $compilerTarget = (& $env:CC -dumpmachine).Trim()
-          $expectedTarget = if ($env:GOARCH -eq "386") { "i686-w64-mingw32" } else { "x86_64-w64-mingw32" }
-          if ($compilerTarget -ne $expectedTarget) {
-            throw "Expected MinGW target $expectedTarget, but found $compilerTarget."
-          }
-
-          & $env:CC --version
-          if ($LASTEXITCODE -ne 0) {
-            throw "The MinGW C compiler could not be executed."
-          }
-
-          $probeDirectory = Join-Path $env:RUNNER_TEMP "viper-cgo-probe-$env:GOARCH"
-          Remove-Item -Recurse -Force $probeDirectory -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path $probeDirectory | Out-Null
-
-          @'
-          module viper-cgo-probe
-
-          go 1.26.0
-          '@ | Set-Content -LiteralPath (Join-Path $probeDirectory "go.mod") -Encoding utf8
-
-          @'
-          package main
-
-          /*
-          static int vipr_cgo_probe(void) {
-              return 42;
-          }
-          */
-          import "C"
-
-          func main() {
-              if C.vipr_cgo_probe() != 42 {
-                  panic("unexpected cgo probe result")
-              }
-          }
-          '@ | Set-Content -LiteralPath (Join-Path $probeDirectory "main.go") -Encoding utf8
-
-          Push-Location $probeDirectory
-          try {
-            go build -x -trimpath -o "probe.exe" .
-            if ($LASTEXITCODE -ne 0) {
-              throw "The Windows $env:GOARCH cgo probe failed."
-            }
-          } finally {
-            Pop-Location
-          }
-      - shell: pwsh
-        run: go mod download
-      - name: Build libzstd
-        shell: pwsh
-        env:
-          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
-        run: |
-          ./scripts/fetch-zstd.ps1
-          ./scripts/build-zstd.ps1 -Architecture ${{ matrix.name }} -MSYS2Root $env:MSYS2_ROOT
-      - name: Build and package
-        shell: pwsh
-        env:
-          CGO_ENABLED: "1"
-          GOOS: windows
-          GOARCH: ${{ matrix.goarch }}
-          RELEASE_VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          $version = $env:RELEASE_VERSION
-          $module = go list -m
-          $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-          $ldflags = "-s -w -X $module/internal/buildinfo.Version=$version -X $module/internal/buildinfo.Commit=$env:GITHUB_SHA -X $module/internal/buildinfo.BuildDate=$buildDate"
-          $package = "viper-patcher_${version}_windows_${env:GOARCH}"
-          New-Item -ItemType Directory -Force -Path "dist/$package/third-party-licenses" | Out-Null
-          $goWinRes = Join-Path (go env GOPATH) "bin/go-winres.exe"
-          & $goWinRes simply `
-            --arch "${{ matrix.goarch }}" `
-            --icon "assets/icon.png" `
-            --manifest cli `
-            --product-name "Viper-Patcher Creator" `
-            --file-description "Create VIPR differential patches" `
-            --original-filename "creator.exe" `
-            --out "cmd/creator/rsrc"
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-          & $goWinRes simply `
-            --arch "${{ matrix.goarch }}" `
-            --icon "assets/icon.png" `
-            --manifest cli `
-            --product-name "Viper-Patcher" `
-            --file-description "Apply and reverse VIPR differential patches" `
-            --original-filename "patcher.exe" `
-            --out "cmd/patcher/rsrc"
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags $ldflags -o "dist/$package/creator.exe" ./cmd/creator
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags $ldflags -o "dist/$package/patcher.exe" ./cmd/patcher
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          foreach ($binary in @("dist/$package/creator.exe", "dist/$package/patcher.exe")) {
-            $imports = & $env:OBJDUMP -p $binary
-            if ($LASTEXITCODE -ne 0) {
-              throw "Could not inspect dynamic dependencies for $binary."
-            }
-            if ($imports | Select-String -Pattern 'DLL Name:\s*.*zstd.*\.dll') {
-              $imports | Out-String | Write-Error
-              throw "Dynamic zstd dependency detected in $binary; libzstd must remain statically linked."
-            }
-          }
-
-          Copy-Item README.md, LICENSE "dist/$package/"
-          Copy-Item third_party/zstd/LICENSE "dist/$package/third-party-licenses/zstd-BSD-3-Clause.txt"
-          Copy-Item third_party/zstd-NOTICE.txt "dist/$package/third-party-licenses/zstd-NOTICE.txt"
-          Copy-Item third-party-licenses/BLAKE3-APACHE-2.0.txt "dist/$package/third-party-licenses/BLAKE3-APACHE-2.0.txt"
-          Copy-Item third-party-licenses/BLAKE3-NOTICE.txt "dist/$package/third-party-licenses/BLAKE3-NOTICE.txt"
-          ./scripts/collect-go-licenses.ps1 -Destination "dist/$package/third-party-licenses/go-modules"
-          Compress-Archive -Path "dist/$package" -DestinationPath "dist/$package.zip"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: viper-patcher-windows-${{ matrix.goarch }}
-          path: dist/*.zip
-          if-no-files-found: error
-
-  publish:
-    name: Publish GitHub release
-    needs: [version, linux, linux-x86, macos, windows]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.26.5"
-          cache: true
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Generate SBOM and build provenance
-        env:
-          RELEASE_TAG: ${{ needs.version.outputs.tag }}
-        run: |
+          set -euo pipefail
           go mod download
           go run ./scripts/sbom -output dist/SBOM.spdx.json
           cat > dist/BUILD-PROVENANCE.json <<EOF
@@ -489,21 +148,21 @@ jobs:
             "repository": "${GITHUB_REPOSITORY}",
             "tag": "${RELEASE_TAG}",
             "commit": "${GITHUB_SHA}",
-            "workflow": "${GITHUB_WORKFLOW}",
-            "run_id": "${GITHUB_RUN_ID}",
-            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
-            "runner_os": "${RUNNER_OS}",
-            "runner_arch": "${RUNNER_ARCH}"
+            "ci_workflow": "ci.yml",
+            "ci_run_id": "${CI_RUN_ID}",
+            "release_workflow": "${GITHUB_WORKFLOW}",
+            "release_run_id": "${GITHUB_RUN_ID}",
+            "release_run_attempt": "${GITHUB_RUN_ATTEMPT}"
           }
           EOF
-      - name: Generate checksums
-        run: |
           cd dist
-          sha256sum *.tar.gz *.zip SBOM.spdx.json BUILD-PROVENANCE.json > SHA256SUMS.txt
-      - name: Publish release
+          mapfile -t archives < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' | sort)
+          sha256sum "${archives[@]}" SBOM.spdx.json BUILD-PROVENANCE.json > SHA256SUMS.txt
+
+      - name: Publish one GitHub release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
-          tag_name: ${{ needs.version.outputs.tag }}
+          tag_name: ${{ github.ref_name }}
           files: dist/*
           generate_release_notes: true
           fail_on_unmatched_files: true

@@ -36,6 +36,8 @@ build: $(NATIVE_STAMP)
 	mkdir -p dist
 	CGO_ENABLED=1 $(GO) build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags '$(LDFLAGS)' -o dist/creator ./cmd/creator
 	CGO_ENABLED=1 $(GO) build -trimpath -tags vipr_static_zstd,migrated_fynedo -ldflags '$(LDFLAGS)' -o dist/patcher ./cmd/patcher
+	CGO_ENABLED=1 $(GO) build -trimpath -tags vipr_static_zstd -ldflags '$(LDFLAGS)' -o dist/creator-cli ./cmd/creator-cli
+	CGO_ENABLED=1 $(GO) build -trimpath -tags vipr_static_zstd -ldflags '$(LDFLAGS)' -o dist/patcher-cli ./cmd/patcher-cli
 
 test: $(NATIVE_STAMP)
 	CGO_ENABLED=1 $(GO) test -race -tags vipr_static_zstd,migrated_fynedo ./...
