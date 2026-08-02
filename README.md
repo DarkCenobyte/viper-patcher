@@ -264,10 +264,14 @@ and worker budgeting. See [Testing strategy](docs/TESTING.md).
 ## GitHub Actions
 
 - `ci.yml` runs the correctness gate on pull requests and `master`, then builds
-  all GUI and CLI-only release archives once after a green `master` commit.
-- `release.yml` runs only for a `v*` tag, requires a successful CI push run for
-  the exact tagged SHA, downloads those artifacts, and publishes one release.
-- Tag publication never rebuilds binaries.
+  all GUI and CLI-only release archives once after a green `master` commit. A
+  manual run may provide a release-version override without editing repository
+  metadata.
+- `release.yml` accepts pushed `v*` tags or a manual tag/ref request. It reuses a
+  matching green CI artifact set for the exact commit, or dispatches an exact-
+  commit CI rebuild when the requested version differs or rebuilding is forced.
+- Tags such as `v1.0.0-alpha.1` and `v1.0.0-rc.2` are published automatically as
+  prereleases; rerunning manually can replace the assets of an existing release.
 - External actions are referenced by immutable commit identifiers.
 
 See [GitHub Actions CI/CD](docs/CI-CD.md) and

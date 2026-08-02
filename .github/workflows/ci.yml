@@ -1,4 +1,5 @@
 name: CI
+run-name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '' && format('CI release {0}', github.event.inputs.release_version) || 'CI' }}
 
 on:
   push:
@@ -6,6 +7,11 @@ on:
       - master
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: Optional build version override, without the leading v
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -254,37 +260,51 @@ jobs:
 
   release-metadata:
     name: Validate release metadata
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '')
     needs: [test, native-sanitizers, core-linux-386, core-windows]
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Validate synchronized version
+      - name: Validate synchronized metadata and resolve build version
         id: version
+        env:
+          REQUESTED_VERSION: ${{ github.event.inputs.release_version }}
         shell: bash
         run: |
-          version="$(tr -d '\r\n' < VERSION)"
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
-            echo "Invalid VERSION value: $version" >&2
+          set -euo pipefail
+          repository_version="$(tr -d '\r\n' < VERSION)"
+          version_pattern='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
+          if ! [[ "$repository_version" =~ $version_pattern ]]; then
+            echo "Invalid VERSION value: $repository_version" >&2
             exit 1
           fi
           for metadata in cmd/creator/FyneApp.toml cmd/patcher/FyneApp.toml; do
-            if ! grep -Fxq "Version = \"$version\"" "$metadata"; then
-              echo "$metadata is not synchronized with VERSION=$version" >&2
+            if ! grep -Fxq "Version = \"$repository_version\"" "$metadata"; then
+              echo "$metadata is not synchronized with VERSION=$repository_version" >&2
               exit 1
             fi
           done
-          if ! grep -Fq "## [$version] - " CHANGELOG.md; then
-            echo "CHANGELOG.md has no release section for $version" >&2
+          if ! grep -Fq "## [$repository_version] - " CHANGELOG.md; then
+            echo "CHANGELOG.md has no release section for $repository_version" >&2
+            exit 1
+          fi
+
+          version="${REQUESTED_VERSION:-$repository_version}"
+          if ! [[ "$version" =~ $version_pattern ]]; then
+            echo "Invalid requested build version: $version" >&2
             exit 1
           fi
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
   package-linux:
     name: Release archives (Linux ${{ matrix.arch }})
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '')
     needs: release-metadata
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
@@ -377,14 +397,16 @@ jobs:
           tar -C dist -czf "dist/${cli_package}.tar.gz" "$cli_package"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-linux-${{ matrix.arch }}
+          name: release-${{ needs.release-metadata.outputs.version }}-linux-${{ matrix.arch }}
           path: dist/*.tar.gz
           if-no-files-found: error
           retention-days: 30
 
   package-linux-386:
     name: Release archives (Linux 386)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '')
     needs: release-metadata
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -473,14 +495,16 @@ jobs:
           tar -C dist -czf "dist/${cli_package}.tar.gz" "$cli_package"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-linux-386
+          name: release-${{ needs.release-metadata.outputs.version }}-linux-386
           path: dist/*.tar.gz
           if-no-files-found: error
           retention-days: 30
 
   package-macos:
     name: Release archives (macOS arm64)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '')
     needs: release-metadata
     runs-on: macos-15
     timeout-minutes: 40
@@ -507,6 +531,7 @@ jobs:
         run: |
           set -euo pipefail
           version="$RELEASE_VERSION"
+          bundle_version="${version%%-*}"
           module="$(go list -m)"
           build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ldflags="-s -w -X ${module}/internal/buildinfo.Version=${version} -X ${module}/internal/buildinfo.Commit=${GITHUB_SHA} -X ${module}/internal/buildinfo.BuildDate=${build_date}"
@@ -546,9 +571,9 @@ jobs:
           root="$PWD"
           fyne_tool="$(go env GOPATH)/bin/fyne"
           icon="$root/assets/icon.png"
-          "$fyne_tool" package --os darwin --source-dir "$root/cmd/creator" --executable "$build_dir/creator" --name "Viper-Patcher Creator" --app-id "io.github.darkcenobyte.viperpatcher.creator" --app-version "$version" --app-build "$GITHUB_RUN_NUMBER" --icon "$icon" --release
+          "$fyne_tool" package --os darwin --source-dir "$root/cmd/creator" --executable "$build_dir/creator" --name "Viper-Patcher Creator" --app-id "io.github.darkcenobyte.viperpatcher.creator" --app-version "$bundle_version" --app-build "$GITHUB_RUN_NUMBER" --icon "$icon" --release
           mv "Viper-Patcher Creator.app" "$package_dir/"
-          "$fyne_tool" package --os darwin --source-dir "$root/cmd/patcher" --executable "$build_dir/patcher" --name "Viper-Patcher" --app-id "io.github.darkcenobyte.viperpatcher.patcher" --app-version "$version" --app-build "$GITHUB_RUN_NUMBER" --icon "$icon" --release
+          "$fyne_tool" package --os darwin --source-dir "$root/cmd/patcher" --executable "$build_dir/patcher" --name "Viper-Patcher" --app-id "io.github.darkcenobyte.viperpatcher.patcher" --app-version "$bundle_version" --app-build "$GITHUB_RUN_NUMBER" --icon "$icon" --release
           mv "Viper-Patcher.app" "$package_dir/"
 
           for target_dir in "$package_dir" "$cli_dir"; do
@@ -567,14 +592,16 @@ jobs:
           tar -C dist -czf "dist/${cli_package}.tar.gz" "$cli_package"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-darwin-arm64
+          name: release-${{ needs.release-metadata.outputs.version }}-darwin-arm64
           path: dist/*.tar.gz
           if-no-files-found: error
           retention-days: 30
 
   package-windows:
     name: Release archives (Windows ${{ matrix.name }})
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '')
     needs: release-metadata
     runs-on: windows-2025
     timeout-minutes: 45
@@ -725,7 +752,7 @@ jobs:
           Compress-Archive -Path "dist/$cliPackage" -DestinationPath "dist/$cliPackage.zip"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-windows-${{ matrix.goarch }}
+          name: release-${{ needs.release-metadata.outputs.version }}-windows-${{ matrix.goarch }}
           path: dist/*.zip
           if-no-files-found: error
           retention-days: 30

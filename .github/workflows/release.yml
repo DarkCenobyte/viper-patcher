@@ -1,25 +1,48 @@
 name: Release
+run-name: Release ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v1.0.0 or v1.0.0-rc.1
+        required: true
+        default: v1.0.0
+        type: string
+      target_ref:
+        description: Branch or tag to release when started manually
+        required: true
+        default: master
+        type: string
+      force_rebuild:
+        description: Rebuild exact-commit artifacts even when a matching green CI run exists
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   publish:
     name: Publish validated CI artifacts
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 130
     permissions:
-      actions: read
+      actions: write
       contents: write
     steps:
-      - name: Check out tagged commit
+      - name: Check out release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_ref || github.ref }}
           fetch-depth: 0
 
       - name: Set up Go
@@ -28,65 +51,208 @@ jobs:
           go-version: "1.26.5"
           cache: true
 
-      - name: Validate tag and synchronized metadata
+      - name: Resolve release tag, commit, and publication type
         id: version
+        env:
+          MANUAL_TAG: ${{ github.event.inputs.tag }}
+          MANUAL_TARGET_REF: ${{ github.event.inputs.target_ref }}
         shell: bash
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
-          version="${tag#v}"
-          repository_version="$(tr -d '\r\n' < VERSION)"
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$MANUAL_TAG"
+            source_ref="$MANUAL_TARGET_REF"
+          else
+            tag="$GITHUB_REF_NAME"
+            source_ref="$GITHUB_REF_NAME"
+          fi
+
+          tag_pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
+          if ! [[ "$tag" =~ $tag_pattern ]]; then
             echo "Invalid release tag: $tag" >&2
+            echo "Expected vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-suffix." >&2
             exit 1
           fi
-          if [ "$repository_version" != "$version" ]; then
-            echo "Tag $tag does not match VERSION=$repository_version" >&2
-            exit 1
-          fi
-          for metadata in cmd/creator/FyneApp.toml cmd/patcher/FyneApp.toml; do
-            if ! grep -Fxq "Version = \"$version\"" "$metadata"; then
-              echo "$metadata is not synchronized with VERSION=$version" >&2
+
+          version="${tag#v}"
+          commit="$(git rev-parse HEAD)"
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            tagged_commit="$(git rev-list -n 1 "$tag")"
+            if [ "$tagged_commit" != "$commit" ]; then
+              echo "Existing tag $tag points to $tagged_commit, not $commit." >&2
               exit 1
             fi
-          done
-          if ! grep -Fq "## [$version] - " CHANGELOG.md; then
-            echo "CHANGELOG.md has no release section for $version" >&2
-            exit 1
           fi
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
-      - name: Locate successful CI run for the exact commit
+          prerelease=false
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          fi
+
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+          printf 'source_ref=%s\n' "$source_ref" >> "$GITHUB_OUTPUT"
+          printf 'prerelease=%s\n' "$prerelease" >> "$GITHUB_OUTPUT"
+
+      - name: Locate or build exact-commit release artifacts
         id: ci-run
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.version.outputs.commit }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          SOURCE_REF: ${{ steps.version.outputs.source_ref }}
+          FORCE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_rebuild == 'true' || false }}
         shell: bash
         run: |
           set -euo pipefail
-          for attempt in $(seq 1 240); do
+          expected_artifact="release-${RELEASE_VERSION}-linux-amd64"
+
+          has_expected_artifact() {
+            local run_id="$1"
+            local artifacts
+            artifacts="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" \
+              -f per_page=100)"
+            printf '%s' "$artifacts" | jq -e --arg expected "$expected_artifact" \
+              'any(.artifacts[]; .name == $expected and .expired == false)' >/dev/null
+          }
+
+          find_matching_run() {
+            local runs run_id
             runs="$(gh api --method GET \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
-              -f head_sha="$GITHUB_SHA" \
-              -f event=push \
+              -f head_sha="$RELEASE_COMMIT" \
+              -f per_page=100)"
+            while read -r run_id; do
+              if [ -n "$run_id" ] && has_expected_artifact "$run_id"; then
+                printf '%s\n' "$run_id"
+                return 0
+              fi
+            done < <(printf '%s' "$runs" | jq -r --arg sha "$RELEASE_COMMIT" \
+              '[.workflow_runs[] | select(.head_sha == $sha and .conclusion == "success")] | sort_by(.run_number) | reverse | .[].id')
+            return 1
+          }
+
+          find_active_run() {
+            local runs repository_version title
+            repository_version="$(tr -d '\r\n' < VERSION)"
+            title="CI release ${RELEASE_VERSION}"
+            runs="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+              -f head_sha="$RELEASE_COMMIT" \
+              -f per_page=100)"
+            printf '%s' "$runs" | jq -r \
+              --arg sha "$RELEASE_COMMIT" \
+              --arg version "$RELEASE_VERSION" \
+              --arg repository_version "$repository_version" \
+              --arg title "$title" \
+              '[.workflow_runs[] | select(
+                .head_sha == $sha and
+                .status != "completed" and
+                ((.event == "workflow_dispatch" and .display_title == $title) or
+                 ($version == $repository_version and .event == "push" and .head_branch == "master"))
+              )] | sort_by(.run_number) | last | .id // empty'
+          }
+
+          run_id=""
+          if [ "$FORCE_REBUILD" != "true" ]; then
+            run_id="$(find_matching_run || true)"
+            if [ -z "$run_id" ]; then
+              active_run_id="$(find_active_run)"
+              if [ -n "$active_run_id" ]; then
+                for attempt in $(seq 1 660); do
+                  run="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${active_run_id}")"
+                  status="$(printf '%s' "$run" | jq -r '.status')"
+                  if [ "$status" != "completed" ]; then
+                    sleep 10
+                    continue
+                  fi
+                  conclusion="$(printf '%s' "$run" | jq -r '.conclusion')"
+                  if [ "$conclusion" != "success" ]; then
+                    echo "Exact-commit CI run $active_run_id completed with conclusion: $conclusion" >&2
+                    exit 1
+                  fi
+                  if ! has_expected_artifact "$active_run_id"; then
+                    echo "CI run $active_run_id succeeded but did not publish $expected_artifact." >&2
+                    exit 1
+                  fi
+                  run_id="$active_run_id"
+                  break
+                done
+                if [ -z "$run_id" ]; then
+                  echo "Timed out waiting for active CI run $active_run_id." >&2
+                  exit 1
+                fi
+              fi
+            fi
+          fi
+          if [ -n "$run_id" ]; then
+            printf 'run_id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
+            printf 'reused=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          dispatch_ref="$SOURCE_REF"
+          temporary_ref=""
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            temporary_ref="release-ci/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            git push origin "${RELEASE_COMMIT}:refs/heads/${temporary_ref}"
+            dispatch_ref="$temporary_ref"
+            printf 'temporary_ref=%s\n' "$temporary_ref" >> "$GITHUB_OUTPUT"
+          fi
+
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run ci.yml --ref "$dispatch_ref" -f release_version="$RELEASE_VERSION"
+
+          title="CI release ${RELEASE_VERSION}"
+          for attempt in $(seq 1 660); do
+            runs="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+              -f head_sha="$RELEASE_COMMIT" \
+              -f event=workflow_dispatch \
               -f per_page=100)"
             run_id="$(printf '%s' "$runs" | jq -r \
-              '[.workflow_runs[] | select(.head_sha == env.GITHUB_SHA and .head_branch == "master" and .conclusion == "success")] | sort_by(.run_number) | last | .id // empty')"
-            if [ -n "$run_id" ]; then
-              printf 'run_id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
-              exit 0
+              --arg sha "$RELEASE_COMMIT" \
+              --arg title "$title" \
+              --arg started "$started_at" \
+              '[.workflow_runs[] | select(.head_sha == $sha and .display_title == $title and .created_at >= $started)] | sort_by(.run_number) | last | .id // empty')"
+            if [ -z "$run_id" ]; then
+              sleep 10
+              continue
             fi
-            failed="$(printf '%s' "$runs" | jq -r \
-              '[.workflow_runs[] | select(.head_sha == env.GITHUB_SHA and .head_branch == "master" and .status == "completed" and .conclusion != "success")] | length')"
-            active="$(printf '%s' "$runs" | jq -r \
-              '[.workflow_runs[] | select(.head_sha == env.GITHUB_SHA and .head_branch == "master" and .status != "completed")] | length')"
-            if [ "$failed" -gt 0 ] && [ "$active" -eq 0 ]; then
-              echo "The exact commit has no successful CI run." >&2
+
+            run="$(printf '%s' "$runs" | jq -c --argjson id "$run_id" '.workflow_runs[] | select(.id == $id)')"
+            status="$(printf '%s' "$run" | jq -r '.status')"
+            if [ "$status" != "completed" ]; then
+              sleep 10
+              continue
+            fi
+
+            conclusion="$(printf '%s' "$run" | jq -r '.conclusion')"
+            if [ "$conclusion" != "success" ]; then
+              echo "Exact-commit CI run $run_id completed with conclusion: $conclusion" >&2
               exit 1
             fi
-            sleep 15
+            if ! has_expected_artifact "$run_id"; then
+              echo "CI run $run_id succeeded but did not publish $expected_artifact." >&2
+              exit 1
+            fi
+
+            printf 'run_id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
+            printf 'reused=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
           done
-          echo "Timed out waiting for a successful CI run for $GITHUB_SHA." >&2
+
+          echo "Timed out waiting for a versioned CI build of $RELEASE_COMMIT." >&2
           exit 1
+
+      - name: Remove temporary manual-build ref
+        if: always() && steps.ci-run.outputs.temporary_ref != ''
+        env:
+          TEMPORARY_REF: ${{ steps.ci-run.outputs.temporary_ref }}
+        shell: bash
+        run: git push origin --delete "$TEMPORARY_REF" || true
 
       - name: Download exact CI artifacts
         env:
@@ -137,7 +303,10 @@ jobs:
       - name: Generate SBOM, provenance, and checksums
         env:
           CI_RUN_ID: ${{ steps.ci-run.outputs.run_id }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          CI_ARTIFACTS_REUSED: ${{ steps.ci-run.outputs.reused }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_COMMIT: ${{ steps.version.outputs.commit }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -147,9 +316,11 @@ jobs:
           {
             "repository": "${GITHUB_REPOSITORY}",
             "tag": "${RELEASE_TAG}",
-            "commit": "${GITHUB_SHA}",
+            "version": "${RELEASE_VERSION}",
+            "commit": "${RELEASE_COMMIT}",
             "ci_workflow": "ci.yml",
             "ci_run_id": "${CI_RUN_ID}",
+            "ci_artifacts_reused": "${CI_ARTIFACTS_REUSED}",
             "release_workflow": "${GITHUB_WORKFLOW}",
             "release_run_id": "${GITHUB_RUN_ID}",
             "release_run_attempt": "${GITHUB_RUN_ATTEMPT}"
@@ -159,10 +330,13 @@ jobs:
           mapfile -t archives < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' | sort)
           sha256sum "${archives[@]}" SBOM.spdx.json BUILD-PROVENANCE.json > SHA256SUMS.txt
 
-      - name: Publish one GitHub release
+      - name: Publish or revise one GitHub release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ steps.version.outputs.commit }}
+          prerelease: ${{ steps.version.outputs.prerelease }}
           files: dist/*
           generate_release_notes: true
           fail_on_unmatched_files: true
+          overwrite_files: true

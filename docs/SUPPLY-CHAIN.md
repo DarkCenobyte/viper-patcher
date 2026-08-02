@@ -13,24 +13,32 @@ Release inputs and automation are intentionally reproducible and reviewable:
   binaries are additionally inspected for GUI dynamic libraries;
 - release archives contain third-party notices and collected Go module licenses.
 
-## Build once, publish the exact result
+## Exact-commit build promotion
 
-Release archives are built only after every CI correctness job succeeds on a
-`master` commit. A tag workflow does not rebuild them. It selects a successful
-`ci.yml` push run by the exact commit SHA, downloads that run's artifacts, and
+Normal stable releases reuse archives built after every CI correctness job
+succeeds on the exact `master` commit. The release workflow selects artifacts by
+both commit SHA and requested version, downloads that run's artifacts, and
 publishes all GUI and CLI-only archives in one job.
 
-This prevents a tag build from drifting because of runner images, package
-repositories, mutable external state, or a concurrent release workflow. A tag
-on a different or failing commit cannot reuse artifacts from another run.
+Prereleases and manual revisions may request a version that differs from the
+tracked `VERSION`. In that case, or when `force_rebuild` is selected, the release
+workflow dispatches the complete `ci.yml` pipeline against the same immutable
+commit with an explicit version override. Publication waits for that exact run
+to succeed and never substitutes artifacts from another SHA. The override is
+injected into binaries and package metadata without modifying tracked files.
+
+This preserves exact-commit provenance while allowing `v1.0.0-alpha.1`,
+`v1.0.0-rc.2`, and rebuilt release assets. Versioned workflow-artifact names
+prevent a successful CI run for one version from being mistaken for another.
 
 ## Published metadata
 
 The publication job emits:
 
 - `SBOM.spdx.json` from the resolved Go module graph;
-- `BUILD-PROVENANCE.json` containing repository, tag, commit, exact CI run,
-  publication workflow run, and attempt identifiers;
+- `BUILD-PROVENANCE.json` containing repository, tag, requested version,
+  commit, exact CI run, whether its artifacts were reused, publication workflow
+  run, and attempt identifiers;
 - `SHA256SUMS.txt` covering all twelve Windows, Linux, and macOS GUI/CLI archives
   plus the SBOM and provenance records.
 
