@@ -6,6 +6,8 @@ Release inputs and automation are intentionally reproducible and reviewable:
 - downloaded source archives are verified against hard-coded SHA-256 values
   before extraction;
 - GitHub Actions are referenced by immutable commit identifiers;
+- release archives and metadata receive GitHub artifact attestations signed
+  through short-lived OIDC/Sigstore credentials;
 - `VERSION`, both Fyne metadata files, and the dated changelog section must agree;
 - the CLI-only dependency graph is checked for Fyne, GLFW, GUI assets,
   `internal/gui`, and `internal/appmode`;
@@ -40,12 +42,27 @@ The publication job emits:
   commit, exact CI run, whether its artifacts were reused, publication workflow
   run, and attempt identifiers;
 - `SHA256SUMS.txt` covering all twelve Windows, Linux, and macOS GUI/CLI archives
-  plus the SBOM and provenance records.
+  plus the SBOM and provenance records;
+- a signed GitHub release-provenance attestation that uses
+  `BUILD-PROVENANCE.json` as its custom predicate and binds every archive, the
+  SBOM, and the checksum manifest;
+- a GitHub SBOM attestation binding all twelve release archives to
+  `SBOM.spdx.json`.
 
 The SBOM deliberately uses `NOASSERTION` for module licenses because release
 archives carry the authoritative collected license texts. This avoids inventing
 license classifications from module names.
 
-The provenance JSON is descriptive release metadata, not a cryptographic SLSA
-attestation. A future signing phase may add GitHub artifact attestations or
-Sigstore without changing the build-once promotion model.
+## Release provenance attestation
+
+`BUILD-PROVENANCE.json` is descriptive metadata when viewed on its own. The
+release workflow also embeds that exact JSON document as the predicate of a
+GitHub artifact attestation. Its predicate type is the stable URL of this
+section. The signed statement binds the release archives, SBOM, and checksum
+manifest to the repository, requested tag and version, exact source commit,
+validated CI run, and publication run recorded by the predicate.
+
+The attestation is signed through Sigstore, stored by GitHub, and verifiable
+with `gh attestation verify`. It deliberately describes exact-commit promotion
+rather than claiming that the publication job compiled binaries which were
+actually built and tested by the referenced CI run.

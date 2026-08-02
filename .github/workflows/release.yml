@@ -37,7 +37,10 @@ jobs:
     timeout-minutes: 130
     permissions:
       actions: write
+      artifact-metadata: write
+      attestations: write
       contents: write
+      id-token: write
     steps:
       - name: Check out release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -329,6 +332,25 @@ jobs:
           cd dist
           mapfile -t archives < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' | sort)
           sha256sum "${archives[@]}" SBOM.spdx.json BUILD-PROVENANCE.json > SHA256SUMS.txt
+
+      - name: Attest release promotion
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SBOM.spdx.json
+            dist/SHA256SUMS.txt
+          predicate-type: https://github.com/DarkCenobyte/viper-patcher/blob/master/docs/SUPPLY-CHAIN.md#release-provenance-attestation
+          predicate-path: dist/BUILD-PROVENANCE.json
+
+      - name: Attest release SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+          sbom-path: dist/SBOM.spdx.json
 
       - name: Publish or revise one GitHub release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
