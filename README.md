@@ -10,8 +10,11 @@
 [![GitHub stars](https://img.shields.io/github/stars/DarkCenobyte/viper-patcher)](https://github.com/DarkCenobyte/viper-patcher/stargazers)
 [![Open issues](https://img.shields.io/github/issues/DarkCenobyte/viper-patcher)](https://github.com/DarkCenobyte/viper-patcher/issues)
 
-Viper-Patcher is a cross-platform differential patch creator and applicator for
-binary files and ordered groups of files. It provides four executables:
+Viper-Patcher is a cross-platform differential patch creator and applicator for binary files and ordered groups of files. Designed for efficient patch creation and application across a range of workloads, it can package updates for multiple files into a single `.vipr` patch.
+
+The project was developed with extensive assistance from GPT-5.6 Sol, with its implementation validated through automated tests, static analysis, security checks, and reproducible benchmarks.
+
+It provides four executables:
 
 - `creator`: hybrid GUI/CLI patch creator;
 - `patcher`: hybrid GUI/CLI patch applicator;
@@ -290,6 +293,84 @@ containing both `creator-cli` and `patcher-cli`.
 | Linux | x86 | GUI + CLI-only |
 | Linux | arm64 | GUI + CLI-only |
 | macOS | arm64 | GUI + CLI-only |
+
+## Benchmark
+
+The following benchmark compares Viper-Patcher `1.0.0` with HDiffPatch 5.1.2, xdelta3 3.2.0, and Floating IPS 198 on Windows x64.
+
+The reference Viper profiles are:
+
+* **CLI-only:** compression level `3`, automatic workers;
+* **Hybrid GUI+CLI:** default settings, forced into CLI mode with `--headless`.
+
+The benchmark ran on an Intel Core i7-10700 with 16 logical processors and 31.92 GiB of RAM. Automatic Viper workers resolved to 16. Small, large, and huge cases used 15, 7, and 3 measured iterations respectively, after a warm-up. Patch application and SHA-256 verification were performed outside the measured creation interval, and every measured application was SHA-256 verified after the timer stopped.
+
+Best values for each scenario and metric are shown in **bold**.
+
+<details open>
+<summary><strong>Complete reference comparison</strong></summary>
+
+| Scenario                       | Tool             |    Create median |   Apply median |      Patch size |
+| ------------------------------ | ---------------- | ---------------: | -------------: | --------------: |
+| 1 × 100 KB, scattered changes  | Floating IPS 198 |    **14.820 ms** |  **15.130 ms** |           608 B |
+| 1 × 100 KB, scattered changes  | HDiffPatch 5.1.2 |        24.997 ms |      19.714 ms |       **241 B** |
+| 1 × 100 KB, scattered changes  | Viper CLI-only   |        66.170 ms |      37.079 ms |         1,006 B |
+| 1 × 100 KB, scattered changes  | Viper hybrid     |       154.805 ms |     133.081 ms |         1,006 B |
+| 1 × 100 KB, scattered changes  | xdelta3 3.2.0    |        21.953 ms |      20.318 ms |           638 B |
+| 1 × 100 KB, unrelated data     | Floating IPS 198 |    **15.539 ms** |  **15.127 ms** |  **97.674 KiB** |
+| 1 × 100 KB, unrelated data     | HDiffPatch 5.1.2 |        37.611 ms |      20.164 ms |      97.755 KiB |
+| 1 × 100 KB, unrelated data     | Viper CLI-only   |        78.042 ms |      38.276 ms |      98.163 KiB |
+| 1 × 100 KB, unrelated data     | Viper hybrid     |       171.475 ms |     136.358 ms |      98.163 KiB |
+| 1 × 100 KB, unrelated data     | xdelta3 3.2.0    |        43.225 ms |      20.700 ms |      98.089 KiB |
+| 10 × 100 KB, scattered changes | Floating IPS 198 |       163.893 ms |     164.683 ms |       5.938 KiB |
+| 10 × 100 KB, scattered changes | HDiffPatch 5.1.2 |    **68.829 ms** |  **29.886 ms** |   **1.109 KiB** |
+| 10 × 100 KB, scattered changes | Viper CLI-only   |       104.449 ms |      80.783 ms |       7.636 KiB |
+| 10 × 100 KB, scattered changes | Viper hybrid     |       202.615 ms |     185.585 ms |       7.636 KiB |
+| 10 × 100 KB, scattered changes | xdelta3 3.2.0    |       245.173 ms |     219.944 ms |       6.230 KiB |
+| 10 × 100 KB, unrelated data    | Floating IPS 198 |       150.166 ms |     145.549 ms | **976.737 KiB** |
+| 10 × 100 KB, unrelated data    | HDiffPatch 5.1.2 |   **123.446 ms** |  **27.582 ms** |     976.751 KiB |
+| 10 × 100 KB, unrelated data    | Viper CLI-only   |       204.518 ms |      71.717 ms |     979.451 KiB |
+| 10 × 100 KB, unrelated data    | Viper hybrid     |       320.977 ms |     167.974 ms |     979.451 KiB |
+| 10 × 100 KB, unrelated data    | xdelta3 3.2.0    |       351.658 ms |     208.631 ms |     980.880 KiB |
+| 1 × 50 MB, scattered changes   | Floating IPS 198 |      Unsupported |    Unsupported |     Unsupported |
+| 1 × 50 MB, scattered changes   | HDiffPatch 5.1.2 |     1,005.911 ms |  **51.485 ms** |  **41.719 KiB** |
+| 1 × 50 MB, scattered changes   | Viper CLI-only   |       334.731 ms |     104.551 ms |     179.655 KiB |
+| 1 × 50 MB, scattered changes   | Viper hybrid     |       458.756 ms |     202.169 ms |     179.655 KiB |
+| 1 × 50 MB, scattered changes   | xdelta3 3.2.0    |   **290.209 ms** |     111.275 ms |      49.874 KiB |
+| 1 × 50 MB, unrelated data      | Floating IPS 198 |      Unsupported |    Unsupported |     Unsupported |
+| 1 × 50 MB, unrelated data      | HDiffPatch 5.1.2 |     5,062.827 ms |  **41.689 ms** |  **47.684 MiB** |
+| 1 × 50 MB, unrelated data      | Viper CLI-only   |   **739.091 ms** |      99.848 ms |      47.688 MiB |
+| 1 × 50 MB, unrelated data      | Viper hybrid     |       857.037 ms |     175.551 ms |      47.688 MiB |
+| 1 × 50 MB, unrelated data      | xdelta3 3.2.0    |    12,560.326 ms |     128.248 ms |      47.687 MiB |
+| 1 × 500 MB, scattered changes  | Floating IPS 198 |      Unsupported |    Unsupported |     Unsupported |
+| 1 × 500 MB, scattered changes  | HDiffPatch 5.1.2 |    11,108.184 ms | **359.899 ms** | **380.408 KiB** |
+| 1 × 500 MB, scattered changes  | Viper CLI-only   | **1,857.603 ms** |   2,300.134 ms |       1.616 MiB |
+| 1 × 500 MB, scattered changes  | Viper hybrid     |     1,915.930 ms |   1,549.893 ms |       1.616 MiB |
+| 1 × 500 MB, scattered changes  | xdelta3 3.2.0    |     2,688.019 ms |     860.062 ms |     493.271 KiB |
+| 1 × 500 MB, unrelated data     | Floating IPS 198 |      Unsupported |    Unsupported |     Unsupported |
+| 1 × 500 MB, unrelated data     | HDiffPatch 5.1.2 |    31,777.584 ms | **367.315 ms** | **476.837 MiB** |
+| 1 × 500 MB, unrelated data     | Viper CLI-only   |     5,398.076 ms |     390.145 ms |     476.861 MiB |
+| 1 × 500 MB, unrelated data     | Viper hybrid     | **5,061.324 ms** |     436.736 ms |     476.861 MiB |
+| 1 × 500 MB, unrelated data     | xdelta3 3.2.0    |   253,000.081 ms |   1,539.439 ms |     476.867 MiB |
+
+</details>
+
+*Floating IPS is marked unsupported for the 50 MB and 500 MB cases because the IPS format cannot represent these inputs.*
+
+### Main observations
+
+* **Patch creation is Viper-Patcher's strongest result on large inputs.** The CLI-only build creates the 50 MB unrelated patch in 739 ms and the 500 MB scattered patch in 1.86 s. On the 500 MB unrelated case, the hybrid and CLI-only builds complete in approximately 5.1–5.4 s, compared with 31.8 s for HDiffPatch and 253 s for xdelta3.
+* **HDiffPatch remains the strongest reference for application speed and compact patches on large scattered changes.** Viper's 500 MB scattered patch is 1.616 MiB and applies in 1.55–2.30 s with automatic workers, while HDiffPatch produces a 380 KiB patch and applies it in 360 ms.
+* **Viper is competitive when most or all data must be replaced.** On the 500 MB unrelated case, Viper CLI applies in 390 ms, close to HDiffPatch at 367 ms and substantially faster than xdelta3 at 1.54 s.
+* **The CLI-only binaries avoid most of the hybrid launch overhead.** This is especially visible on 100 KB cases, where process startup represents a significant part of the total time.
+* **Automatic parallelism is workload-dependent.** It improves creation throughput and multi-file application, but the complete tuning matrix shows that one worker can apply the 500 MB scattered case faster than the 16-worker automatic configuration.
+* **Compression level 3 remains the most balanced default.** Level 9 produces almost no additional size reduction on the scattered datasets, while level 1 creates noticeably larger patches.
+
+### Scope and reproducibility
+
+These results use deterministic synthetic high-entropy inputs. They exercise scattered modifications, unrelated replacements, single-file workloads, and ordered multi-file workloads, but they do not replace measurements on real executables, archives, databases, or game assets.
+
+The complete benchmark tooling, raw repetitions, tuning matrix, executable hashes, hardware metadata, and exact commands are available under [`benchmarks/windows-x64`](benchmarks/windows-x64/).
 
 ## Documentation
 
